@@ -1,62 +1,42 @@
-import neo4j, {
-  Driver,
-  type ManagedTransaction,
-  type Node,
-  type Record as Neo4jRecord,
-  type RecordShape,
-  type Relationship,
-} from "neo4j-driver";
-import { createHash } from "node:crypto";
+import { planSchemaMigration } from "./schema-migrations.ts";
+import { EPISODE_SCHEMAS, SCHEMA_ID, isEpisodeSchema } from "@anamnesis/protocol";
+import neo4j, { Driver, type ManagedTransaction, type RecordShape } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
-import {
-  LINK_LATTICE,
-  MemoryElement,
-  MemoryLink,
-  RpcCommitParams,
-  SCHEMA_LABELS,
-  TIME_BEARING,
-  ExtractionAttempt, Generation, ModelTask, Coverage,
-  type MemoryElementInput,
-  type MemoryLinkInput,
-  type Celestial,
-  type KnownSchema,
-  type LinkRole,
-  type Origin,
-  type TimePoint,
-} from "@anamnesis/protocol";
-import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "../../protocol/src/rpc.ts";
+import { LINK_LATTICE, MemoryElement, MemoryLink, ExtractionAttempt, Generation, ModelTask, Coverage, type MemoryElementInput, type MemoryLinkInput, type LinkRole } from "@anamnesis/protocol";
+import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "@anamnesis/protocol";
 import { ObjectStore } from "./objects.ts";
-import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "../../protocol/src/episode-lineage.ts";
-import { SemanticClaimValidationError, SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "../../protocol/src/semantic-claim.ts";
-import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
+import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "@anamnesis/protocol";
+import { SemanticClaimValidationError, SemanticResolvedTime, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "@anamnesis/protocol";
+import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
 import { validateModelOutput, validateSourceSpans } from "./extraction.ts";
-import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from '../../protocol/src/extraction-audit.ts';
-import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "../../protocol/src/materialization.ts";
-import { ExtractionModelOutput } from '../../protocol/src/extraction.ts';
-import { HistoricalElement, historicalEligibility, type EligibilityReason } from "./legacy-format.ts";
+import { ExtractionClaimContext, ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from "@anamnesis/protocol";
+import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "@anamnesis/protocol";
+import { ExtractionModelOutput } from "@anamnesis/protocol";
+import { historicalEligibility, type EligibilityReason } from "./legacy-format.ts";
 import { z } from "zod";
-import { replayDynamics, type DynamicsEvent } from "./dynamics/state.ts";
 import { solvePpr } from "./dynamics/ppr.ts";
-
-import { ADOPTION_NUMERIC_VERSION } from "./dynamics/adoption-numeric.ts";
 import { attributeOutcome, normalizedRrf } from "./dynamics/ranking.ts";
 import { initialStability, retention } from "./dynamics/retention.ts";
-import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcRecallItem, RpcDreamAdmitParams, RpcDreamJob, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../protocol/src/rpc.ts";
+import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcRecallItem } from "@anamnesis/protocol";
 import { EmbeddingError, embeddingProfileId, validateVector, type EmbeddingProvider } from "./embedding.ts";
 import { admittedBudget, packRecall, canonicalContext, RecallError, type Tokenizers, type RecallBundle } from "./recall.ts";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
-import { DreamAdapterError, type DreamLeidenAdapter } from "./dream-leiden-adapter.ts";
+import { type ConductingArcRow, type ConductingArcProbe, type GraphEnvelope, GraphAccessError, type ConductingPartition, type PhysicalConductor, type ConductingArcVerification, ConductingMaintenanceOptions, conductingPartition, arcIdentity, arcTuple, type TopologyRow, TOPOLOGY_QUERY, topologyExpectations } from "./store/conducting.ts";
+import { CONDUCTING_ROLES, SCHEMA_STATEMENTS, celestialOf, carriesTime, labelClause, toUtc } from "./store/schema.ts";
+import { semanticClaimTime, validatedFactTime, sha256, END_OF_TIME, CANONICAL_DIGEST, StorageContractError, canonicalJson, elementDigest, verifyLineageRetry, tupleHash, originKey, sessionKey, linkIdemKey } from "./store/digest.ts";
+import { luceneQuery, receiptTime, receiptHash, IssueReceiptInput, RecallReceipt, RecallTransportInput, RecallTransport, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit, ReceiptError } from "./store/receipts.ts";
+import { type InstallationContext, PolicyEvent, policySelector, policyBody, type PolicyState, requireInstallation } from "./store/policy.ts";
+import { type CacheEvidence, CACHE_EVIDENCE, cacheExpectations, cacheMatches } from "./store/hit-cache.ts";
+import { type ElementProperties, type ElementNode, type LinkRelationship, type QueryParameters, type ElementWriteOptions, recordsToObjects, nodeProps, relProps, StoredHash, decodeHistoricalElement, toElement } from "./store/records.ts";
+export { type ConductingArcRow, type ConductingArcProbe, type GraphEnvelope, type ConductingArcVerification } from "./store/conducting.ts";
+export { luceneQuery, IssueReceiptInput, RecallReceipt, RecallTransportInput, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit } from "./store/receipts.ts";
+export { type InstallationContext } from "./store/policy.ts";
 
 /** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
 const LeaseModelTaskWithProvider = LeaseModelTask.extend({ provider: z.strictObject({ model: ModelTask.shape.model, model_incarnation: ModelTask.shape.model_incarnation }).optional() });
 
-export type ConductingArcRow = {
-  source_id: string; link_id: string; peer_id: string; role: string;
-  generation: number | null; source_extraction_generation: number | null;
-};
-export type ConductingArcProbe = { source_id: string; count: number; saturated: boolean; coverage: "complete" };
 export type AuthoritySnapshot = {
   members: string[];
   retained_generations: number[];
@@ -65,17 +45,9 @@ export type AuthoritySnapshot = {
   invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
   source_hashes: string[];
 };
-export class AuthoritySnapshotError extends Error {
+class AuthoritySnapshotError extends Error {
   constructor(readonly code: "authority_snapshot_unavailable" | "authority_snapshot_limit_exceeded", detail: string = code) { super(`${code}: ${detail}`); }
 }
-export type GraphEnvelope = { nodes: string[]; arcs: ConductingArcRow[]; truncated: boolean; probes: ConductingArcProbe[];
-  pin: { policy_revision: number; generation_id: string; coverage_revision: number; covered_ingest_seq: number; T: number };
-  overflow: { nodes: number; arcs: number; saturated_sources: number } };
-export class GraphAccessError extends Error {
-  readonly code: "degree_probe_unavailable" | "ordered_probe_unavailable";
-  constructor(readonly reason: "degree_probe_unavailable" | "ordered_probe_unavailable") { super(reason); this.code = reason; this.name = "GraphAccessError"; }
-}
-
 export class GenerationReadinessError extends Error {
   constructor(readonly code: "coverage_unavailable" | "coverage_incomplete" | "generation_work_in_flight" | "generation_watermark_unavailable"
     | "selector_unavailable" | "selector_conflict" | "selector_version_conflict" | "selector_version_exhausted"
@@ -97,7 +69,6 @@ export interface StoreOptions {
   tokenizers?: Tokenizers;
   recallDefaultBytes?: number;
   /** Trusted runtime injection only; never loaded from an RPC or arbitrary command. */
-  dreamLeidenAdapter?: DreamLeidenAdapter;
   /** True when the extraction provider answers `judge_relations`: validated claims
    * then wait for Fact->Fact verdicts before any Fact of their source is written (D53). */
   relationJudge?: boolean;
@@ -127,504 +98,9 @@ export interface IntegrityIssue {
   reasons?: EligibilityReason[];
 }
 
-type ElementProperties = Record<string, string | number | null>;
-type LinkProperties = Record<string, string | number>;
-type ElementNode = Node<number, ElementProperties>;
-type LinkRelationship = Relationship<number, LinkProperties>;
-type QueryParameter =
-  | string
-  | number
-  | boolean
-  | null
-  | Buffer
-  | string[]
-  | ReturnType<typeof neo4j.int>;
-type QueryParameters = Record<string, QueryParameter>;
-
-interface ElementWriteOptions {
-  payload?: Uint8Array;
-  payloadMediaType?: string;
-  sourceRevision?: string;
-  expectedPreviousRevisionKey?: string | null;
-  enqueue?: boolean;
-  previous?: string;
-  admission?: { metadata: unknown; context: InstallationContext };
-}
-
-const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
-const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
-type ConductingPartition = { stream: string; generation: number | string; state?: string };
-type PhysicalConductor = ConductingArcRow & { from: string; to: string; registry_source: number | null };
-export type ConductingArcVerification = {
-  ready: boolean; revision: number | null; truncated: boolean; physical_links: number; endpoint_rows: number;
-  partitions: ConductingPartition[]; issues: string[];
-};
-const ConductingMaintenanceOptions = z.strictObject({ maxItems: z.number().int().min(1).max(50000).default(10000) });
-function conductingPartition(role: string, generation: number | null): ConductingPartition {
-  return { stream: role === "NEXT_EPISODE" ? "cache" : role === "HAS_MEMBER" ? "community" : "extraction", generation: generation ?? 0 };
-}
-function arcIdentity(row: ConductingArcRow): string { return JSON.stringify([row.source_id, row.link_id]); }
-function arcTuple(row: ConductingArcRow): string {
-  return JSON.stringify([row.source_id, row.link_id, row.peer_id, row.role, row.generation, row.source_extraction_generation]);
-}
-
-/** Transient embedding failures keep an outbox entry queued this many times before it is quarantined as exhausted (#219). */
 const EMBEDDING_MAX_DEFERRALS = 8;
 /** Backoff before a deferred outbox entry is due again: 30 s doubling per deferral, capped at one hour. */
 const embeddingRetryDelay = (deferrals: number): number => Math.min(30_000 * 2 ** (deferrals - 1), 3_600_000);
-
-const SCHEMA_STATEMENTS = [
-  `CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (l:EchoLineage) REQUIRE l.episode_id IS UNIQUE`,
-  `CREATE CONSTRAINT embedding_attempt_id IF NOT EXISTS FOR (a:EmbeddingAttempt) REQUIRE a.operation_id IS UNIQUE`,
-  `CREATE CONSTRAINT embedding_vector_key IF NOT EXISTS FOR (v:EmbeddingVector) REQUIRE v.key IS UNIQUE`,
-  `CREATE CONSTRAINT embedding_profile_id IF NOT EXISTS FOR (p:EmbeddingProfile) REQUIRE p.id IS UNIQUE`,
-  `CREATE CONSTRAINT policy_authority_key IF NOT EXISTS FOR (p:PolicyAuthority) REQUIRE p.key IS UNIQUE`,
-  `CREATE CONSTRAINT policy_event_revision IF NOT EXISTS FOR (p:PolicyEvent) REQUIRE p.revision IS UNIQUE`,
-  `CREATE CONSTRAINT policy_event_key IF NOT EXISTS FOR (p:PolicyEvent) REQUIRE p.key IS UNIQUE`,
-  `CREATE CONSTRAINT recall_receipt_id IF NOT EXISTS FOR (r:RecallReceipt) REQUIRE r.recall_id IS UNIQUE`,
-  `CREATE CONSTRAINT recall_transport_id IF NOT EXISTS FOR (r:RecallTransport) REQUIRE r.recall_id IS UNIQUE`,
-  `CREATE CONSTRAINT receipt_operation_id IF NOT EXISTS FOR (r:RecallFeedback) REQUIRE r.operation_id IS UNIQUE`,
-  `CREATE CONSTRAINT recall_outcome_id IF NOT EXISTS FOR (r:RecallOutcome) REQUIRE r.recall_id IS UNIQUE`,
-  `CREATE CONSTRAINT hit_id IF NOT EXISTS FOR (h:Hit) REQUIRE h.id IS UNIQUE`,
-  `CREATE CONSTRAINT hit_idem_key IF NOT EXISTS FOR (h:Hit) REQUIRE h.idem_key IS UNIQUE`,
-  `CREATE CONSTRAINT hit_cache_episode IF NOT EXISTS FOR (c:HitCache) REQUIRE c.episode_id IS UNIQUE`,
-  `CREATE INDEX receipt_expiry IF NOT EXISTS FOR (r:RecallReceipt) ON (r.expires_at)`,
-  `CREATE INDEX hit_replay IF NOT EXISTS FOR (h:Hit) ON (h.episode_id, h.t, h.id)`,
-  `CREATE CONSTRAINT conducting_arc_source_link IF NOT EXISTS FOR (a:ConductingArc) REQUIRE (a.source_id, a.link_id) IS UNIQUE`,
-  `CREATE CONSTRAINT graph_next_episode_id IF NOT EXISTS FOR ()-[l:NEXT_EPISODE]-() REQUIRE l.id IS UNIQUE`,
-  ...CONDUCTING_ROLES.filter(role => role !== "NEXT_EPISODE").map(role =>
-    `CREATE CONSTRAINT graph_${role.toLowerCase()}_id IF NOT EXISTS FOR ()-[l:${role}]-() REQUIRE l.id IS UNIQUE`),
-  `CREATE CONSTRAINT conducting_arc_coverage IF NOT EXISTS FOR (c:ConductingArcCoverage) REQUIRE (c.stream,c.generation) IS UNIQUE`,
-  `CREATE INDEX conducting_arc_link IF NOT EXISTS FOR (a:ConductingArc) ON (a.link_id)`,
-  `CREATE INDEX hub_arc_link IF NOT EXISTS FOR (a:HubArc) ON (a.link_id)`,
-  `CREATE CONSTRAINT conducting_generation_partition IF NOT EXISTS FOR (g:Generation) REQUIRE (g.stream,g.generation) IS UNIQUE`,
-
-  `CREATE CONSTRAINT element_id IF NOT EXISTS
-   FOR (e:Element) REQUIRE e.id IS UNIQUE`,
-
-  ...LINK_ROLES.map(
-    (role) => `CREATE CONSTRAINT link_idem_${role.toLowerCase()} IF NOT EXISTS
-   FOR ()-[l:${role}]-() REQUIRE l.idem_key IS UNIQUE`,
-  ),
-  `CREATE CONSTRAINT episode_revision IF NOT EXISTS
-   FOR (e:Episode) REQUIRE e.revision_key IS UNIQUE`,
-  `CREATE CONSTRAINT episode_ingest_seq IF NOT EXISTS
-   FOR (e:Episode) REQUIRE e.ingest_seq IS UNIQUE`,
-  `CREATE CONSTRAINT origin_head_key IF NOT EXISTS
-   FOR (h:OriginHead) REQUIRE h.origin_key IS UNIQUE`,
-  `CREATE CONSTRAINT payload_hash IF NOT EXISTS
-   FOR (p:Payload) REQUIRE p.hash IS UNIQUE`,
-  // Without it, remembers racing on a cold database each MERGE their own Meta
-  // node and hand out the same ingest_seq.
-  `CREATE CONSTRAINT meta_key IF NOT EXISTS
-   FOR (m:Meta) REQUIRE m.key IS UNIQUE`,
-  `CREATE INDEX episode_origin IF NOT EXISTS
-   FOR (e:Episode) ON (e.origin_key)`,
-  `CREATE INDEX episode_session_order IF NOT EXISTS
-   FOR (e:Episode) ON (e.session_key, e.time_utc, e.ingest_seq)`,
-  `CREATE INDEX element_time IF NOT EXISTS
-   FOR (e:Element) ON (e.time_utc)`,
-  `CREATE INDEX element_schema IF NOT EXISTS
-   FOR (e:Element) ON (e.schema)`,
-  `CREATE INDEX outbox_pending IF NOT EXISTS
-   FOR (o:Outbox) ON (o.processed_at)`,
-  // valid(T) seeks invalidators by target instead of expanding adjacency.
-  `CREATE CONSTRAINT extraction_generation_id IF NOT EXISTS FOR (g:ExtractionGeneration) REQUIRE g.id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_attempt_id IF NOT EXISTS FOR (a:ExtractionAttempt) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT model_task_id IF NOT EXISTS FOR (t:ModelTask) REQUIRE t.id IS UNIQUE`,
-  `CREATE CONSTRAINT model_task_work_key IF NOT EXISTS FOR (t:ModelTask) REQUIRE t.work_key IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_pipeline_id IF NOT EXISTS FOR (p:ExtractionPipeline) REQUIRE p.id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_pipeline_judge IF NOT EXISTS FOR (p:ExtractionPipeline) REQUIRE p.judge_task_id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_judge_input_id IF NOT EXISTS FOR (p:ExtractionJudgeInput) REQUIRE p.id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_disposition_key IF NOT EXISTS FOR (d:ExtractionDisposition) REQUIRE (d.judge_attempt_id,d.claim_index) IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_input_id IF NOT EXISTS FOR (a:AdjudicationInput) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_attempt_id IF NOT EXISTS FOR (a:AdjudicationAttempt) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_proposal_id IF NOT EXISTS FOR (a:AdjudicationProposal) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_review_id IF NOT EXISTS FOR (a:AdjudicationReview) REQUIRE a.review_id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_review_proposal IF NOT EXISTS FOR (a:AdjudicationReview) REQUIRE a.proposal_id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_consumption_id IF NOT EXISTS FOR (a:AdjudicationConsumption) REQUIRE a.proposal_id IS UNIQUE`,
-  `CREATE CONSTRAINT materialization_operation_id IF NOT EXISTS FOR (a:MaterializationOperation) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT materialization_occurrence IF NOT EXISTS FOR (a:MaterializationOperation) REQUIRE a.occurrence_key IS UNIQUE`,
-  `CREATE INDEX fact_generation_id IF NOT EXISTS FOR (f:Fact) ON (f.generation,f.id)`,
-  `CREATE INDEX entity_generation_key IF NOT EXISTS FOR (e:Entity) ON (e.generation,e.entity_key)`,
-  `CREATE CONSTRAINT extraction_coverage_key IF NOT EXISTS FOR (c:ExtractionCoverage) REQUIRE c.key IS UNIQUE`,
-  `CREATE INDEX invalidates_seek IF NOT EXISTS
-   FOR ()-[l:INVALIDATES]-() ON (l.target_id, l.effective_time_utc, l.id)`,
-
-  `CREATE FULLTEXT INDEX element_content IF NOT EXISTS
-   FOR (e:Element) ON EACH [e.content]
-   OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
-];
-
-/** Model-stated claim time becomes an explicit resolved time. Coarse precisions
- * are truncated to the UTC interval start; second/minute stay instants. */
-function semanticClaimTime(time: { value: string; precision: "second" | "minute" | "day" | "month" | "year" }) {
-  const d = new Date(time.value);
-  const precision = time.precision === "second" || time.precision === "minute" ? "instant" as const : time.precision;
-  if (precision !== "instant") {
-    d.setUTCHours(0, 0, 0, 0);
-    if (precision !== "day") d.setUTCDate(1);
-    if (precision === "year") d.setUTCMonth(0);
-  }
-  return { time_value: time.value, time_utc: d.getTime(), time_precision: precision, resolution: "explicit" as const, anchor_time_utc: null };
-}
-
-/** The TimePoint a validated claim is stored under; an inherited time keeps the
- * Episode's precision. The relation judge sees exactly this time. */
-function validatedFactTime(validated: ValidatedSemanticClaim, source: SemanticReviewPremises["source"]): TimePoint {
-  const claim = validated.claim;
-  const precision = claim.time.resolution === "inherited" ? source.time.time_precision : claim.time.time_precision;
-  return { value: new Date(claim.time.time_utc).toISOString(), precision: precision === "instant" || precision === "inherited" ? "second" : precision };
-}
-
-function sha256(data: Uint8Array | string): string {
-  return createHash("sha256").update(data).digest("hex");
-}
-
-/** Used when no snapshot cutoff is given, so every invalidator applies. */
-const END_OF_TIME = "9999-12-31T23:59:59.999Z";
-
-const CANONICAL_DIGEST = "rfc8785-v1";
-
-interface TopologyRow {
-  id: string;
-  sessionKey: string;
-  record: string;
-  previousRecord: string | null;
-  timeUtc: string;
-  ingestSeq: number;
-  version: number | null;
-  actual: ({ from: string; key: string | null } | null)[];
-}
-
-const TOPOLOGY_QUERY = `MATCH (e:Element:Episode)
-  OPTIONAL MATCH (p)-[l:NEXT_EPISODE]->(e)
-  RETURN e.id AS id, e.session_key AS sessionKey, e.origin_record AS record,
-    e.topology_previous_record AS previousRecord, e.ingest_seq AS ingestSeq,
-    e.topology_version AS version, e.time_utc AS timeUtc,
-    collect(CASE WHEN l IS NULL THEN null ELSE {from: p.id, key: l.idem_key} END) AS actual
-  ORDER BY sessionKey, timeUtc, ingestSeq`;
-
-/** Derive expectations independently of the cache, retaining explicit-parent
- * semantics as observed at admission (later source revisions are not parents).
- */
-function topologyExpectations(rows: TopologyRow[]): (TopologyRow & { parents: string[] })[] {
-  const records = new Map<string, TopologyRow[]>();
-  for (const row of rows) {
-    const key = JSON.stringify([row.sessionKey, row.record]);
-    const bucket = records.get(key) ?? [];
-    bucket.push(row);
-    records.set(key, bucket);
-  }
-  const previousBySession = new Map<string, string>();
-  return rows.map((row) => {
-    const previous = previousBySession.get(row.sessionKey);
-    const parents = row.previousRecord === null
-      ? previous === undefined ? [] : [previous]
-      : (records.get(JSON.stringify([row.sessionKey, row.previousRecord])) ?? [])
-        .filter((parent) => parent.ingestSeq < row.ingestSeq).map((parent) => parent.id);
-    previousBySession.set(row.sessionKey, row.id);
-    return { ...row, parents };
-  });
-}
-
-class StorageContractError extends Error {
-  constructor(readonly code: "revision_conflict" | "stale_revision"
-    | "unsupported_digest_format" | "invalid_canonical_json" | "unsupported_topology_format",
-    readonly detail: string) {
-    super(`${code}: ${detail}`);
-  }
-}
-
-/** RFC 8785: UTF-16 key order, ECMAScript primitives, no lone surrogates.
- * Serialize members directly: JSON.stringify(object) reorders integer keys.
- * Values have already crossed the protocol's JSON-only boundary.
- */
-function canonicalJson(value: MemoryElement["properties"][string]): string {
-  if (typeof value === "string" && /[\uD800-\uDFFF]/u.test(value)) {
-    throw new StorageContractError("invalid_canonical_json", "lone surrogate");
-  }
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-    .map(([key, member]) => `${canonicalJson(key)}:${canonicalJson(member)}`).join(",")}}`;
-}
-
-interface DigestContext {
-  payloadHash?: string | null;
-  previousRevisionKey?: string | null;
-  format?: string | number | null;
-  episodeDigestVersion?: number | null;
-  originRole?: string | null;
-  lineageDigest?: string | null;
-}
-
-export function elementDigest(
-  e: {
-    schema: string;
-    time?: TimePoint | undefined;
-    content: string;
-    properties?: MemoryElement["properties"] | undefined;
-  },
-  context: DigestContext = {},
-): string {
-  const body = {
-      schema: e.schema,
-      content: e.content,
-      properties: Object.fromEntries(
-        Object.entries(e.properties ?? {}).filter(
-          ([key]) => key !== "payload_hash",
-        ),
-      ),
-      time: carriesTime(e.schema) ? e.time ?? null : null,
-      payload_hash: context.payloadHash ?? null,
-      previous_revision_key: context.previousRevisionKey ?? null,
-    };
-  if (context.episodeDigestVersion != null) {
-    if (context.episodeDigestVersion !== 2 || context.format !== "episode-rfc8785-v2")
-      throw new EpisodeLineageError("unsupported_digest_version");
-    return sha256(canonicalJson({ episode_digest_version: 2, ...body,
-      origin_role: context.originRole ?? null, lineage_digest: context.lineageDigest ?? null }));
-  }
-  // Absent stored markers mean frozen insertion-ordered legacy bytes, never
-  // an invitation to migrate or sort a previously admitted original.
-  switch (context.format) {
-    case null: return sha256(JSON.stringify(body));
-    case undefined:
-    case CANONICAL_DIGEST: return sha256(canonicalJson(body));
-    default: throw new StorageContractError("unsupported_digest_format", String(context.format));
-  }
-}
-
-export function verifyLineageRetry(input: unknown, role: string | null, lineage: EchoLineage): void {
-  const metadata = parseEpisodeLineage(input);
-  if (metadata.origin_role !== role || metadata.lineage_mode !== lineage.lineage_mode
-    || canonicalExtractionBody(metadata.parent_recall_ids) !== canonicalExtractionBody(lineage.parent_recall_ids))
-    throw new StorageContractError("revision_conflict", lineage.episode_id);
-}
-
-function tupleHash(parts: readonly string[]): string {
-  return sha256(JSON.stringify(parts));
-}
-
-function originKey(o: Origin): string {
-  return tupleHash([o.source, o.session, o.actor, o.record]);
-}
-
-function sessionKey(o: Origin): string {
-  return tupleHash([o.source, o.session]);
-}
-
-/** Originals-layer links are content-free keys; derived links bind content. */
-function linkIdemKey(
-  l: {
-    from: string;
-    to: string;
-    role: string;
-    content: string;
-  },
-  originals: boolean,
-): string {
-  return sha256(
-    JSON.stringify(
-      originals
-        ? [l.from, l.to, l.role]
-        : [l.from, l.to, l.role, l.content],
-    ),
-  );
-}
-
-function celestialOf(schema: string): Celestial | null {
-  return SCHEMA_LABELS[schema as KnownSchema] ?? null;
-}
-
-/** Only Episode and Fact carry an event time (docs/03 §1). */
-function carriesTime(schema: string): boolean {
-  const c = celestialOf(schema);
-  return c !== null && TIME_BEARING[c];
-}
-
-function labelClause(schema: string): string {
-  const c = celestialOf(schema);
-  return c ? `Element:${c}` : "Element";
-}
-
-function toUtc(isoWithOffset: string): string {
-  return new Date(isoWithOffset).toISOString();
-}
-
-export function luceneQuery(raw: string): string {
-  return raw
-    .replace(/[+\-&|!(){}\[\]^"~*?:\\\/]/g, " ")
-    .split(/\s/)
-    .filter(Boolean)
-    .join(" ");
-}
-
-const receiptTime = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const receiptHash = z.string().regex(/^[0-9a-f]{64}$/);
-const receiptIds = z.array(z.uuidv7()).max(64).refine((ids) => new Set(ids).size === ids.length, "IDs must be distinct");
-export const IssueReceiptInput = z.strictObject({
-  recall_id: z.uuidv7(),
-  /** Ordered, already selected Episodes. No ranking or client source claims. */
-  primary_ids: receiptIds,
-  receipt_ttl_ms: receiptTime.positive().default(3_600_000),
-});
-export type IssueReceiptInput = z.input<typeof IssueReceiptInput>;
-const receiptPrimary = z.strictObject({ id: z.uuidv7(), rank: receiptTime, sources: z.array(z.uuidv7()).min(1).max(16) });
-export const RecallReceipt = z.strictObject({
-  recall_id: z.uuidv7(), format: z.literal("episode-selection-v1"),
-  principal: z.literal("installation"),
-  // Legacy receipts predate auto exposure and cannot authorize it.
-  commit_mode: z.enum(["auto", "receipt"]).default("receipt"),
-  primary_ids: receiptIds, primaries: z.array(receiptPrimary).max(64),
-  receipt_ttl_ms: receiptTime.positive(), created_at: receiptTime, expires_at: receiptTime,
-  structure_revision: receiptTime.nullable(), policy_revision: receiptTime.nullable(),
-  config_version: z.literal("g003-dynamics-v1"),
-  body_digest: receiptHash, selection_digest: receiptHash,
-  client_binding: z.uuid().optional(),
-  lineage_selection: RecallLineageSelection.optional(),
-  serving: z.strictObject({ response: RpcRecallResult, context_digest: receiptHash, result_digest: receiptHash, query: z.string().max(8192),
-    query_vector: z.array(z.number().finite()).max(4096).nullable(),
-    candidates: z.array(z.strictObject({ id: z.uuidv7(), score: z.number(), relevance: z.number(), mass: z.number(), utility: z.number() })).max(177),
-  }).optional(),
-});
-export type RecallReceipt = z.infer<typeof RecallReceipt>;
-/** Server-only observations, never client feedback or proof of consumption.
- * A missing record (including a crash before its append) remains unknown. */
-export const RecallTransportInput = z.strictObject({
-  recall_id: z.uuidv7(), state: z.enum(["local_complete", "delivery_unknown"]),
-});
-export type RecallTransportInput = z.infer<typeof RecallTransportInput>;
-const RecallTransport = RecallTransportInput.extend({
-  created_at: receiptTime, principal: z.literal("installation"),
-  commit_mode: z.enum(["auto", "receipt"]), boundary: z.literal("node-write-callback-v1"),
-});
-export const CommitReceiptInput = RpcCommitParams;
-export type CommitReceiptInput = RpcCommitParams;
-export interface CommitReceiptResult {
-  operation_id: string; recall_id: string; adopted: string[]; reward: number | null; applied: boolean;
-}
-export type ReceiptStatus = { state: "unknown"; operation_id: string } | {
-  state: "committed"; operation_id: string; body_digest: string; created_at: number; result: CommitReceiptResult;
-};
-export interface HitCacheIssue { code: "hit_cache_mismatch" | "invalid_hit_evidence"; id: string }
-export interface HitCacheVerification { state: "verified"; hits: number; issues: HitCacheIssue[] }
-export interface HitCacheRebuild { state: "rebuilt"; hits: number; created: number; removed: number }
-export interface HitCache {
-  episode_id: string; s: number; t_last_hit: number; hit_count: number;
-  utility_reward_sum: number; utility_weight: number; utility: number;
-  event_ids: string[]; config_version: "g003-dynamics-v1";
-  /** Missing on legacy native-transcendental caches; verify/rebuild detects it. */
-  numeric_version?: typeof ADOPTION_NUMERIC_VERSION;
-}
-const hitBase = {
-  id: z.uuidv7(), episode_id: z.uuidv7(), operation_id: z.uuidv7(), namespace: z.uuidv7(),
-  idem_key: receiptHash, t: receiptTime,
-  attribution: z.array(receiptPrimary).min(1).max(64), config_version: z.literal("g003-dynamics-v1"),
-};
-export const ReceiptHit = z.discriminatedUnion("kind", [
-  z.strictObject({ ...hitBase, kind: z.literal("exposure"), kappa_eff: z.literal(0) }),
-  z.strictObject({ ...hitBase, kind: z.literal("recall_hit"), kappa_eff: z.number().positive().max(1) }),
-  z.strictObject({ ...hitBase, kind: z.literal("outcome"), kappa_eff: z.literal(0), reward: z.number().min(-1).max(1), weight: z.number().positive().max(1) }),
-]);
-export type ReceiptHit = z.infer<typeof ReceiptHit>;
-export class ReceiptError extends Error {
-  constructor(readonly code: "unknown_recall" | "receipt_expired" | "idempotency_conflict" | "invalid_selection" | "invalid_hit_evidence" | "unsupported_policy"
-    | "policy_denied" | "policy_unavailable" | "unknown_policy" | "resource_exhausted" | "unauthenticated" | "commit_mode_mismatch", detail = code) {
-    super(`${code}: ${detail}`);
-  }
-}
-/** Internal transport context, never parsed from request params. The daemon sets
- * this only after validating the installation token; client labels confer nothing. */
-export interface InstallationContext { readonly principal: "installation"; readonly commit_mode: "auto" | "receipt"; readonly client_binding?: string }
-const PolicyEvent = RpcPolicySetParams.extend({
-  action: z.enum(["deny", "revoke"]), principal: z.literal("installation"),
-  revision: receiptTime.positive(), created_at: receiptTime,
-});
-type PolicyEvent = z.infer<typeof PolicyEvent>;
-function policySelector(selector: RpcPolicySetParams["selector"]): Record<string, string> {
-  return { ...(selector.episode_id === undefined ? {} : { episode_id: selector.episode_id }),
-    ...(selector.source === undefined ? {} : { source: selector.source }) };
-}
-function policyBody(value: RpcPolicySetParams | PolicyEvent): string {
-  return canonicalJson({ ...value, selector: policySelector(value.selector) });
-}
-type PolicyState = { structure_revision: number | null; policy_revision: number; denies: Map<string, PolicyEvent>; revoked: Set<string> };
-function requireInstallation(context: InstallationContext): void {
-  if (context?.principal !== "installation") throw new ReceiptError("unauthenticated");
-}
-type CacheEvidence = {
-  episodes: { id: string; mass: number; ingested_at: number }[];
-  hits: { props: Record<string, unknown>; targets: string[] }[];
-  caches: { props: HitCache; targets: string[] }[];
-};
-/** One statement observes ledger, originals and cache together. No write locks or
- * repairs in verification. The writer path already holds the Meta fence lock. */
-const CACHE_EVIDENCE = `
-  CALL () { MATCH (e:Element:Episode) WHERE $ids IS NULL OR e.id IN $ids
-    RETURN collect({id:e.id, mass:e.mass, ingested_at:e.ingested_at}) AS episodes }
-  CALL () { MATCH (h:Hit) WHERE $ids IS NULL OR h.episode_id IN $ids
-    OPTIONAL MATCH (h)-[:HIT_OF]->(target)
-    WITH h, collect(coalesce(target.id, 'invalid-target')) AS targets
-    RETURN collect({props:properties(h), targets:targets}) AS hits }
-  CALL () { MATCH (c:HitCache) WHERE $ids IS NULL OR c.episode_id IN $ids
-    OPTIONAL MATCH (c)-[:CACHE_OF]->(target)
-    WITH c, collect(coalesce(target.id, 'invalid-target')) AS targets
-    RETURN collect({props:properties(c), targets:targets}) AS caches }
-  RETURN episodes, hits, caches`;
-
-function cacheExpectations(evidence: CacheEvidence): { expected: HitCache[]; issues: HitCacheIssue[] } {
-  const issues: HitCacheIssue[] = [];
-  const events = new Map<string, DynamicsEvent[]>();
-  const ids = new Set<string>();
-  const keys = new Set<string>();
-  for (const row of evidence.hits) {
-    let decoded: unknown = null;
-    try { decoded = typeof row.props["body"] === "string" ? JSON.parse(row.props["body"]) : null; }
-    catch (error) {
-      if (!(error instanceof SyntaxError)) throw error;
-      issues.push({ code: "invalid_hit_evidence", id: String(row.props["id"]) });
-      continue;
-    }
-    const parsed = ReceiptHit.safeParse(decoded);
-    const hit = parsed.success ? parsed.data : null;
-    const body = hit ? canonicalJson(hit) : "";
-    if (!hit || row.props["body"] !== body || row.props["body_digest"] !== sha256(body)
-      || Object.entries(hit).some(([key, value]) => key !== "attribution" && row.props[key] !== value)
-      || row.props["attribution"] !== canonicalJson(hit.attribution)
-      || row.targets.length !== 1 || row.targets[0] !== hit.episode_id
-      || !evidence.episodes.some((e) => e.id === hit.episode_id)
-      || hit.idem_key !== tupleHash([hit.namespace, hit.episode_id, hit.kind])
-      || ids.has(hit.id) || keys.has(hit.idem_key)) {
-      issues.push({ code: "invalid_hit_evidence", id: String(row.props["id"]) });
-      continue;
-    }
-    ids.add(hit.id); keys.add(hit.idem_key);
-    const bucket = events.get(hit.episode_id) ?? [];
-    bucket.push(hit.kind === "recall_hit"
-      ? { id: hit.id, at: hit.t, kind: hit.kind, kappa: hit.kappa_eff }
-      : hit.kind === "outcome" ? { id: hit.id, at: hit.t, kind: hit.kind, reward: hit.reward, weight: hit.weight }
-      : { id: hit.id, at: hit.t, kind: hit.kind });
-    events.set(hit.episode_id, bucket);
-  }
-  const expected: HitCache[] = [];
-  for (const episode of evidence.episodes) {
-    if (!events.has(episode.id) && !evidence.caches.some((row) => row.props.episode_id === episode.id)) continue;
-    const history = events.get(episode.id) ?? [];
-    const state = replayDynamics({ initialMass: episode.mass, ingestedAt: episode.ingested_at, priorRewardSum: 0, priorWeight: 0 }, history);
-    const ordered = [...history].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    const sum = ordered.reduce((total, event) => total + (event.kind === "outcome" ? event.weight * event.reward : 0), 0);
-    expected.push({ episode_id: episode.id, s: state.stability, t_last_hit: state.lastHit,
-      hit_count: state.hitCount, utility_reward_sum: sum, utility_weight: state.weight,
-      utility: state.utility, event_ids: state.eventIds, config_version: "g003-dynamics-v1", numeric_version: ADOPTION_NUMERIC_VERSION });
-  }
-  return { expected, issues };
-}
-function cacheMatches(row: CacheEvidence["caches"][number] | undefined, expected: HitCache): boolean {
-  return !!row && row.targets.length === 1 && row.targets[0] === expected.episode_id
-    && canonicalJson({ ...row.props }) === canonicalJson({ ...expected });
-}
 
 export class Store {
   private readonly driver: Driver;
@@ -635,7 +111,6 @@ export class Store {
   private readonly embeddingProvider: EmbeddingProvider | undefined;
   private readonly tokenizers: Tokenizers;
   private readonly recallDefaultBytes: number;
-  private readonly dreamLeidenAdapter: DreamLeidenAdapter | undefined;
   private readonly relationJudge: boolean;
 
   constructor(opts: StoreOptions, driver?: Driver) {
@@ -644,7 +119,6 @@ export class Store {
     this.embeddingProvider = opts.embeddingProvider;
     this.tokenizers = opts.tokenizers ?? new Map();
     this.recallDefaultBytes = z.number().int().min(0).max(1024 * 1024).parse(opts.recallDefaultBytes ?? 65536);
-    this.dreamLeidenAdapter = opts.dreamLeidenAdapter;
     this.driver =
       driver ??
       neo4j.driver(opts.uri, neo4j.auth.basic(opts.user, opts.password), {
@@ -693,15 +167,18 @@ export class Store {
     }
     await this.run(`CALL db.awaitIndexes(60)`);
     await this.withWriteTx(async (tx) => {
-      const state = await tx.run<{ revision: number | null; format: string | null; events: number; legacy: number; elements: number }>(
+      const state = await tx.run<{ revision: number | null; format: string | null; events: number; legacy: number; elements: number; schema_version: number | null }>(
         `MERGE (m:Meta {key:'meta'}) ON CREATE SET m.ingest_seq=0, m.conducting_arc_ready=false
          SET m.ingest_seq=m.ingest_seq
          WITH m OPTIONAL MATCH (p:PolicyAuthority {key:'installation'})
          CALL () { MATCH (e:PolicyEvent) RETURN count(e) AS events }
          CALL () { MATCH (e:Element {schema:'anamnesis.memory-policy/1'}) RETURN count(e) AS legacy }
          CALL () { MATCH (e:Element) RETURN count(e) AS elements }
-         RETURN m.policy_revision AS revision,p.format AS format,events,legacy,elements`);
+         RETURN m.policy_revision AS revision,p.format AS format,events,legacy,elements,m.schema_version AS schema_version`);
       const row = state.records[0]!;
+      const migration = planSchemaMigration(row.get("schema_version"), row.get("elements") > 0);
+      for (const step of migration.steps) for (const statement of step.statements) await tx.run(statement);
+      if (row.get("schema_version") !== migration.target) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.schema_version=toInteger($version)`, { version: migration.target });
       // Only a genuinely policy-empty database may bootstrap revision zero.
       // Missing/incompatible authority never overwrites an existing revision.
       const preserveLegacy = row.get("elements") > 0 && row.get("revision") === null && row.get("format") === null && row.get("events") === 0 && row.get("legacy") === 0;
@@ -866,7 +343,7 @@ export class Store {
       ? { episode_digest_version: 2, origin_role: parseEpisodeLineage({ origin_role: p["origin_role"], lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids }).origin_role,
         lineage, lineage_digest: String(p["lineage_digest"]) }
       : { episode_digest_version: 1, origin_role: null, lineage: null, lineage_digest: null };
-    return { id: sourceId, schema: z.enum(["anamnesis.original-message/1", "anamnesis.original-document/1"]).parse(element.schema),
+    return { id: sourceId, schema: z.enum(EPISODE_SCHEMAS).parse(element.schema),
       revision_key: receiptHash.parse(p["revision_key"]), content_digest: sha256(element.content), content: element.content,
       ingest_seq: receiptTime.positive().parse(p["ingest_seq"]), time,
       speaker: { origin_source: element.origin.source, origin_actor: element.origin.actor }, provenance };
@@ -917,7 +394,7 @@ export class Store {
       `MATCH (e:Element:Episode) WHERE e.id IN $ids RETURN e.id AS id,e.origin_source AS source,e.schema AS schema`, { ids });
     if (rows.records.length !== ids.length) throw new ReceiptError("invalid_selection");
     for (const row of rows.records) {
-      if (!["anamnesis.original-message/1", "anamnesis.original-document/1"].includes(row.get("schema"))) throw new ReceiptError("invalid_selection");
+      if (!isEpisodeSchema(row.get("schema"))) throw new ReceiptError("invalid_selection");
       for (const deny of policy.denies.values()) {
         if (policy.revoked.has(deny.policy_id)) continue;
         if ((deny.selector.episode_id === undefined || deny.selector.episode_id === row.get("id"))
@@ -1925,7 +1402,7 @@ export class Store {
         const e = result.records[0];
         // Derived source/witness authority is not yet materialized by this
         // runtime. Unknown/derived nodes must not inherit Episode permission.
-        if (!e || !["anamnesis.original-message/1","anamnesis.original-document/1"].includes(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
+        if (!e || !isEpisodeSchema(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
         return ![...policy.denies.values()].some(deny => !policy.revoked.has(deny.policy_id)
           && (deny.selector.episode_id === undefined || deny.selector.episode_id === id)
           && (deny.selector.source === undefined || deny.selector.source === e.get("source")));
@@ -2154,7 +1631,7 @@ export class Store {
       if (entity.status === "unresolved") continue;
       const rows = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.generation AS generation`, { id: entity.entity_id });
       if (entity.status === "existing") {
-        if (rows.records[0]?.get("schema") !== "anamnesis.entity/1" || rows.records[0]?.get("generation") !== premises.request.generation_id) throw new Error("semantic_entity_stale");
+        if (rows.records[0]?.get("schema") !== SCHEMA_ID.ENTITY || rows.records[0]?.get("generation") !== premises.request.generation_id) throw new Error("semantic_entity_stale");
       } else {
         const keys = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id LIMIT 1`, { generation: premises.request.generation_id, key: entity.entity_key });
         if (rows.records.length || keys.records.length) throw new Error("semantic_entity_stale");
@@ -2297,7 +1774,7 @@ export class Store {
     const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated, relations } = input;
     const claim = validated.claim, { fact_id, link_id } = allocated;
     const inherited = claim.time.resolution === "inherited";
-    const element = MemoryElement.parse({ id: fact_id, schema: "anamnesis.claim/1", content: claim.content, time: validatedFactTime(validated, source),
+    const element = MemoryElement.parse({ id: fact_id, schema: SCHEMA_ID.CLAIM, content: claim.content, time: validatedFactTime(validated, source),
       origin: { source: "semantic-extraction", session: generation, actor: profile, record: occurrence },
       mass: claim.confidence, properties: { ...validated.identity.properties, sub_kind: claim.sub_kind, modality: claim.modality,
         confidence: claim.confidence, content_language: claim.content_language, semantic_time: claim.time,
@@ -2317,7 +1794,7 @@ export class Store {
     const createdEntities = new Set<string>();
     for (const entity of resolution.entity_resolutions) {
       if (entity.status !== "new" || !validated.identity.entity_ids.includes(entity.entity_id) || createdEntities.has(entity.entity_id)) continue;
-      await this.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: "anamnesis.entity/1", content: entity.normalized_name,
+      await this.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: SCHEMA_ID.ENTITY, content: entity.normalized_name,
         origin: { source: "semantic-extraction", session: generation, actor: profile, record: entity.entity_key },
         properties: { normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: entity.entity_key } }), null, {});
       await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entity.entity_id, generation, key: entity.entity_key });
@@ -2355,7 +1832,7 @@ export class Store {
       const denies = [...policy.denies.values()].filter(deny => !policy.revoked.has(deny.policy_id));
       // AND semantics stay identical to feedback authority, including policies
       // that specify both source and Episode ID.
-      const parameters = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: ["anamnesis.original-message/1", "anamnesis.original-document/1"] };
+      const parameters = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: [...EPISODE_SCHEMAS] };
       const allowed = `e.schema IN $schemas AND e.time_utc <= $T
         AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
         AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL }`;
@@ -2430,7 +1907,7 @@ export class Store {
           try { await this.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
           catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") return null; throw error; }
           const fact = toElement(nodeProps(node)), ppr = pprScores.get(id) ?? 0;
-          const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: "anamnesis.claim/1", epistemic: "derived",
+          const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: SCHEMA_ID.CLAIM, epistemic: "derived",
             content: fact.content, time: fact.time!, mass: Math.max(0, Math.min(1, ppr || fact.mass)), utility: 0,
             relevance: Math.max(0, ppr), score: Math.max(0, ppr || fact.mass), sources: [z.uuidv7().parse(sourceId)],
             provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
@@ -3615,75 +3092,6 @@ export class Store {
     });
   }
 
-  async admitDream(input: RpcDreamAdmitParams, context: InstallationContext): Promise<RpcDreamJob> {
-    requireInstallation(context);
-    const request = RpcDreamAdmitParams.parse(input);
-    return this.extractionTx(context, async (tx, policy) => {
-      if (policy.policy_revision !== request.policy_revision) throw new Error("dream_fence_stale");
-      const meta = await tx.run(`MATCH (m:Meta {key:'meta'}) RETURN m.structure_revision AS structure,m.policy_revision AS policy,m.ingest_seq AS ingest`);
-      const m = meta.records[0];
-      if ((m?.get("structure") ?? 0) !== request.structure_revision || (m?.get("ingest") ?? 0) < request.covered_ingest_seq) throw new Error("dream_fence_stale");
-      await this.authorizeEpisodesTx(tx, request.source_ids, policy);
-      const rows = await tx.run(`MATCH (e:Element:Episode) WHERE e.id IN $ids RETURN e.id AS id,e.revision_key AS revision,e.content AS content,e.ingest_seq AS seq`, { ids: request.source_ids });
-      if (rows.records.length !== request.source_ids.length) throw new Error("dream_source_missing");
-      const receipts = rows.records.map(r => ({ id:r.get("id"), revision:r.get("revision"), body_digest:sha256(Buffer.from(r.get("content"), "utf8")), ingest_seq:r.get("seq"), allowed:true }));
-      const body = canonicalExtractionBody({ ...request, source_receipts: receipts });
-      const jobId = `dream-${sha256(Buffer.from(body))}`;
-      const old = await tx.run<{ body:string }>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`, {id:jobId});
-      if (old.records[0]) return RpcDreamJob.parse(JSON.parse(old.records[0].get("body")));
-      const job = RpcDreamJob.parse({ ...request, job_id:jobId, source_receipts:receipts, state:"queued", version:0, lease:null, semantic_writes:false, authority:"none" });
-      await tx.run(`CREATE (:DreamJob {id:$id,body:$body,state:'queued',version:0})`, {id:jobId,body:canonicalExtractionBody(job)});
-      return job;
-    });
-  }
-  async dreamStatus(id: string, context: InstallationContext): Promise<RpcDreamJob> {
-    requireInstallation(context);
-    return this.extractionTx(context, async tx => { const rows = await tx.run<{body:string}>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`,{id}); if (!rows.records[0]) throw new Error("dream_job_missing"); return RpcDreamJob.parse(JSON.parse(rows.records[0].get("body"))); });
-  }
-  async leaseDream(input: RpcDreamLeaseParams, context: InstallationContext): Promise<RpcDreamJob> { return this.mutateDream(input, context, false); }
-  async expireDream(input: RpcDreamExpireParams, context: InstallationContext): Promise<RpcDreamJob> { return this.mutateDream(input, context, true); }
-  async executeDream(input: RpcDreamExecuteParams, context: InstallationContext): Promise<RpcDreamJob> {
-    requireInstallation(context);
-    return this.extractionTx(context, async tx => {
-      const rows = await tx.run<{body:string}>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`, { id: input.job_id });
-      if (!rows.records[0]) throw new Error("dream_job_missing");
-      const job = RpcDreamJob.parse(JSON.parse(rows.records[0].get("body")));
-      if (job.version !== input.expected_version) throw new Error("dream_version_conflict");
-      if (job.state !== "queued") throw new Error("dream_not_queued");
-      const exportBytes = canonicalExtractionBody({ phase: job.phase, fence: { extraction_generation: job.extraction_generation, covered_ingest_seq: job.covered_ingest_seq, structure_revision: job.structure_revision, policy_revision: job.policy_revision }, source_receipts: job.source_receipts });
-      const exportDigest = sha256(Buffer.from(exportBytes));
-      const sourceIds = job.source_receipts.map(receipt => receipt.id);
-      const arcRows = await tx.run<{ from: string; to: string; weight: number }>(`MATCH (a:Element)-[l]->(b:Element)
-        WHERE a.id IN $ids AND b.id IN $ids AND type(l) IN ['MENTIONS','RELATES_TO']
-        RETURN a.id AS from,b.id AS to,toFloat(coalesce(l.weight,1.0)) AS weight ORDER BY from,to,l.id LIMIT 500000`, { ids: sourceIds });
-      const arcs = arcRows.records.map(row => ({ from: row.get('from'), to: row.get('to'), weight: row.get('weight') }));
-      const adapterInput = { operation_id: job.job_id, export_bytes: exportBytes, export_digest: exportDigest, source_receipts: job.source_receipts, graph: { node_count: sourceIds.length, arc_count: arcs.length, byte_count: Buffer.byteLength(exportBytes), nodes: sourceIds, arcs } };
-      try {
-        if (!this.dreamLeidenAdapter) throw new Error("dream_adapter_unavailable");
-        const result = await this.dreamLeidenAdapter.execute(adapterInput);
-        job.state = "succeeded"; job.version++;
-        (job as any).execution = { state: "succeeded", attempt: 1, result, retryable: false };
-        await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`, { id:job.job_id, body:canonicalExtractionBody(job), state:job.state, version:job.version });
-        return job;
-      } catch (error) {
-        if (!(error instanceof DreamAdapterError) && (error as Error).message !== "dream_adapter_unavailable") throw error;
-        job.state = "unknown"; job.version++;
-        (job as any).execution = { state: "unknown", attempt: 1, error: error instanceof Error ? error.message : "dream_adapter_unavailable", retryable: false };
-        await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`, { id:job.job_id, body:canonicalExtractionBody(job), state:job.state, version:job.version });
-        return job;
-      }
-    });
-  }
-  private async mutateDream(input: RpcDreamLeaseParams | RpcDreamExpireParams, context: InstallationContext, expire: boolean): Promise<RpcDreamJob> {
-    requireInstallation(context); return this.extractionTx(context, async tx => {
-      const rows = await tx.run<{body:string}>(`MATCH (j:DreamJob {id:$id}) RETURN j.body AS body`,{id:input.job_id}); if (!rows.records[0]) throw new Error("dream_job_missing");
-      const job = RpcDreamJob.parse(JSON.parse(rows.records[0].get("body"))); if (job.version !== input.expected_version) throw new Error("dream_version_conflict");
-      if (expire) { const request = input as RpcDreamExpireParams; if (job.state !== "leased" || !job.lease || job.lease.epoch !== request.lease_epoch) throw new Error("dream_lease_fenced"); job.state="queued"; job.lease=null; }
-      else { const request = input as RpcDreamLeaseParams; if (job.state !== "queued") throw new Error("dream_not_queued"); job.state="leased"; job.lease={worker_id:request.worker_id,epoch:`${job.job_id}:${job.version+1}`,expires_at:Date.now()+request.lease_ms}; }
-      job.version++; await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`,{id:job.job_id,body:canonicalExtractionBody(job),state:job.state,version:job.version}); return job;
-    });
-  }
-
   async close(): Promise<void> {
     await this.driver.close();
   }
@@ -3697,53 +3105,4 @@ export class Store {
     });
     return recordsToObjects(res.records);
   }
-}
-
-function recordsToObjects<Row extends RecordShape>(
-  records: Neo4jRecord<Row>[],
-): Row[] {
-  return records.map((record) => record.toObject());
-}
-
-function nodeProps(node: ElementNode): ElementProperties {
-  return node.properties;
-}
-
-function relProps(rel: LinkRelationship): LinkProperties {
-  return rel.properties;
-}
-
-const StoredHash = z.string().regex(/^[0-9a-f]{64}$/).nullable();
-const HistoricalStoredElement = HistoricalElement.extend({ id: z.uuidv7() });
-
-/** Frozen post167/pre194 structural read: semantic eligibility is reported
- * separately, not used to reject intact historical bytes. No serving bypass. */
-function decodeHistoricalElement(p: ElementProperties): MemoryElement {
-  return HistoricalStoredElement.parse({
-    id: p["id"], schema: p["schema"], content: p["content"], mass: p["mass"],
-    properties: typeof p["properties"] === "string" ? JSON.parse(p["properties"]) : undefined,
-    ...(p["time_value"] != null || p["time_precision"] != null
-      ? { time: { value: p["time_value"], precision: p["time_precision"] } } : {}),
-    origin: { source: p["origin_source"], session: p["origin_session"], actor: p["origin_actor"], record: p["origin_record"] },
-  });
-}
-
-function toElement(p: ElementProperties): MemoryElement {
-  return MemoryElement.parse({
-    id: p["id"],
-    schema: p["schema"],
-    ...(p["time_value"] ? { time: { value: p["time_value"], precision: p["time_precision"] } } : {}),
-    content: p["content"],
-    origin: {
-      source: p["origin_source"],
-      session: p["origin_session"],
-      actor: p["origin_actor"],
-      record: p["origin_record"],
-    },
-    mass: p["mass"],
-    properties: {
-      ...JSON.parse((p["properties"] as string) ?? "{}"),
-      ...(p["payload_hash"] ? { payload_hash: p["payload_hash"] } : {}),
-    },
-  });
 }

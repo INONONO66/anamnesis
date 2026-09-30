@@ -1,7 +1,8 @@
+import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult } from "@anamnesis/protocol";
 import { acquireInstallation, atomicJson, hasCode, syncDirectory } from "./config.ts";
 import { RpcClient } from "./client.ts";
 
@@ -148,7 +149,7 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
     try { checkpoint = parseCheckpoint(JSON.parse(await readFile(checkpointPath, "utf8"))); }
     catch (error) {
       if (!hasCode(error, "ENOENT")) throw error;
-      if (pending) throw new Error("source_checkpoint_missing");
+      if (pending) throw new Error("source_checkpoint_missing", { cause: error });
       checkpoint = { version: 1, source_hash: sourceHash, data_incarnation: status.data_incarnation, next: 0, last: null };
       await atomicJson(checkpointPath, checkpoint);
     }
@@ -170,7 +171,7 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
       const result = await client.request("ingest.status", work.identity);
       if (!daemonDisowns(result, work.identity)) return result;
       await retire();
-      console.log(JSON.stringify({ event: "pending_retired", reason: "daemon_unknown", index, identity: work.identity }));
+      logEvent("info", "pending_retired", { reason: "daemon_unknown", index, identity: work.identity });
       return null;
     };
     const resumeNext = checkpoint.next;
@@ -198,17 +199,17 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
       const result = resolved ?? await client.request("remember", pending.params);
       if (!sameIdentity(result, pending.identity)) throw pendingFailure("identity_mismatch");
       if (result.state !== "committed") throw pendingFailure(result.state);
-      if (resolved) console.log(JSON.stringify({ event: "source_reconciled", index: next, state: result.state, identity: pending.identity }));
+      if (resolved) logEvent("info", "source_reconciled", { index: next, state: result.state, identity: pending.identity });
       await snapshot.assertUnchanged();
       checkpoint = { ...checkpoint, next: next + 1, last: pending.identity };
       await lease.assertOwned();
       await atomicJson(checkpointPath, checkpoint);
       await retire();
-      console.log(JSON.stringify({ event: "source_checkpoint", next: checkpoint.next, state: result.state }));
+      logEvent("info", "source_checkpoint", { next: checkpoint.next, state: result.state });
     }
     if (count < resumeNext) throw new Error("source_checkpoint_invalid");
     if (pending) throw pendingFailure("invalid");
     await snapshot.assertUnchanged();
-    console.log(JSON.stringify({ event: "source_complete", next: checkpoint.next, source_hash: sourceHash }));
+    logEvent("info", "source_complete", { next: checkpoint.next, source_hash: sourceHash });
   } finally { await lease.release(); }
 }

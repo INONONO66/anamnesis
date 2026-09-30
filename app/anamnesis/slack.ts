@@ -1,20 +1,18 @@
-import { createHash, type Hash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, opendir } from "node:fs/promises";
+import { logEvent } from "./log.ts";
+import { createHash } from "node:crypto";
+import { lstat, opendir } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import { RPC_LIMITS, RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
-import { isSlackSlop, parseSlackMessage, slackEpisode } from "../../packages/backfill/src/slack.ts";
+import { RPC_LIMITS, RpcRememberParams } from "@anamnesis/protocol";
+import { isSlackSlop, parseSlackMessage, slackEpisode } from "@anamnesis/backfill";
+import { fingerprint, sha, textLines } from "./source-files.ts";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
 import { RpcClient } from "./client.ts";
 
 const MAX_FILES = 2048;
 const MAX_ENTRIES = 8192;
 const MAX_REVISIONS = 100_000;
-const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_INDEX_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
-const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex");
-const fingerprint = (s: Awaited<ReturnType<typeof fileInfo>>) => [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs, s.mode].join(":");
 const unicode = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
 async function fileInfo(path: string) {
   const info = await lstat(path, { bigint: true });
@@ -55,38 +53,6 @@ async function sourceFiles(root: string, checkpoint: string): Promise<Tree> {
 
 // Fixed byte buffers bound a physical line BEFORE UTF-8 decoding or JSON.parse.
 // O_NOFOLLOW/O_NONBLOCK also reject a substituted symlink/FIFO without hanging.
-async function* lines(root: string, name: string, expected: string, hash?: Hash): AsyncGenerator<{ text: string; line: number }> {
-  const file = await open(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const info = await file.stat({ bigint: true });
-    if (!info.isFile() || fingerprint(info) !== expected) throw new Error("source_changed");
-    const max = name === "index.jsonl" ? RPC_LIMITS.properties_bytes : MAX_LINE_BYTES;
-    const lineBuffer = Buffer.allocUnsafe(max), chunk = Buffer.allocUnsafe(64 * 1024);
-    let length = 0, line = 1, total = 0;
-    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-    while (true) {
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
-      if (!bytesRead) break;
-      total += bytesRead;
-      if (total > Number(info.size)) throw new Error("source_changed");
-      const bytes = chunk.subarray(0, bytesRead); hash?.update(bytes);
-      let start = 0;
-      while (start < bytes.length) {
-        const newline = bytes.indexOf(10, start), end = newline < 0 ? bytes.length : newline;
-        if (length + end - start > max) throw new Error(`source_record_too_large: ${name}:${line}`);
-        bytes.copy(lineBuffer, length, start, end); length += end - start;
-        if (newline < 0) break;
-        let text: string;
-        try { text = decoder.decode(lineBuffer.subarray(0, length)); }
-        catch (cause) { throw new Error(`source_invalid_utf8: ${name}:${line}`, { cause }); }
-        yield { text, line };
-        line++; length = 0; start = newline + 1;
-      }
-    }
-    if (length) throw new Error(`source_partial_final_line: ${name}:${line}`);
-    if (total !== Number(info.size) || fingerprint(await file.stat({ bigint: true })) !== expected) throw new Error("source_changed");
-  } finally { await file.close(); }
-}
 function channelId(path: string): string {
   const name = basename(path, ".jsonl");
   return path.startsWith("channels/") ? name : name.split("-")[0]!;
@@ -109,7 +75,7 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
     const names = new Map<string, string>();
     const manifest: { file: string; sha256: string }[] = [];
     const indexHash = createHash("sha256");
-    for await (const { text, line } of lines(root, "index.jsonl", initial.fingerprints.get("index.jsonl")!, indexHash)) {
+    for await (const { text, line } of textLines(root, "index.jsonl", initial.fingerprints.get("index.jsonl")!, indexHash, { maxLineBytes: RPC_LIMITS.properties_bytes, ignoreBOM: true })) {
       if (!text.trim()) continue;
       try {
         const value: unknown = JSON.parse(text);
@@ -127,7 +93,7 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
       let ordinal = 0;
       for (const name of initial.files.slice(1)) {
         const channel = channelId(name), hash = createHash("sha256");
-        for await (const { text, line } of lines(root, name, initial.fingerprints.get(name)!, hash)) {
+        for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash, { ignoreBOM: true })) {
           if (!text.trim()) continue;
           let base: RpcRememberParams, body: Buffer | undefined;
           try {
@@ -171,5 +137,5 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
     const sourceHash = sha(JSON.stringify({ format: "slack-export-snapshot/1", manifest }));
     return { sourceHash, records: records(), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", source: "slack", snapshot: "complete", tail: "incomplete", rotation: "incomplete" }));
+  logEvent("info", "source_scope", { source: "slack", snapshot: "complete", tail: "incomplete", rotation: "incomplete" });
 }

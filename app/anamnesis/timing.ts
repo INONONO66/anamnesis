@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { appendFileSync, renameSync, rmSync, statSync } from "node:fs";
-import type { RpcMethod } from "../../packages/protocol/src/rpc.ts";
+import type { RpcMethod } from "@anamnesis/protocol";
 
-export interface TimingEvent {
+interface TimingEvent {
   layer: "driver" | "client" | "daemon" | "runtime" | "neo4j";
   event: string;
   method?: RpcMethod;

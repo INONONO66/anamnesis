@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir } from "node:fs/promises";
@@ -19,7 +20,7 @@ const CONTENT_LIMIT = 4000;
  */
 const COMPACTION_TEXT = "context_compacted";
 
-export interface CodexRecord {
+interface CodexRecord {
   timestamp: string;
   type: string;
   payload: Record<string, unknown>;
@@ -55,7 +56,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * Rollout files are appended live, so a session killed mid-write leaves a
  * truncated final line. Dropping it keeps the other 12,847 files ingestible.
  */
-export function parseCodexRecord(line: string, strict = false): CodexRecord | undefined {
+function parseCodexRecord(line: string, strict = false): CodexRecord | undefined {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
@@ -219,7 +220,7 @@ function toEpisode(
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-message/1",
+      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
       origin: {
         source: "codex",

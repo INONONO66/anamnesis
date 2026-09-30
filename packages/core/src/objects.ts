@@ -9,7 +9,7 @@ const HASH_PATTERN = /^[0-9a-f]{64}$/;
 export interface ObjectMetadata { hash: string; size: number; mediaType: string; }
 
 export class ObjectStoreError extends Error {
-  readonly code: "invalid-hash" = "invalid-hash";
+  readonly code = "invalid-hash" as const;
   constructor(hash: string) { super(`Invalid object hash: ${hash}`); this.name = "ObjectStoreError"; }
 }
 

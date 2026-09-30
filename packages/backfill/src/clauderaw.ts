@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
@@ -391,7 +392,7 @@ function toEpisode(
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-message/1",
+      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
       origin: {
         source: "claude-code",

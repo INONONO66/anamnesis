@@ -1,3 +1,5 @@
+import { logEvent } from "./log.ts";
+import { managedRestartDelayMs } from "@anamnesis/core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rm } from "node:fs/promises";
@@ -11,8 +13,8 @@ export type ManagedIntent = "start" | "status" | "stop" | "restart";
 export interface ManagedTarget { pid: number; identity: string; }
 export interface ManagedState extends ManagedTarget { version: 1; intent: ManagedIntent; sequence: number; updated_at: string; }
 
-export function managedStatePath(root: string): string { return join(root, "managed.state.json"); }
-export function managedLockPath(root: string): string { return join(root, "managed.lock"); }
+function managedStatePath(root: string): string { return join(root, "managed.state.json"); }
+function managedLockPath(root: string): string { return join(root, "managed.lock"); }
 
 /** A repeatable fingerprint of the process identity observed by the OS.
  * PID alone is deliberately insufficient: a reused PID has different command metadata. */
@@ -29,7 +31,7 @@ async function withManagedLock<T>(root: string, action: () => Promise<T>): Promi
   await mkdir(root, { recursive: true, mode: 0o700 }); await chmod(root, 0o700);
   const lock = managedLockPath(root);
   try { await mkdir(lock, { mode: 0o700 }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("managed operation already in progress"); throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("managed operation already in progress", { cause: error }); throw error; }
   try { return await action(); } finally { await rm(lock, { recursive: true, force: true }); }
 }
 
@@ -64,7 +66,7 @@ export async function managedStatus(root: string): Promise<ManagedState | { stat
 
 /** Foreground supervisor: owns only its spawned child, never a discovered PID.
  * Restart budget is finite, with no readiness polling or endless crash loop. */
-export async function managed(entry: string): Promise<void> {
+export async function managed(entry: string, delay: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<void> {
   const lease = await acquireInstallation(join(runtimeRoot(), "manager"));
   let child: ChildProcess | undefined;
   let stopping = false;
@@ -83,12 +85,14 @@ export async function managed(entry: string): Promise<void> {
         child = spawn(process.execPath, [entry, "foreground"], { env: process.env, stdio: ["ignore", "inherit", "inherit"] });
         child.once("error", reject);
         child.once("close", (code, signal) => resolve({ code, signal }));
-        console.log(JSON.stringify({ event: "managed_child", pid: child.pid, restarts }));
+        logEvent("info", "managed_child", { pid: child.pid, restarts });
       });
       child = undefined;
       if (stopping || result.code === 0) break;
       if (restarts === 3) throw new Error("managed_restart_budget_exhausted");
-      console.error(JSON.stringify({ event: "managed_restart", ...result }));
+      const wait_ms = managedRestartDelayMs(restarts + 1);
+      logEvent("error", "managed_restart", { ...result, wait_ms });
+      await delay(wait_ms);
     }
   } finally {
     if (deadline) clearTimeout(deadline);

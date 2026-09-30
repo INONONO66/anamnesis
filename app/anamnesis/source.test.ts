@@ -178,7 +178,7 @@ test("UNKNOWN reply retains pre-send identity/body; resume resends only once the
   const emitted = await events(() => ingestSource(source, cp, client));
   expect(calls).toEqual(["status", "remember", "status", "ingest.status", "remember"]);
   expect(pendingAtSend).toEqual([work, work]);
-  expect(emitted.filter(e => e.event === "pending_retired")).toEqual([{ event: "pending_retired", reason: "daemon_unknown", index: 0, identity: work.identity }]);
+  expect(emitted.filter(e => e.event === "pending_retired")).toMatchObject([{ event: "pending_retired", level: "info", reason: "daemon_unknown", index: 0, identity: work.identity }]);
   expect(emitted.map(e => e.event)).toEqual(["pending_retired", "source_checkpoint", "source_complete"]);
   expect(await saved(cp)).toEqual({ ...initial(sourceHash), next: 1, last: work.identity });
   await expect(stat(pending)).rejects.toHaveProperty("code", "ENOENT");

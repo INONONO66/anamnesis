@@ -1,29 +1,22 @@
-import { createHash, type Hash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, opendir } from "node:fs/promises";
+import { logEvent } from "./log.ts";
+import { createHash } from "node:crypto";
+import { opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { asideSessionId, createMiscRawParser, type MiscRawContext } from "../../packages/backfill/src/miscraw.ts";
-import { RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
+import { asideSessionId, createMiscRawParser, type MiscRawContext } from "@anamnesis/backfill";
+import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
+import { fileInfo, fingerprint, sha, textLines } from "./source-files.ts";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
 
 const SEAL = "miscraw.snapshot.json";
 const MAX_FILES = 16_384, MAX_ENTRIES = 65_536, MAX_DEPTH = 64;
-const MAX_LINE_BYTES = 8 * 1024 * 1024, MAX_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024, MAX_INDEX_BYTES = 16 * 1024 * 1024;
 const MAX_REVISIONS = 100_000;
 const ASIDE = /^aside\/home\/\.aside\/u\/([^/]+)\/sessions\/([^/]+)\/messages\.jsonl$/;
 const INDEX = /^aside\/home\/\.aside\/u\/([^/]+)\/sessions\.jsonl$/;
 const ANTIGRAVITY = /^gemini-antigravity\/home\/\.gemini\/antigravity-cli\/brain\/([^/]+)\/\.system_generated\/logs\/transcript\.jsonl$/;
 const OPENCODE = "opencode/home/.local/state/opencode/prompt-history.jsonl";
-const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const fingerprint = (info: Awaited<ReturnType<typeof fileInfo>>) => [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
-async function fileInfo(path: string) {
-  const info = await lstat(path, { bigint: true });
-  if (info.isSymbolicLink()) throw new Error(`source_symlink: ${path}`);
-  if ((info.mode & 0o444n) === 0n || (info.isDirectory() && (info.mode & 0o111n) === 0n)) throw new Error(`source_permission: ${path}`);
-  return info;
-}
 interface Tree { files: string[]; fingerprints: Map<string, string>; mtimes: Map<string, number>; }
 async function tree(root: string): Promise<Tree> {
   const files: string[] = [], fingerprints = new Map<string, string>(), mtimes = new Map<string, number>();
@@ -63,38 +56,6 @@ async function tree(root: string): Promise<Tree> {
   return { files, fingerprints, mtimes };
 }
 
-/** Fixed allocations bound bytes before decoding. Descriptor and path identities
- * detect replacement/growth; EOF without LF is not accepted as producer seal. */
-async function* lines(root: string, name: string, expected: string, hash: Hash): AsyncGenerator<{ text: string; line: number }> {
-  const file = await open(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const info = await file.stat({ bigint: true });
-    if (!info.isFile() || fingerprint(info) !== expected) throw new Error("source_changed");
-    const buffer = Buffer.allocUnsafe(MAX_LINE_BYTES), chunk = Buffer.allocUnsafe(64 * 1024);
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    let length = 0, line = 1, total = 0;
-    while (true) {
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
-      if (!bytesRead) break;
-      total += bytesRead;
-      if (total > Number(info.size)) throw new Error("source_changed");
-      const bytes = chunk.subarray(0, bytesRead); hash.update(bytes);
-      let start = 0;
-      while (start < bytes.length) {
-        const newline = bytes.indexOf(10, start), end = newline < 0 ? bytes.length : newline;
-        if (length + end - start > MAX_LINE_BYTES) throw new Error(`source_record_too_large: ${name}:${line}`);
-        bytes.copy(buffer, length, start, end); length += end - start;
-        if (newline < 0) break;
-        let text: string;
-        try { text = decoder.decode(buffer.subarray(0, length)); } catch (cause) { throw new Error(`source_invalid_utf8: ${name}:${line}`, { cause }); }
-        yield { text, line };
-        line++; length = 0; start = newline + 1;
-      }
-    }
-    if (length) throw new Error(`source_partial_final_line: ${name}:${line}`);
-    if (total !== Number(info.size) || fingerprint(await file.stat({ bigint: true })) !== expected) throw new Error("source_changed");
-  } finally { await file.close(); }
-}
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 
 /** Offline subset only. Seal: one LF-terminated JSON object with format
@@ -114,7 +75,7 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
       if (JSON.stringify([...now.fingerprints]) !== JSON.stringify([...initial.fingerprints])) throw new Error("source_changed");
     };
     const sealHash = createHash("sha256"); let seal: unknown, sealLines = 0;
-    for await (const { text } of lines(root, SEAL, initial.fingerprints.get(SEAL)!, sealHash)) {
+    for await (const { text } of textLines(root, SEAL, initial.fingerprints.get(SEAL)!, sealHash)) {
       if (++sealLines !== 1) throw new Error("source_invalid_seal");
       try { seal = JSON.parse(text); } catch (cause) { throw new Error("source_invalid_seal", { cause }); }
     }
@@ -135,7 +96,7 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
     const index = new Map<string, Record<string, string>>();
     for (const name of initial.files.filter(name => INDEX.test(name))) {
       const hash = createHash("sha256"), user = INDEX.exec(name)![1]!;
-      for await (const { text, line } of lines(root, name, initial.fingerprints.get(name)!, hash)) {
+      for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash)) {
         if (text.trim() === "") continue;
         let row: unknown;
         try { row = JSON.parse(text); } catch (cause) { throw new Error(`source_invalid_index: ${name}:${line}`, { cause }); }
@@ -156,7 +117,7 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
         const context: MiscRawContext = aside ? { source: "aside", session: asideSessionId(aside[2]!), properties: index.get(JSON.stringify([aside[1], asideSessionId(aside[2]!)])) ?? {} }
           : antigravity ? { source: "gemini-antigravity", session: antigravity[1]! } : { source: "opencode", occurredAt: initial.mtimes.get(name)! };
         const parse = createMiscRawParser(context, true), hash = createHash("sha256");
-        for await (const { text, line } of lines(root, name, initial.fingerprints.get(name)!, hash)) {
+        for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash)) {
           let episodes;
           try { episodes = parse(text); } catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
           for (const { input } of episodes) {
@@ -187,5 +148,5 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
     await assertUnchanged();
     return { sourceHash: sha(JSON.stringify({ format: "misc-raw-snapshot/1", seal: sealHash.digest("hex"), fingerprints: [...initial.fingerprints] })), records: records(), assertUnchanged };
   });
-  console.log(JSON.stringify({ event: "source_scope", source: "misc-raw", snapshot: "producer-sealed", sqlite: "unsupported", live_tail: "unsupported", rotation: "unsupported" }));
+  logEvent("info", "source_scope", { source: "misc-raw", snapshot: "producer-sealed", sqlite: "unsupported", live_tail: "unsupported", rotation: "unsupported" });
 }

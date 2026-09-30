@@ -127,8 +127,8 @@ drift gate).
   loads bounded ID/arc exports, while `anamnesis bench` loads fixtures or
   snapshots (docs/02 §7, docs/07 §1).
 - The daemon is a JS entry in the same package (`anamnesisd.js`) — clients
-  spawn it on demand and it holds `daemon.lock`. Development override:
-  `ANAMNESIS_DAEMON_PATH`.
+  spawn it on demand and it holds `daemon.lock`. There is no path override
+  variable; clients resolve the entry beside their own package.
 - All user data lives under `~/.anamnesis/` (docs/01 §6).
   `anamnesis backup` orchestrates the required Community offline dump, a
   fixed Payload manifest and restart; `anamnesis restore` restores that

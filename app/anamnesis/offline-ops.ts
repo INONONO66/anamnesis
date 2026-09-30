@@ -3,13 +3,13 @@ import { cp, mkdir, readFile, writeFile, lstat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
-import { Engine } from "../../packages/core/src/engine.ts";
+import { Engine } from "@anamnesis/core";
 import { acquireInstallation } from "./config.ts";
 import { backupOwned, restoreOwned, type TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { preflightArchive, type ArchiveCompatibility, type ArchiveManifest } from "./archive-manifest.ts";
 import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
-import type { InstallationContext } from "../../packages/core/src/store.ts";
+import type { InstallationContext } from "@anamnesis/core";
 
 const OWNER_LABEL = "anamnesis.qa.owner";
 const IMAGE_DIGEST = NEO4J_IMAGE.slice("neo4j@".length);

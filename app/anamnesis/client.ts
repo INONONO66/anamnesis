@@ -1,6 +1,6 @@
 import { connect, type Socket } from "node:net";
 import { once } from "node:events";
-import { RPC_LIMITS, RpcRequest, RpcResponse, type RpcMethod, type RpcRequestInput, type RpcSuccessResponse } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RpcRequest, RpcResponse, type RpcMethod, type RpcRequestInput, type RpcSuccessResponse } from "@anamnesis/protocol";
 import { Frames } from "./wire.ts";
 import { timingHash, type TimingSink } from "./timing.ts";
 

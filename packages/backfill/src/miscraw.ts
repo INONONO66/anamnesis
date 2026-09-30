@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,7 +97,7 @@ function toEpisode(turn: MiscTurn): MiscRawEpisode {
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-message/1",
+      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
       origin: {
         source: turn.source,

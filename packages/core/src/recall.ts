@@ -1,4 +1,4 @@
-import { RpcOutputBudget, RPC_LIMITS, type RpcRecallItem, type RpcRecallResult } from "../../protocol/src/rpc.ts";
+import { RpcOutputBudget, RPC_LIMITS, type RpcRecallItem, type RpcRecallResult } from "@anamnesis/protocol";
 import { countBudget } from "./dynamics/budget.ts";
 
 export class RecallError extends Error {

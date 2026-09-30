@@ -1038,6 +1038,8 @@ and generation indexes without denied material.
 
 ## 7. Dreaming (v0.3)
 
+> **Deferred.** No dreaming code ships in this runtime: the `dream.admit/status/lease/expire/execute` RPCs, the file-backed job store and the GDS Leiden adapter were removed in the core cleanup (they had no caller and no production qualification). The daemon answers `method_not_found` for them. This section is the v0.3 design contract, not a description of shipped behaviour.
+
 Periodic (default: nightly) or via the `dream` RPC. The only process that
 looks at global structure, and the place where GDS is used if at all.
 

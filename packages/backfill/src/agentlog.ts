@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -99,7 +100,7 @@ function toEpisode(event: RecallableEvent): AgentLogEpisode {
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-message/1",
+      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
       origin: {
         source: event.provider,
@@ -130,7 +131,7 @@ function toEpisode(event: RecallableEvent): AgentLogEpisode {
  * Manifests describe the export, AppleDouble sidecars mirror it, and a
  * provider with no captured session leaves an empty file behind.
  */
-export async function agentLogFiles(root: string): Promise<string[]> {
+async function agentLogFiles(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });
   return entries
     .filter(

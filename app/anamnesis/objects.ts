@@ -1,8 +1,8 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { ObjectStore } from "../../packages/core/src/objects.ts";
-import { RPC_LIMITS, RpcObjectMetadata } from "../../packages/protocol/src/rpc.ts";
+import { ObjectStore } from "@anamnesis/core";
+import { RPC_LIMITS, RpcObjectMetadata } from "@anamnesis/protocol";
 import { hasCode, syncDirectory } from "./config.ts";
 import { RpcFault } from "./wire.ts";
 
@@ -176,7 +176,7 @@ export class Uploads {
       try {
         await upload.file.truncate(upload.received);
         const info = await upload.file.stat();
-        if (info.size !== upload.received) throw new Error("upload rollback length mismatch");
+        if (info.size !== upload.received) throw new Error("upload rollback length mismatch", { cause: error });
         await upload.file.sync();
         upload.actual = upload.received;
       } catch (rollback) {

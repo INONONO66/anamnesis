@@ -1,0 +1,26 @@
+{
+  "entry": [
+    "app/anamnesis/main.ts",
+    "app/anamnesis/ops.ts",
+    "app/anamnesis/**/*.test.{ts,mjs}",
+    "app/anamnesis/**/*.fixture.mjs",
+    "app/anamnesis/**/*.surface.mjs",
+    "packages/*/src/index.ts",
+    "packages/*/src/**/*.test.ts",
+    "scripts/**/*.{ts,mjs}",
+    "app/anamnesis/backup-operation.ts",
+    "app/anamnesis/restore-authority.ts"
+  ],
+  "project": [
+    "app/anamnesis/**/*.{ts,mjs}",
+    "packages/*/src/**/*.ts",
+    "scripts/**/*.{ts,mjs}"
+  ],
+  "ignore": [
+    ".omo/**",
+    "dist/**"
+  ],
+  "ignoreDependencies": [
+    "@stryker-mutator/command-runner"
+  ]
+}

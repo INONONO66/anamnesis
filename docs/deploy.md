@@ -52,6 +52,8 @@ The `ops` CLI (`dist/anamnesis-ops.mjs`, or `app/anamnesis/ops.ts`) talks to the
 | `ANAMNESIS_RPC_TCP_TOKEN_FILE` | Listener bearer (the daemon's `ANAMNESIS_LISTEN_TOKEN_FILE` contents). Regular file, owned by the caller, mode `0600`. |
 | `ANAMNESIS_RUNTIME_TOKEN_FILE` | Installation token (the daemon's `<runtime root>/token`) for `hello`. Same file rules. |
 
+Names that appear only in deployment scripts and unit files, never read by the daemon or ops binaries: `ANAMNESIS_BACKUP_MIRROR` (`deploy/vm/backup.sh` rsync target), `ANAMNESIS_INGEST_STATE` (a systemd unit-local path variable).
+
 `verify` over TCP skips the three filesystem checks (`root_private`, `token_private`, `socket_private`) because they describe the daemon host; its `scope` field says so.
 
 A missing or non-`0600` file is an error naming the variable; token values are never printed. `ANAMNESIS_RUNTIME_ROOT` still has to point at a writable directory for the client's own checkpoints, but nothing under it is read for authentication in this mode.

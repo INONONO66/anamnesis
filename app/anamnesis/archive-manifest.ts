@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
  * Nothing returned authorizes activation, proves fsync/publication ordering,
  * authenticates the producer, or verifies the contents of the opaque dump.
  */
+/** @public consumed by the .mjs harnesses through dynamic import */
 export const ARCHIVE_LIMITS = Object.freeze({
   manifest_bytes: 8 * 1024 ** 2,
   completion_bytes: 4096,
@@ -28,18 +29,18 @@ export const ARCHIVE_LIMITS = Object.freeze({
   hash_chunk_bytes: 1024 ** 2,
   json_depth: 16,
 });
-export type ArchiveAdmissionCode = "invalid_manifest" | "invalid_completion" | "completion_mismatch" |
+type ArchiveAdmissionCode = "invalid_manifest" | "invalid_completion" | "completion_mismatch" |
   "incompatible_archive" | "archive_layout" | "archive_limit" | "member_mismatch" |
   "invalid_sidecar" | "invalid_dump_metadata" | "archive_changed";
-export class ArchiveAdmissionError extends Error {
+class ArchiveAdmissionError extends Error {
   readonly code: ArchiveAdmissionCode;
   constructor(code: ArchiveAdmissionCode, detail: string, options?: ErrorOptions) {
     super(`${code}: ${detail}`, options); this.name = "ArchiveAdmissionError"; this.code = code;
   }
 }
 type Role = "database_dump" | "dump_metadata" | "config" | "auth" | "object_data" | "object_sidecar";
-export interface ArchiveMember { path: string; role: Role; bytes: number; sha256: string }
-export interface ArchiveObject { hash: string; size: number; media_type: string }
+interface ArchiveMember { path: string; role: Role; bytes: number; sha256: string }
+interface ArchiveObject { hash: string; size: number; media_type: string }
 /** Cutoff authority evidence. This is deliberately separate from the opaque
  * dump: a dump without this set cannot establish what was backed up. */
 export interface AuthoritySnapshot {
@@ -50,9 +51,9 @@ export interface AuthoritySnapshot {
   invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
   source_hashes: string[];
 }
-export type AuthoritySnapshotRefusal = "authority_members_missing" | "authority_generations_missing" |
+type AuthoritySnapshotRefusal = "authority_members_missing" | "authority_generations_missing" |
   "authority_coverage_missing" | "authority_links_missing" | "authority_invalidation_missing" | "authority_sources_missing";
-export class AuthoritySnapshotError extends Error {
+class AuthoritySnapshotError extends Error {
   readonly code: AuthoritySnapshotRefusal;
   constructor(code: AuthoritySnapshotRefusal, detail: string) { super(`${code}: ${detail}`); this.name = "AuthoritySnapshotError"; this.code = code; }
 }
@@ -77,8 +78,8 @@ export function verifyAuthoritySnapshot(value: unknown): AuthoritySnapshot {
   authoritySorted(sources as string[], "authority_sources_missing");
   return { members: members as string[], retained_generations: generations as number[], coverage: coverage as AuthoritySnapshot["coverage"], physical_links: links as AuthoritySnapshot["physical_links"], invalidation_evidence: invalidation as AuthoritySnapshot["invalidation_evidence"], source_hashes: sources as string[] };
 }
-export interface ArchiveEmbeddingProfile { embedding_profile_id: string; embedding_model_id: string; vector_index_id: string }
-export interface ArchiveEmbeddingCoverage {
+interface ArchiveEmbeddingProfile { embedding_profile_id: string; embedding_model_id: string; vector_index_id: string }
+interface ArchiveEmbeddingCoverage {
   embedding_model_id: string; stream: "episode" | "extraction"; generation: number;
   covered_ingest_seq: number; health: "HEALTHY" | "BLOCKED"; resolved_no_vector_count: number; omission_digest: string;
 }
@@ -98,7 +99,7 @@ export interface ArchiveManifest {
   members: ArchiveMember[];
   authority?: AuthoritySnapshot;
 }
-export interface ArchiveCompletion {
+interface ArchiveCompletion {
   format: "anamnesis.archive-complete/1"; operation_id: string; manifest_sha256: string; manifest_bytes: number;
 }
 /** Explicit supported exact patches/images, never inferred from the archive.
@@ -140,6 +141,8 @@ function record(value: unknown, keys: string[], code: ArchiveAdmissionCode): Rec
 function integer(value: unknown, max = Number.MAX_SAFE_INTEGER, min = 0): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
 }
+function oneOf<T>(values: readonly T[], value: unknown): value is T { return (values as readonly unknown[]).includes(value); }
+const ROLES: readonly Role[] = ["database_dump", "dump_metadata", "config", "auth", "object_data", "object_sidecar"];
 function text(value: unknown, pattern: RegExp, max = 256): value is string {
   return typeof value === "string" && value.length <= max && pattern.test(value);
 }
@@ -193,6 +196,7 @@ function sortedUnique(keys: string[], code: ArchiveAdmissionCode): void {
  * canonical JSON numbers/strings, sorted identity arrays; ASCII schema fields.
  * The completion hash binds these exact UTF-8 bytes, not a reserialized input.
  */
+/** @public consumed by the .mjs harnesses through dynamic import */
 export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifest {
   const code = "invalid_manifest";
   const decoded = decode(bytes, ARCHIVE_LIMITS.manifest_bytes, code, true);
@@ -200,39 +204,44 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
   const m = record(decoded,
     Object.hasOwn(decoded, "authority") ? ["format", "operation_id", "cutoff", "compatibility", "configuration", "models", "objects", "members", "authority"] : ["format", "operation_id", "cutoff", "compatibility", "configuration", "models", "objects", "members"], code);
   need(m.format === "anamnesis.archive/1" && text(m.operation_id, UUID7), code, "unsupported format or operation identity");
-  const cutoff = record(m.cutoff, ["ingest_seq", "structure_revision", "policy_revision"], code);
-  need(Object.values(cutoff).every(v => integer(v)), code, "invalid cutoff counter");
-  const compat = record(m.compatibility, ["schema_version", "neo4j_version", "neo4j_image_digest", "episode_digest_version_ceiling"], code);
-  need(text(compat.schema_version, /^anamnesis\.storage\/[1-9][0-9]{0,5}$/) && text(compat.neo4j_version, NEO4J) &&
-    text(compat.neo4j_image_digest, IMAGE) && (compat.episode_digest_version_ceiling === 1 || compat.episode_digest_version_ceiling === 2), code, "invalid compatibility contract");
-  const config = record(m.configuration, ["config_sha256", "receipt_retention_ms", "prior_version", "calibration_version", "dynamics_version"], code);
-  need(text(config.config_sha256, HEX) && integer(config.receipt_retention_ms, ARCHIVE_LIMITS.receipt_retention_ms, 1) &&
-    [config.prior_version, config.calibration_version, config.dynamics_version].every(v => text(v, VERSION)), code, "invalid config pins");
+  const c0 = record(m.cutoff, ["ingest_seq", "structure_revision", "policy_revision"], code);
+  need(integer(c0.ingest_seq) && integer(c0.structure_revision) && integer(c0.policy_revision), code, "invalid cutoff counter");
+  const cutoff: ArchiveManifest["cutoff"] = { ingest_seq: c0.ingest_seq, structure_revision: c0.structure_revision, policy_revision: c0.policy_revision };
+  const k = record(m.compatibility, ["schema_version", "neo4j_version", "neo4j_image_digest", "episode_digest_version_ceiling"], code);
+  need(text(k.schema_version, /^anamnesis\.storage\/[1-9][0-9]{0,5}$/) && text(k.neo4j_version, NEO4J) &&
+    text(k.neo4j_image_digest, IMAGE) && (k.episode_digest_version_ceiling === 1 || k.episode_digest_version_ceiling === 2), code, "invalid compatibility contract");
+  const compatibility: ArchiveManifest["compatibility"] = { schema_version: k.schema_version, neo4j_version: k.neo4j_version, neo4j_image_digest: k.neo4j_image_digest, episode_digest_version_ceiling: k.episode_digest_version_ceiling };
+  const g = record(m.configuration, ["config_sha256", "receipt_retention_ms", "prior_version", "calibration_version", "dynamics_version"], code);
+  need(text(g.config_sha256, HEX) && integer(g.receipt_retention_ms, ARCHIVE_LIMITS.receipt_retention_ms, 1) &&
+    text(g.prior_version, VERSION) && text(g.calibration_version, VERSION) && text(g.dynamics_version, VERSION), code, "invalid config pins");
+  const config: ArchiveManifest["configuration"] = { config_sha256: g.config_sha256, receipt_retention_ms: g.receipt_retention_ms, prior_version: g.prior_version, calibration_version: g.calibration_version, dynamics_version: g.dynamics_version };
   const models = record(m.models, ["active_embedding_profile_id", "embedding_profiles", "embedding_coverages", "extraction"], code);
-  const profiles = array(models.embedding_profiles, ARCHIVE_LIMITS.embedding_profiles, code).map(value => {
+  const profiles = array(models.embedding_profiles, ARCHIVE_LIMITS.embedding_profiles, code).map((value): ArchiveEmbeddingProfile => {
     const p = record(value, ["embedding_profile_id", "embedding_model_id", "vector_index_id"], code);
-    need(Object.values(p).every(v => text(v, HEX)), code, "invalid embedding fingerprint");
+    need(text(p.embedding_profile_id, HEX) && text(p.embedding_model_id, HEX) && text(p.vector_index_id, HEX), code, "invalid embedding fingerprint");
     need(p.embedding_profile_id === sha256(canonical({ embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id })), code, "profile fingerprint mismatch");
-    return p as unknown as ArchiveEmbeddingProfile;
+    return { embedding_profile_id: p.embedding_profile_id, embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id };
   });
   sortedUnique(profiles.map(p => p.embedding_profile_id), code);
-  need(models.active_embedding_profile_id === null || profiles.some(p => p.embedding_profile_id === models.active_embedding_profile_id), code, "unknown active profile");
-  let extractionGeneration: number | null = null;
+  const activeId = models.active_embedding_profile_id;
+  need(activeId === null || (typeof activeId === "string" && profiles.some(p => p.embedding_profile_id === activeId)), code, "unknown active profile");
+  let extraction: ArchiveManifest["models"]["extraction"] = null;
   if (models.extraction !== null) {
     const e = record(models.extraction, ["generation", "fact_language_policy", "grouping_version", "judge_profile_id"], code);
     need(integer(e.generation, Number.MAX_SAFE_INTEGER, 1) && text(e.fact_language_policy, VERSION) && text(e.grouping_version, VERSION) && text(e.judge_profile_id, HEX), code, "invalid extraction pins");
-    extractionGeneration = e.generation;
+    extraction = { generation: e.generation, fact_language_policy: e.fact_language_policy, grouping_version: e.grouping_version, judge_profile_id: e.judge_profile_id };
   }
+  const extractionGeneration = extraction?.generation ?? null;
   const modelIds = new Set(profiles.map(p => p.embedding_model_id)), coverageKeys = new Set<string>();
-  const coverages = array(models.embedding_coverages, ARCHIVE_LIMITS.embedding_coverages, code).map(value => {
+  const coverages = array(models.embedding_coverages, ARCHIVE_LIMITS.embedding_coverages, code).map((value): ArchiveEmbeddingCoverage => {
     const c = record(value, ["embedding_model_id", "stream", "generation", "covered_ingest_seq", "health", "resolved_no_vector_count", "omission_digest"], code);
     need(text(c.embedding_model_id, HEX) && modelIds.has(c.embedding_model_id) && (c.stream === "episode" || c.stream === "extraction") &&
       integer(c.generation, Number.MAX_SAFE_INTEGER, c.stream === "episode" ? 0 : 1) && (c.stream !== "episode" || c.generation === 0) &&
-      integer(c.covered_ingest_seq, cutoff.ingest_seq as number) && (c.health === "HEALTHY" || c.health === "BLOCKED") &&
+      integer(c.covered_ingest_seq, cutoff.ingest_seq) && (c.health === "HEALTHY" || c.health === "BLOCKED") &&
       integer(c.resolved_no_vector_count) && text(c.omission_digest, HEX), code, "invalid model coverage");
     const key = `${c.embedding_model_id}/${c.stream}/${c.generation}`;
     need(!coverageKeys.has(key), code, "duplicate coverage partition"); coverageKeys.add(key);
-    return c as unknown as ArchiveEmbeddingCoverage;
+    return { embedding_model_id: c.embedding_model_id, stream: c.stream, generation: c.generation, covered_ingest_seq: c.covered_ingest_seq, health: c.health, resolved_no_vector_count: c.resolved_no_vector_count, omission_digest: c.omission_digest };
   });
   // Numeric generation ordering, not decimal-string ordering.
   need(coverages.every((c, i) => {
@@ -240,7 +249,7 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
       (p.embedding_model_id === c.embedding_model_id && (p.stream < c.stream || (p.stream === c.stream && p.generation < c.generation)));
   }), code, "unsorted coverage partitions");
   for (const id of modelIds) need(coverageKeys.has(`${id}/episode/0`), code, "missing model episode coverage");
-  const active = profiles.find(p => p.embedding_profile_id === models.active_embedding_profile_id);
+  const active = profiles.find(p => p.embedding_profile_id === activeId);
   if (active && extractionGeneration !== null) need(coverageKeys.has(`${active.embedding_model_id}/extraction/${extractionGeneration}`), code, "missing active extraction coverage");
   const expected = new Map(FIXED), objects = new Map<string, ArchiveObject>();
   for (const value of array(m.objects, ARCHIVE_LIMITS.objects, code)) {
@@ -248,29 +257,35 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
     need(text(obj.hash, HEX) && integer(obj.size, ARCHIVE_LIMITS.object_bytes) && text(obj.media_type, MEDIA, 255), code, "invalid object identity");
     const path = `objects/${obj.hash.slice(0, 2)}/${obj.hash}`;
     need(!objects.has(obj.hash), code, "duplicate object");
-    objects.set(obj.hash, obj as unknown as ArchiveObject); expected.set(path, "object_data"); expected.set(path + ".json", "object_sidecar");
+    objects.set(obj.hash, { hash: obj.hash, size: obj.size, media_type: obj.media_type }); expected.set(path, "object_data"); expected.set(path + ".json", "object_sidecar");
   }
   sortedUnique([...objects.keys()], code);
-  const members = array(m.members, ARCHIVE_LIMITS.members, code).map(value => {
+  const members = array(m.members, ARCHIVE_LIMITS.members, code).map((value): ArchiveMember => {
     const member = record(value, ["path", "role", "bytes", "sha256"], code);
-    need(typeof member.path === "string" && expected.get(member.path) === member.role && expected.has(member.path), code, "noncanonical, unknown or wrong-role member path");
-    need(integer(member.bytes, memberLimit[member.role as Role], member.role === "object_data" ? 0 : 1) && text(member.sha256, HEX), code, "invalid member size/hash");
+    need(typeof member.path === "string" && oneOf(ROLES, member.role) && expected.get(member.path) === member.role, code, "noncanonical, unknown or wrong-role member path");
+    need(integer(member.bytes, memberLimit[member.role], member.role === "object_data" ? 0 : 1) && text(member.sha256, HEX), code, "invalid member size/hash");
     if (member.role === "object_data") {
       const hash = member.path.slice(-64), obj = objects.get(hash)!;
       need(member.sha256 === hash && member.bytes === obj.size, code, "object naming/data disagreement");
     }
     if (member.role === "config") need(member.sha256 === config.config_sha256, code, "config fingerprint mismatch");
-    return member as unknown as ArchiveMember;
+    return { path: member.path, role: member.role, bytes: member.bytes, sha256: member.sha256 };
   });
   sortedUnique(members.map(member => member.path), code);
-  if (Object.hasOwn(m, "authority")) m.authority = verifyAuthoritySnapshot(m.authority);
   need(members.length === expected.size && members.reduce((n, member) => n + member.bytes, 0) <= ARCHIVE_LIMITS.total_member_bytes, code, "missing members or total byte limit");
-  return m as unknown as ArchiveManifest;
+  const manifest: ArchiveManifest = {
+    format: "anamnesis.archive/1", operation_id: m.operation_id, cutoff, compatibility, configuration: config,
+    models: { active_embedding_profile_id: activeId, embedding_profiles: profiles, embedding_coverages: coverages, extraction },
+    objects: [...objects.values()], members,
+  };
+  if (Object.hasOwn(m, "authority")) manifest.authority = verifyAuthoritySnapshot(m.authority);
+  return manifest;
 }
+/** @public consumed by the .mjs harnesses through dynamic import */
 export function parseArchiveCompletion(bytes: string | Uint8Array): ArchiveCompletion {
   const code = "invalid_completion", marker = record(decode(bytes, ARCHIVE_LIMITS.completion_bytes, code, true), ["format", "operation_id", "manifest_sha256", "manifest_bytes"], code);
   need(marker.format === "anamnesis.archive-complete/1" && text(marker.operation_id, UUID7) && text(marker.manifest_sha256, HEX) && integer(marker.manifest_bytes, ARCHIVE_LIMITS.manifest_bytes, 1), code, "invalid completion contract");
-  return marker as unknown as ArchiveCompletion;
+  return { format: "anamnesis.archive-complete/1", operation_id: marker.operation_id, manifest_sha256: marker.manifest_sha256, manifest_bytes: marker.manifest_bytes };
 }
 function checkCompatibility(m: ArchiveManifest, accepted: ArchiveCompatibility): void {
   const code = "incompatible_archive";

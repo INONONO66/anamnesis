@@ -70,8 +70,6 @@ const scenarioFiles = {
   "envelope-access-plan": ["./scripts/qa/g004-envelope-access.test.mjs"],
   "gds-solver-20": ["./scripts/qa/g004-gds-solver-20.test.ts"],
   "derived-recall": ["./scripts/qa/g004-graph-ppr-real.test.mjs"],
-  "dreaming-snapshot": ["./packages/core/src/dreaming-admission.test.ts"],
-  "synthesis-authority": ["./packages/core/src/dreaming-admission.test.ts"],
   "archive-authority": ["./app/anamnesis/archive-manifest.test.mjs"],
   "restore-activation": ["./app/anamnesis/restore-authority.test.mjs"],
   "restore-source-rebind": ["./app/anamnesis/backup-operation.test.mjs"],

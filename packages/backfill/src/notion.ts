@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
@@ -41,7 +42,7 @@ export function notionEpisode(root: string, path: string, raw: string, mtime: Da
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-document/1",
+      schema: SCHEMA_ID.ORIGINAL_DOCUMENT,
       content: excerpt(title, text),
       origin: { source: "notion", session: workspace, actor: "export", record: relpath },
       source_revision: hash,

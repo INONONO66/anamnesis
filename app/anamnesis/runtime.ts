@@ -2,29 +2,27 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
-import { Engine, envConfig, type EngineOptions } from "../../packages/core/src/engine.ts";
-import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
-import { ExtractionScheduler, type ExtractionTurn } from "../../packages/core/src/extraction-scheduler.ts";
-import { PacedExtractionProvider } from "../../packages/core/src/paced-extraction-provider.ts";
-import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
-import { elementDigest, verifyLineageRetry } from "../../packages/core/src/store.ts";
-import { EchoLineage, parseEpisodeLineage } from "../../packages/protocol/src/episode-lineage.ts";
-import type { CreateExtractionPipeline, RunExtractionPipeline } from '../../packages/protocol/src/extraction-audit.ts';
-import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "../../packages/core/src/store.ts";
-import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams, RpcDreamAdmitParams, RpcDreamLeaseParams, RpcDreamExpireParams, RpcDreamExecuteParams } from "../../packages/protocol/src/rpc.ts";
-import { DurableSpool, type SpoolEntry } from "../../packages/core/src/spool.ts";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "../../packages/protocol/src/rpc.ts";
+import { Engine, envConfig, type EngineOptions } from "@anamnesis/core";
+import { OpenAiChatExtractionProvider } from "@anamnesis/core";
+import { ExtractionScheduler, type ExtractionTurn } from "@anamnesis/core";
+import { PacedExtractionProvider } from "@anamnesis/core";
+import { OpenAiEmbeddingProvider } from "@anamnesis/core";
+import { elementDigest, verifyLineageRetry } from "@anamnesis/core";
+import { EchoLineage, parseEpisodeLineage } from "@anamnesis/protocol";
+import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
+import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "@anamnesis/core";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
+import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
 import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
 import { fault, RpcFault, storageUnavailable } from "./wire.ts";
+import { RECOVERY_PROBE_MS, RecoveryProbe, nodeTimers } from "./recovery-probe.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
-import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
-import { NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
-import { createDreamLeidenAdapter } from './dream-leiden-runtime.ts';
-import { trustedDreamLeiden, DREAM_GDS_IMAGE, DREAM_GDS_VERSION, DREAM_ALGORITHM, DREAM_NETWORK } from '../../packages/core/src/dream-leiden-adapter.ts';
+import { manifestTemplate, objectInventory } from "./runtime-authority.ts";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -122,20 +120,20 @@ export class Runtime {
   /** Wraps the configured provider so every model call (scheduler and audit RPCs alike) is metered; present with `extraction`. */
   private readonly pacer: PacedExtractionProvider | undefined;
   private extractionRequested = false;
+  /** While storage is unavailable, ticks re-enter the spool lane so drainTurn retries refresh() on the daemon's serial queue. */
+  private readonly recovery = new RecoveryProbe(() => { if (!this.drainStopped) this.scheduleDrain("spool"); }, RECOVERY_PROBE_MS, nodeTimers);
   constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const unpaced = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
     this.pacer = unpaced.extractionProvider && new PacedExtractionProvider(unpaced.extractionProvider, { minIntervalMs: pacing.minIntervalMs, jitterFraction: pacing.jitterFraction });
     const config = this.pacer ? { ...unpaced, extractionProvider: this.pacer } : unpaced;
     this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
-    const rawDream = createDreamLeidenAdapter();
-    const dreamLeidenAdapter = rawDream ? trustedDreamLeiden({ image_digest: DREAM_GDS_IMAGE, plugin_digest: 'sha256:246e3fbbbf733b4def1e7b0a9740a2309f6605ee8a7b46b29fe1de56d0a4b47c', algorithm: DREAM_ALGORITHM, gds_version: DREAM_GDS_VERSION, network: DREAM_NETWORK, adapter: rawDream }) : undefined;
     // Same bounded deadlines as the reader: with defaults (30 s connect, 60 s acquisition) a background lane meeting a
     // dead Bolt endpoint held the serial dispatch slot past the 30 s socket idle deadline and dropped queued RPCs.
     const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
-    this.engine = new Engine({ ...config, driver: writer, ...(dreamLeidenAdapter ? { dreamLeidenAdapter } : {}) });
+    this.engine = new Engine({ ...config, driver: writer });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
@@ -160,7 +158,7 @@ export class Runtime {
     try { return (await runtimeTimed("neo4j.read", () => session.run<Row>(query, params, { timeout: 5000 }), daemonTiming ? timingHash(query) : undefined)).records.map(record => record.toObject()); }
     finally { await runtimeTimed("neo4j.session.close", () => session.close()); }
   }
-  /** Reconnect is demand-driven by status/remember/startup, without polling timers. */
+  /** Reconnect runs on demand (status/remember/startup) and, while unavailable, on the recovery probe's bounded timer. */
   async refresh(): Promise<void> {
     await this.installation.assertOwned();
     try {
@@ -171,11 +169,17 @@ export class Runtime {
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const recovered = !this.available;
       this.available = true;
+      this.recovery.disarm();
       if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
-      this.available = false;
+      this.markUnavailable();
     }
+  }
+  /** Every outage observation goes through here so the recovery probe is armed regardless of which lane or RPC saw it first. */
+  private markUnavailable(): void {
+    this.available = false;
+    this.recovery.arm();
   }
   private identity(binding: Binding) {
     return { revision_key: revisionKey(binding.params), body_digest: binding.body_digest, data_incarnation: binding.incarnation };
@@ -327,7 +331,7 @@ export class Runtime {
           if (!previous) await rm(join(this.bindings, key + ".json"));
           throw error;
         }
-        this.available = false;
+        this.markUnavailable();
       }
     }
     if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
@@ -379,7 +383,7 @@ export class Runtime {
       if (batch.drained > 0 || batch.deferred > 0) { this.embedding.requested = true; return "more"; }
       return this.embedding.requested ? "more" : "idle";
     } catch (error) {
-      if (storageUnavailable(error)) { this.available = false; this.embedding.requested = true; return "stalled"; } // Recovery re-schedules the pending wake.
+      if (storageUnavailable(error)) { this.markUnavailable(); this.embedding.requested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.embedding.last_error = String(error).slice(0, 512);
       throw error;
     }
@@ -403,7 +407,7 @@ export class Runtime {
       if (outcome === "more") this.extractionRequested = true;
       return outcome;
     } catch (error) {
-      if (storageUnavailable(error)) { this.available = false; this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
+      if (storageUnavailable(error)) { this.markUnavailable(); this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.extraction.recordError(error);
       throw error;
     }
@@ -420,6 +424,7 @@ export class Runtime {
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {
+    if (!this.drainStopped && !this.available) await this.refresh();
     if (this.drainStopped || !this.available) {
       await this.drainJob?.return(); this.drainJob = undefined;
       return false;
@@ -438,8 +443,8 @@ export class Runtime {
     } catch (error) {
       await this.drainJob?.return(); this.drainJob = undefined;
       if (!storageUnavailable(error)) throw error;
-      this.available = false;
-      this.drainRequested = true; // Explicit recovery will wake a fresh cohort.
+      this.markUnavailable();
+      this.drainRequested = true; // Recovery will wake a fresh cohort.
       return false;
     }
   }
@@ -490,43 +495,42 @@ export class Runtime {
     while (progress) {
       progress = false;
       yield* this.eachPendingPage(cohort, async function* (entry) {
-        const self = runtime;
-        let binding: Binding;
-        try { binding = self.validated(entry); }
+                let binding: Binding;
+        try { binding = runtime.validated(entry); }
         catch (error) {
           const reason = fault(error).code;
           if (reason !== "spool_corrupt" && reason !== "incarnation_mismatch") throw error;
-          self.quarantined.set(entry.sequence, reason); return;
+          runtime.quarantined.set(entry.sequence, reason); return;
         }
         try {
-          const existing = await self.committed(binding);
+          const existing = await runtime.committed(binding);
           yield;
           if (!existing && entry.predecessor) {
-            const predecessor = await self.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
+            const predecessor = await runtime.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
             yield;
             // Retained suffix visibility is not evidence that a predecessor
             // still needs execution. Check the DB before deferring to it.
             if (!predecessor[0]?.found) {
-              if (!(yield* self.findPending(entry.predecessor, cohort))) self.blocked.set(entry.sequence, "missing_predecessor");
+              if (!(yield* runtime.findPending(entry.predecessor, cohort))) runtime.blocked.set(entry.sequence, "missing_predecessor");
               return;
             }
           }
-          const before = await self.spool.status();
+          const before = await runtime.spool.status();
           yield;
-          const result = existing ?? await self.write(binding);
+          const result = existing ?? await runtime.write(binding);
           yield;
-          await self.installation.assertOwned();
-          await self.spool.complete(entry.sequence);
-          await syncDirectory(self.spoolRoot);
+          await runtime.installation.assertOwned();
+          await runtime.spool.complete(entry.sequence);
+          await syncDirectory(runtime.spoolRoot);
           yield;
-          const after = await self.spool.status();
+          const after = await runtime.spool.status();
           // Completing an already-committed suffix behind a blocked head is
           // idempotent, not progress. Preserve advancement earlier in the pass.
           progress = progress || result.created || after.pending < before.pending;
-          self.blocked.delete(entry.sequence);
+          runtime.blocked.delete(entry.sequence);
         } catch (error) {
           const reason = fault(error).code;
-          if (reason === "revision_conflict" || reason === "stale_revision") self.blocked.set(entry.sequence, reason);
+          if (reason === "revision_conflict" || reason === "stale_revision") runtime.blocked.set(entry.sequence, reason);
           else throw error;
         }
       });
@@ -570,7 +574,7 @@ export class Runtime {
     let outbox: number | null = null;
     if (this.available) {
       try { outbox = (await runtimeTimed("engine.status", () => this.engine.status())).pendingOutbox; }
-      catch (error) { if (!storageUnavailable(error)) throw error; this.available = false; }
+      catch (error) { if (!storageUnavailable(error)) throw error; this.markUnavailable(); }
     }
     return { version: 1, state: stopping ? "stopping" : this.available && !spool.quarantined && this.quarantined.size === 0 ? "ready" : "degraded",
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
@@ -637,11 +641,6 @@ export class Runtime {
     return this.engine.graphEnvelope(params.seed_ids, params.T === undefined ? {} : { T: params.T }, context);
   }
 
-  async admitDream(params: RpcDreamAdmitParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.admitDream(params, context); }
-  async dreamStatus(id: string, context: InstallationContext) { await this.requireStorage(); return this.engine.store.dreamStatus(id, context); }
-  async leaseDream(params: RpcDreamLeaseParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.leaseDream(params, context); }
-  async expireDream(params: RpcDreamExpireParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.expireDream(params, context); }
-  async executeDream(params: RpcDreamExecuteParams, context: InstallationContext) { await this.requireStorage(); return this.engine.store.executeDream(params, context); }
 
   async createExtractionPipeline(params: CreateExtractionPipeline, context: InstallationContext) {
     await this.requireStorage();
@@ -706,6 +705,7 @@ export class Runtime {
     return this.engine.rebuildHitCache();
   }
   async close(): Promise<void> {
+    this.recovery.stop();
     this.cancelDrain();
     await this.drainJob?.return(); this.drainJob = undefined;
     await this.extraction?.close(); // In-flight pipelines settle before the writer goes away.

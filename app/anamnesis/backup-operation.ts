@@ -84,9 +84,12 @@ export interface BackupOperation {
 const UUID7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HEX = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
-const PHASES: readonly string[] = ["PREPARE", "CUTOFF", "STOPPING", "DB_STOPPED", "DUMPED", "DB_STARTED", "COPYING", "COMPLETE", "FAILED"];
-const INTENTS: readonly (string | null)[] = [null, "prepare_destination_and_cutoff", "stop_database", "dump_database", "start_database", "copy_archive", "publish_complete"];
-const PROOFS: readonly string[] = ["cutoff", "database_stopped", "dump_verified", "database_healthy", "archive_verified", "completion_published"];
+const PHASES: readonly BackupPhase[] = ["PREPARE", "CUTOFF", "STOPPING", "DB_STOPPED", "DUMPED", "DB_STARTED", "COPYING", "COMPLETE", "FAILED"];
+const INTENTS: readonly BackupIntent[] = [null, "prepare_destination_and_cutoff", "stop_database", "dump_database", "start_database", "copy_archive", "publish_complete"];
+const PROOFS: readonly BackupProofKind[] = ["cutoff", "database_stopped", "dump_verified", "database_healthy", "archive_verified", "completion_published"];
+const FAILURE_CODES: readonly BackupFailure["code"][] = ["io_error", "validation_error", "cancelled", "orchestrator_error"];
+const FAILURE_EFFECTS: readonly BackupFailure["effect"][] = ["not_run", "unknown"];
+function oneOf<T>(values: readonly T[], value: unknown): value is T { return (values as readonly unknown[]).includes(value); }
 function need(test: unknown, code: BackupOperationCode, detail: string): asserts test { if (!test) throw new BackupOperationError(code, detail); }
 function record(value: unknown, keys: string[], code: BackupOperationCode): Record<string, unknown> {
   need(value !== null && typeof value === "object" && !Array.isArray(value), code, "expected object");
@@ -94,6 +97,7 @@ function record(value: unknown, keys: string[], code: BackupOperationCode): Reco
   need(Object.keys(obj).length === keys.length && keys.every(k => Object.hasOwn(obj, k)), code, "missing or unknown field"); return obj;
 }
 function text(value: unknown, pattern: RegExp): value is string { return typeof value === "string" && pattern.test(value); }
+function integer(value: unknown, min: number, max: number): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max; }
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") { const obj = value as Record<string, unknown>; return `{${Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(",")}}`; }
@@ -126,24 +130,28 @@ export function parseBackupOperationBody(bytes: string | Uint8Array): BackupBody
   need(b.format === "anamnesis.backup-operation/1" && text(b.operation_id, UUID7), "invalid_body", "format or UUIDv7");
   const s = record(b.source, ["path", "dev", "ino"], "invalid_body"), d = record(b.destination, ["path", "parent_dev", "parent_ino"], "invalid_body");
   safeAbsolute(s.path); safeAbsolute(d.path);
-  need([s.dev, s.ino, d.parent_dev, d.parent_ino].every(v => text(v, DECIMAL)) && s.ino !== "0" && d.parent_ino !== "0", "invalid_body", "filesystem identity");
+  need(text(s.dev, DECIMAL) && text(s.ino, DECIMAL) && text(d.parent_dev, DECIMAL) && text(d.parent_ino, DECIMAL) && s.ino !== "0" && d.parent_ino !== "0", "invalid_body", "filesystem identity");
   need(s.path !== d.path && !s.path.startsWith(d.path + "/") && !d.path.startsWith(s.path + "/") && !d.path.startsWith(s.path + "-"), "unsafe_path", "overlapping or reserved destination");
-  return b as unknown as BackupBody;
+  return { format: "anamnesis.backup-operation/1", operation_id: b.operation_id, source: { path: s.path, dev: s.dev, ino: s.ino }, destination: { path: d.path, parent_dev: d.parent_dev, parent_ino: d.parent_ino } };
 }
 function parseTransition(value: unknown, operationId: string): BackupTransition {
   const c = record(value, ["expected_version", "expected_phase", "phase", "intent", "proof", "failure"], "invalid_transition");
-  need(typeof c.expected_version === "number" && Number.isSafeInteger(c.expected_version) && c.expected_version >= 1 && c.expected_version < BACKUP_OPERATION_LIMITS.history &&
-    typeof c.expected_phase === "string" && PHASES.includes(c.expected_phase) && typeof c.phase === "string" && PHASES.includes(c.phase) && INTENTS.includes(c.intent as string | null), "invalid_transition", "phase/version/intent");
+  need(integer(c.expected_version, 1, BACKUP_OPERATION_LIMITS.history - 1) && oneOf(PHASES, c.expected_phase) && oneOf(PHASES, c.phase) && oneOf(INTENTS, c.intent), "invalid_transition", "phase/version/intent");
+  let proof: BackupProof | null = null;
   if (c.proof !== null) {
     const p = record(c.proof, ["kind", "path", "bytes", "sha256"], "invalid_proof");
-    need(typeof p.kind === "string" && PROOFS.includes(p.kind) && text(p.sha256, HEX) && typeof p.bytes === "number" && Number.isSafeInteger(p.bytes) && p.bytes > 0 && p.bytes <= BACKUP_OPERATION_LIMITS.proof_bytes &&
-      typeof p.path === "string" && p.path.startsWith(`backup-evidence/${operationId}/`) && /^[a-z0-9][a-z0-9._-]{0,127}\.json$/.test(p.path.slice(`backup-evidence/${operationId}/`.length)), "invalid_proof", "bounded owned report reference required");
+    const owned = `backup-evidence/${operationId}/`;
+    need(oneOf(PROOFS, p.kind) && text(p.sha256, HEX) && integer(p.bytes, 1, BACKUP_OPERATION_LIMITS.proof_bytes) &&
+      typeof p.path === "string" && p.path.startsWith(owned) && /^[a-z0-9][a-z0-9._-]{0,127}\.json$/.test(p.path.slice(owned.length)), "invalid_proof", "bounded owned report reference required");
+    proof = { kind: p.kind, path: p.path, bytes: p.bytes, sha256: p.sha256 };
   }
+  let failure: BackupFailure | null = null;
   if (c.failure !== null) {
     const f = record(c.failure, ["code", "effect"], "invalid_transition");
-    need(typeof f.code === "string" && ["io_error", "validation_error", "cancelled", "orchestrator_error"].includes(f.code) && typeof f.effect === "string" && ["not_run", "unknown"].includes(f.effect), "invalid_transition", "failure classification");
+    need(oneOf(FAILURE_CODES, f.code) && oneOf(FAILURE_EFFECTS, f.effect), "invalid_transition", "failure classification");
+    failure = { code: f.code, effect: f.effect };
   }
-  return c as unknown as BackupTransition;
+  return { expected_version: c.expected_version, expected_phase: c.expected_phase, phase: c.phase, intent: c.intent, proof, failure };
 }
 /** The only legal edges. Intent is durable before any external side effect. */
 function edge(previous: BackupPhase, intent: BackupIntent, c: BackupTransition): void {
@@ -167,12 +175,13 @@ export function parseBackupOperationState(bytes: string | Uint8Array): BackupSta
   const body = parseBackupOperationBody(canonical(s.body));
   need(s.format === "anamnesis.backup-state/1" && s.body_sha256 === hash(canonical(body)) && Array.isArray(s.history) && s.history.length < BACKUP_OPERATION_LIMITS.history, "stale_state", "format/digest/history");
   let phase: BackupPhase = "PREPARE", intent: BackupIntent = "prepare_destination_and_cutoff", version = 1;
-  for (const value of s.history) { const c = parseTransition(value, body.operation_id); need(c.expected_version === version, "stale_state", "noncontiguous history"); edge(phase, intent, c); phase = c.phase; intent = c.intent; version++; }
+  const history: BackupTransition[] = [];
+  for (const value of s.history) { const c = parseTransition(value, body.operation_id); need(c.expected_version === version, "stale_state", "noncontiguous history"); edge(phase, intent, c); history.push(c); phase = c.phase; intent = c.intent; version++; }
   need(s.phase === phase && s.intent === intent && s.version === version, "stale_state", "derived phase/version disagreement");
-  const hasCutoff = (s.history as BackupTransition[]).some(c => c.phase === "CUTOFF");
-  if (hasCutoff) { const d = record(s.destination_identity, ["dev", "ino"], "stale_state"); need(text(d.dev, DECIMAL) && text(d.ino, DECIMAL) && d.ino !== "0", "stale_state", "destination identity"); }
+  let destination_identity: BackupState["destination_identity"] = null;
+  if (history.some(c => c.phase === "CUTOFF")) { const d = record(s.destination_identity, ["dev", "ino"], "stale_state"); need(text(d.dev, DECIMAL) && text(d.ino, DECIMAL) && d.ino !== "0", "stale_state", "destination identity"); destination_identity = { dev: d.dev, ino: d.ino }; }
   else need(s.destination_identity === null, "stale_state", "destination identity before observation");
-  return s as unknown as BackupState;
+  return { format: "anamnesis.backup-state/1", body, body_sha256: s.body_sha256, phase, intent, version, destination_identity, history };
 }
 function same(a: BigIntStats, b: BigIntStats): boolean { return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.uid === b.uid && a.nlink === b.nlink && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs; }
 async function directory(path: string): Promise<BigIntStats> {

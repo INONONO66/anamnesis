@@ -52,15 +52,33 @@ export const TIME_BEARING: Readonly<Record<Celestial, boolean>> = {
   Community: false,
 };
 
+/** The only element schema identities the runtime writes or reads. */
+export const SCHEMA_ID = Object.freeze({
+  ORIGINAL_MESSAGE: "anamnesis.original-message/1",
+  ORIGINAL_DOCUMENT: "anamnesis.original-document/1",
+  ENTITY: "anamnesis.entity/1",
+  CLAIM: "anamnesis.claim/1",
+  MAPPING: "anamnesis.mapping/1",
+  SYNTHESIS: "anamnesis.synthesis/1",
+  COMMUNITY: "anamnesis.community/1",
+} as const);
+export type SchemaId = (typeof SCHEMA_ID)[keyof typeof SCHEMA_ID];
+/** Episode-bearing schemas: the only ones a source may deliver directly. */
+export const EPISODE_SCHEMAS = [SCHEMA_ID.ORIGINAL_MESSAGE, SCHEMA_ID.ORIGINAL_DOCUMENT] as const;
+export type EpisodeSchema = (typeof EPISODE_SCHEMAS)[number];
+export function isEpisodeSchema(value: string): value is EpisodeSchema {
+  return (EPISODE_SCHEMAS as readonly string[]).includes(value);
+}
+
 const SCHEMA_REGISTRY = {
-  "anamnesis.original-message/1": "Episode",
-  "anamnesis.original-document/1": "Episode",
-  "anamnesis.entity/1": "Entity",
-  "anamnesis.claim/1": "Fact",
-  "anamnesis.mapping/1": "Fact",
-  "anamnesis.synthesis/1": "Fact",
-  "anamnesis.community/1": "Community",
-} as const satisfies Record<string, Celestial>;
+  [SCHEMA_ID.ORIGINAL_MESSAGE]: "Episode",
+  [SCHEMA_ID.ORIGINAL_DOCUMENT]: "Episode",
+  [SCHEMA_ID.ENTITY]: "Entity",
+  [SCHEMA_ID.CLAIM]: "Fact",
+  [SCHEMA_ID.MAPPING]: "Fact",
+  [SCHEMA_ID.SYNTHESIS]: "Fact",
+  [SCHEMA_ID.COMMUNITY]: "Community",
+} as const satisfies Record<SchemaId, Celestial>;
 
 export type KnownSchema = keyof typeof SCHEMA_REGISTRY;
 export const KNOWN_SCHEMAS = Object.keys(SCHEMA_REGISTRY) as KnownSchema[];
