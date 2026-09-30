@@ -1,3 +1,4 @@
+import { EPISODE_SCHEMAS, SCHEMA_ID, isEpisodeSchema } from "../../protocol/src/element.ts";
 import neo4j, {
   Driver,
   type ManagedTransaction,
@@ -866,7 +867,7 @@ export class Store {
       ? { episode_digest_version: 2, origin_role: parseEpisodeLineage({ origin_role: p["origin_role"], lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids }).origin_role,
         lineage, lineage_digest: String(p["lineage_digest"]) }
       : { episode_digest_version: 1, origin_role: null, lineage: null, lineage_digest: null };
-    return { id: sourceId, schema: z.enum(["anamnesis.original-message/1", "anamnesis.original-document/1"]).parse(element.schema),
+    return { id: sourceId, schema: z.enum(EPISODE_SCHEMAS).parse(element.schema),
       revision_key: receiptHash.parse(p["revision_key"]), content_digest: sha256(element.content), content: element.content,
       ingest_seq: receiptTime.positive().parse(p["ingest_seq"]), time,
       speaker: { origin_source: element.origin.source, origin_actor: element.origin.actor }, provenance };
@@ -917,7 +918,7 @@ export class Store {
       `MATCH (e:Element:Episode) WHERE e.id IN $ids RETURN e.id AS id,e.origin_source AS source,e.schema AS schema`, { ids });
     if (rows.records.length !== ids.length) throw new ReceiptError("invalid_selection");
     for (const row of rows.records) {
-      if (!["anamnesis.original-message/1", "anamnesis.original-document/1"].includes(row.get("schema"))) throw new ReceiptError("invalid_selection");
+      if (!isEpisodeSchema(row.get("schema"))) throw new ReceiptError("invalid_selection");
       for (const deny of policy.denies.values()) {
         if (policy.revoked.has(deny.policy_id)) continue;
         if ((deny.selector.episode_id === undefined || deny.selector.episode_id === row.get("id"))
@@ -1925,7 +1926,7 @@ export class Store {
         const e = result.records[0];
         // Derived source/witness authority is not yet materialized by this
         // runtime. Unknown/derived nodes must not inherit Episode permission.
-        if (!e || !["anamnesis.original-message/1","anamnesis.original-document/1"].includes(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
+        if (!e || !isEpisodeSchema(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
         return ![...policy.denies.values()].some(deny => !policy.revoked.has(deny.policy_id)
           && (deny.selector.episode_id === undefined || deny.selector.episode_id === id)
           && (deny.selector.source === undefined || deny.selector.source === e.get("source")));
@@ -2154,7 +2155,7 @@ export class Store {
       if (entity.status === "unresolved") continue;
       const rows = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.generation AS generation`, { id: entity.entity_id });
       if (entity.status === "existing") {
-        if (rows.records[0]?.get("schema") !== "anamnesis.entity/1" || rows.records[0]?.get("generation") !== premises.request.generation_id) throw new Error("semantic_entity_stale");
+        if (rows.records[0]?.get("schema") !== SCHEMA_ID.ENTITY || rows.records[0]?.get("generation") !== premises.request.generation_id) throw new Error("semantic_entity_stale");
       } else {
         const keys = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id LIMIT 1`, { generation: premises.request.generation_id, key: entity.entity_key });
         if (rows.records.length || keys.records.length) throw new Error("semantic_entity_stale");
@@ -2297,7 +2298,7 @@ export class Store {
     const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated, relations } = input;
     const claim = validated.claim, { fact_id, link_id } = allocated;
     const inherited = claim.time.resolution === "inherited";
-    const element = MemoryElement.parse({ id: fact_id, schema: "anamnesis.claim/1", content: claim.content, time: validatedFactTime(validated, source),
+    const element = MemoryElement.parse({ id: fact_id, schema: SCHEMA_ID.CLAIM, content: claim.content, time: validatedFactTime(validated, source),
       origin: { source: "semantic-extraction", session: generation, actor: profile, record: occurrence },
       mass: claim.confidence, properties: { ...validated.identity.properties, sub_kind: claim.sub_kind, modality: claim.modality,
         confidence: claim.confidence, content_language: claim.content_language, semantic_time: claim.time,
@@ -2317,7 +2318,7 @@ export class Store {
     const createdEntities = new Set<string>();
     for (const entity of resolution.entity_resolutions) {
       if (entity.status !== "new" || !validated.identity.entity_ids.includes(entity.entity_id) || createdEntities.has(entity.entity_id)) continue;
-      await this.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: "anamnesis.entity/1", content: entity.normalized_name,
+      await this.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: SCHEMA_ID.ENTITY, content: entity.normalized_name,
         origin: { source: "semantic-extraction", session: generation, actor: profile, record: entity.entity_key },
         properties: { normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: entity.entity_key } }), null, {});
       await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entity.entity_id, generation, key: entity.entity_key });
@@ -2355,7 +2356,7 @@ export class Store {
       const denies = [...policy.denies.values()].filter(deny => !policy.revoked.has(deny.policy_id));
       // AND semantics stay identical to feedback authority, including policies
       // that specify both source and Episode ID.
-      const parameters = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: ["anamnesis.original-message/1", "anamnesis.original-document/1"] };
+      const parameters = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: [...EPISODE_SCHEMAS] };
       const allowed = `e.schema IN $schemas AND e.time_utc <= $T
         AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
         AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL }`;
@@ -2430,7 +2431,7 @@ export class Store {
           try { await this.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
           catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") return null; throw error; }
           const fact = toElement(nodeProps(node)), ppr = pprScores.get(id) ?? 0;
-          const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: "anamnesis.claim/1", epistemic: "derived",
+          const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: SCHEMA_ID.CLAIM, epistemic: "derived",
             content: fact.content, time: fact.time!, mass: Math.max(0, Math.min(1, ppr || fact.mass)), utility: 0,
             relevance: Math.max(0, ppr), score: Math.max(0, ppr || fact.mass), sources: [z.uuidv7().parse(sourceId)],
             provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
@@ -3662,13 +3663,13 @@ export class Store {
         if (!this.dreamLeidenAdapter) throw new Error("dream_adapter_unavailable");
         const result = await this.dreamLeidenAdapter.execute(adapterInput);
         job.state = "succeeded"; job.version++;
-        (job as any).execution = { state: "succeeded", attempt: 1, result, retryable: false };
+        job.execution = { state: "succeeded", attempt: 1, result, retryable: false };
         await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`, { id:job.job_id, body:canonicalExtractionBody(job), state:job.state, version:job.version });
         return job;
       } catch (error) {
         if (!(error instanceof DreamAdapterError) && (error as Error).message !== "dream_adapter_unavailable") throw error;
         job.state = "unknown"; job.version++;
-        (job as any).execution = { state: "unknown", attempt: 1, error: error instanceof Error ? error.message : "dream_adapter_unavailable", retryable: false };
+        job.execution = { state: "unknown", attempt: 1, error: error instanceof Error ? error.message : "dream_adapter_unavailable", retryable: false };
         await tx.run(`MATCH (j:DreamJob {id:$id}) SET j.body=$body,j.state=$state,j.version=$version`, { id:job.job_id, body:canonicalExtractionBody(job), state:job.state, version:job.version });
         return job;
       }

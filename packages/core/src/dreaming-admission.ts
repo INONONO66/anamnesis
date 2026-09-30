@@ -18,10 +18,14 @@ export type DreamSourceReceipt = {
 };
 export type DreamAdmissionInput = DreamFence & { phase: DreamPhase; source_ids: string[] };
 export type DreamLease = { worker_id: string; epoch: string; expires_at: number };
+export type DreamExecution =
+  | { state: "succeeded"; attempt: number; result: LeidenResult; retryable: false }
+  | { state: "unknown"; attempt: number; error: string; retryable: false };
 export type DreamJob = DreamAdmissionInput & {
   job_id: string;
   source_receipts: DreamSourceReceipt[];
-  state: "queued" | "leased";
+  state: "queued" | "leased" | "succeeded" | "unknown";
+  execution?: DreamExecution;
   version: number;
   lease: DreamLease | null;
   semantic_writes: false;
@@ -56,8 +60,12 @@ class MemoryDreamJobStore implements DreamJobStore {
 /** Atomic JSON store used by the daemon; rename makes restart recovery bounded and durable. */
 export class FileDreamJobStore implements DreamJobStore {
   constructor(private readonly path: string) { mkdirSync(path.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || ".", { recursive: true }); }
-  get(id: string) { try { const all = JSON.parse(readFileSync(this.path, "utf8")) as DreamJob[]; return structuredClone(all.find(j => j.job_id === id) ?? null); } catch { return null; } }
-  put(job: DreamJob) { let all: DreamJob[] = []; try { all = JSON.parse(readFileSync(this.path, "utf8")); } catch {} const i = all.findIndex(j => j.job_id === job.job_id); if (i < 0) all.push(job); else all[i] = job; const tmp = `${this.path}.tmp`; writeFileSync(tmp, JSON.stringify(all)); renameSync(tmp, this.path); }
+  private readAll(): DreamJob[] {
+    try { return JSON.parse(readFileSync(this.path, "utf8")) as DreamJob[]; }
+    catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return []; throw error; }
+  }
+  get(id: string) { return structuredClone(this.readAll().find(j => j.job_id === id) ?? null); }
+  put(job: DreamJob) { const all = this.readAll(); const i = all.findIndex(j => j.job_id === job.job_id); if (i < 0) all.push(job); else all[i] = job; const tmp = `${this.path}.tmp`; writeFileSync(tmp, JSON.stringify(all)); renameSync(tmp, this.path); }
 }
 type LeaseInput = { job_id: string; expected_version: number; worker_id: string; lease_ms: number };
 type ExpireInput = { job_id: string; expected_version: number; lease_epoch: string };
