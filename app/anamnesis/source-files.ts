@@ -1,7 +1,7 @@
 import { createHash, type Hash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, open, opendir } from "node:fs/promises";
+import { join, relative } from "node:path";
 
 // Shared by every offline export lane: identity of a sealed source file and
 // the bounded line reader that pins it while it is read.
@@ -55,4 +55,30 @@ export async function* lines(root: string, name: string, expected: string, hash?
 export async function* textLines(root: string, name: string, expected: string, hash?: Hash, options: LineOptions = {}): AsyncGenerator<{ text: string; line: number }> {
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: options.ignoreBOM ?? false });
   for await (const { bytes, line } of lines(root, name, expected, hash, options)) yield { text: decoder.decode(bytes), line };
+}
+
+export type FileInfo = Awaited<ReturnType<typeof fileInfo>>;
+export interface WalkBounds { maxDepth: number; maxEntries: number }
+/** Bounded depth-first walk in code-unit name order: fingerprints every directory, skips AppleDouble
+ * entries into `fingerprints`, and hands every non-directory entry to `onFile`. Limits throw source_depth_limit /
+ * source_entry_limit; a non-directory root or subtree entry throws source_not_directory. */
+export async function walkTree(root: string, bounds: WalkBounds, fingerprints: Map<string, string>, onFile: (path: string, local: string, info: FileInfo, name: string) => Promise<void> | void): Promise<void> {
+  let entries = 0;
+  async function walk(directory: string, depth: number): Promise<void> {
+    if (depth > bounds.maxDepth) throw new Error("source_depth_limit");
+    const info = await fileInfo(directory);
+    if (!info.isDirectory()) throw new Error(`source_not_directory: ${directory}`);
+    fingerprints.set(relative(root, directory), fingerprint(info));
+    const names: string[] = [];
+    for await (const entry of await opendir(directory)) {
+      if (++entries > bounds.maxEntries) throw new Error("source_entry_limit");
+      if (!entry.name.startsWith("._")) names.push(entry.name);
+    }
+    for (const name of names.sort()) {
+      const path = join(directory, name), info = await fileInfo(path);
+      if (info.isDirectory()) await walk(path, depth + 1);
+      else await onFile(path, relative(root, path), info, name);
+    }
+  }
+  await walk(root, 0);
 }

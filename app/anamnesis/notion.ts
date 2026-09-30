@@ -1,11 +1,11 @@
 import { logEvent } from "./log.ts";
 import { constants } from "node:fs";
-import { lstat, open, opendir } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { notionEpisode } from "@anamnesis/backfill";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
-import { fingerprint, sha } from "./source-files.ts";
+import { fingerprint, sha, walkTree } from "./source-files.ts";
 import { ingestSnapshot, type SourceRecord } from "./source.ts";
 
 const MAX_FILES = 1024;
@@ -13,41 +13,20 @@ const MAX_ENTRIES = 4096;
 const MAX_DEPTH = 32;
 const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
-async function fileInfo(path: string) {
-  const info = await lstat(path, { bigint: true });
-  if (info.isSymbolicLink()) throw new Error(`source_symlink: ${path}`);
-  if ((info.mode & 0o444n) === 0n) throw new Error(`source_permission: ${path}`);
-  return info;
-}
 interface Tree { files: string[]; fingerprints: Map<string, string>; }
 async function tree(root: string): Promise<Tree> {
   const files: string[] = [], fingerprints = new Map<string, string>();
-  let entries = 0, bytes = 0;
-  async function walk(directory: string, depth: number): Promise<void> {
-    if (depth > MAX_DEPTH) throw new Error("source_depth_limit");
-    const info = await fileInfo(directory);
-    if (!info.isDirectory()) throw new Error(`source_not_directory: ${directory}`);
-    fingerprints.set(relative(root, directory), fingerprint(info));
-    const names: string[] = [];
-    for await (const entry of await opendir(directory)) {
-      if (++entries > MAX_ENTRIES) throw new Error("source_entry_limit");
-      if (!entry.name.startsWith("._")) names.push(entry.name);
-    }
-    // Only one bounded directory is sorted, never the export's episodes/time.
-    for (const name of names.sort()) {
-      const path = join(directory, name), info = await fileInfo(path);
-      if (info.isDirectory()) await walk(path, depth + 1);
-      else if (name.endsWith(".md")) {
-        if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
-        if (info.size > BigInt(MAX_PAGE_BYTES)) throw new Error(`source_record_too_large: ${path}`);
-        bytes += Number(info.size);
-        if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("source_snapshot_too_large");
-        if (files.length >= MAX_FILES) throw new Error("source_file_limit");
-        files.push(relative(root, path)); fingerprints.set(relative(root, path), fingerprint(info));
-      }
-    }
-  }
-  await walk(root, 0);
+  let bytes = 0;
+  // Only one bounded directory is sorted, never the export's episodes/time.
+  await walkTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, fingerprints, (path, local, info, name) => {
+    if (!name.endsWith(".md")) return;
+    if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
+    if (info.size > BigInt(MAX_PAGE_BYTES)) throw new Error(`source_record_too_large: ${path}`);
+    bytes += Number(info.size);
+    if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("source_snapshot_too_large");
+    if (files.length >= MAX_FILES) throw new Error("source_file_limit");
+    files.push(local); fingerprints.set(local, fingerprint(info));
+  });
   if (!files.length) throw new Error("source_no_export_files");
   return { files, fingerprints };
 }

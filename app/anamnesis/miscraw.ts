@@ -1,12 +1,11 @@
 import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
-import { opendir } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { asideSessionId, createMiscRawParser, type MiscRawContext } from "@anamnesis/backfill";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { Revisions } from "./raw-lane.ts";
-import { fileInfo, fingerprint, sha, textLines } from "./source-files.ts";
+import { fingerprint, sha, textLines, walkTree } from "./source-files.ts";
 import { ingestSnapshot, type SourceRecord } from "./source.ts";
 
 const SEAL = "miscraw.snapshot.json";
@@ -21,37 +20,21 @@ const OPENCODE = "opencode/home/.local/state/opencode/prompt-history.jsonl";
 interface Tree { files: string[]; fingerprints: Map<string, string>; mtimes: Map<string, number>; }
 async function tree(root: string): Promise<Tree> {
   const files: string[] = [], fingerprints = new Map<string, string>(), mtimes = new Map<string, number>();
-  let entries = 0, bytes = 0, indexBytes = 0;
-  async function walk(directory: string, depth: number): Promise<void> {
-    if (depth > MAX_DEPTH) throw new Error("source_depth_limit");
-    const info = await fileInfo(directory);
-    if (!info.isDirectory()) throw new Error(`source_not_directory: ${directory}`);
-    fingerprints.set(relative(root, directory), fingerprint(info));
-    const names: string[] = [];
-    for await (const entry of await opendir(directory)) {
-      if (++entries > MAX_ENTRIES) throw new Error("source_entry_limit");
-      if (!entry.name.startsWith("._")) names.push(entry.name);
-    }
-    for (const name of names.sort()) {
-      const path = join(directory, name), info = await fileInfo(path), local = relative(root, path);
-      if (info.isDirectory()) await walk(path, depth + 1);
-      else {
-        if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
-        // Do not open/copy databases or WAL. A JSONL export must be sealed by its
-        // producer after a consistent read, including Aside's sessions index.
-        if (/\.(db|sqlite|sqlite3)(-(wal|shm|journal))?$|-(wal|shm)$/.test(name)) throw new Error(`source_sqlite_unsupported: ${local}`);
-        if (local !== SEAL && !ASIDE.test(local) && !INDEX.test(local) && !ANTIGRAVITY.test(local) && local !== OPENCODE) throw new Error(`source_format_unsupported: ${local}`);
-        const limit = local === SEAL ? 1024 * 1024 : MAX_FILE_BYTES;
-        if (info.size > BigInt(limit)) throw new Error(`source_file_too_large: ${local}`);
-        bytes += Number(info.size);
-        if (INDEX.test(local)) indexBytes += Number(info.size);
-        if (bytes > MAX_SNAPSHOT_BYTES || indexBytes > MAX_INDEX_BYTES) throw new Error("source_snapshot_too_large");
-        if (files.length >= MAX_FILES) throw new Error("source_file_limit");
-        files.push(local); fingerprints.set(local, fingerprint(info)); mtimes.set(local, Number(info.mtimeNs / 1_000_000n));
-      }
-    }
-  }
-  await walk(root, 0);
+  let bytes = 0, indexBytes = 0;
+  await walkTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, fingerprints, (path, local, info, name) => {
+    if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
+    // Do not open/copy databases or WAL. A JSONL export must be sealed by its
+    // producer after a consistent read, including Aside's sessions index.
+    if (/\.(db|sqlite|sqlite3)(-(wal|shm|journal))?$|-(wal|shm)$/.test(name)) throw new Error(`source_sqlite_unsupported: ${local}`);
+    if (local !== SEAL && !ASIDE.test(local) && !INDEX.test(local) && !ANTIGRAVITY.test(local) && local !== OPENCODE) throw new Error(`source_format_unsupported: ${local}`);
+    const limit = local === SEAL ? 1024 * 1024 : MAX_FILE_BYTES;
+    if (info.size > BigInt(limit)) throw new Error(`source_file_too_large: ${local}`);
+    bytes += Number(info.size);
+    if (INDEX.test(local)) indexBytes += Number(info.size);
+    if (bytes > MAX_SNAPSHOT_BYTES || indexBytes > MAX_INDEX_BYTES) throw new Error("source_snapshot_too_large");
+    if (files.length >= MAX_FILES) throw new Error("source_file_limit");
+    files.push(local); fingerprints.set(local, fingerprint(info)); mtimes.set(local, Number(info.mtimeNs / 1_000_000n));
+  });
   if (!files.includes(SEAL)) throw new Error("source_producer_seal_required");
   if (!files.some(name => ASIDE.test(name) || ANTIGRAVITY.test(name) || name === OPENCODE)) throw new Error("source_no_export_files");
   return { files, fingerprints, mtimes };

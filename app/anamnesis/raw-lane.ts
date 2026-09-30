@@ -1,12 +1,11 @@
 import { logEvent } from "./log.ts";
 import { createHash } from "node:crypto";
-import { opendir } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { RememberInput } from "@anamnesis/core";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
-import { fileInfo, fingerprint, lines, sha } from "./source-files.ts";
+import { fingerprint, lines, sha, walkTree, type FileInfo } from "./source-files.ts";
 
 const MAX_FILES = 16_384;
 const MAX_ENTRIES = 65_536;
@@ -43,32 +42,19 @@ function getLineageMetadata(actor: string): { origin_role: "user" | "assistant";
 }
 interface Tree { files: string[]; fingerprints: Map<string, string>; }
 /** Admits one selected export file and returns its byte size. */
-function admitFile(path: string, info: Awaited<ReturnType<typeof fileInfo>>): number {
+function admitFile(path: string, info: FileInfo): number {
   if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
   if (info.size > BigInt(MAX_FILE_BYTES)) throw new Error(`source_file_too_large: ${path}`);
   return Number(info.size);
 }
 async function tree(root: string, lane: RawLane): Promise<Tree> {
   const files: string[] = [], fingerprints = new Map<string, string>();
-  let entries = 0, bytes = 0;
-  async function walk(directory: string, depth: number): Promise<void> {
-    if (depth > MAX_DEPTH) throw new Error("source_depth_limit");
-    const info = await fileInfo(directory);
-    if (!info.isDirectory()) throw new Error(`source_not_directory: ${directory}`);
-    fingerprints.set(relative(root, directory), fingerprint(info));
-    const names: string[] = [];
-    for await (const entry of await opendir(directory)) {
-      if (++entries > MAX_ENTRIES) throw new Error("source_entry_limit");
-      if (!entry.name.startsWith("._")) names.push(entry.name);
-    }
-    // Bounded depth-first code-unit file order; no export-wide episode sort.
-    for (const name of names.sort()) {
-      const path = join(directory, name), info = await fileInfo(path), local = relative(root, path);
-      if (info.isDirectory()) await walk(path, depth + 1);
-      else if (lane.selects(local)) { bytes += admitFile(path, info); if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("source_snapshot_too_large"); if (files.length >= MAX_FILES) throw new Error("source_file_limit"); files.push(local); fingerprints.set(local, fingerprint(info)); }
-    }
-  }
-  await walk(root, 0);
+  let bytes = 0;
+  // Bounded depth-first code-unit file order; no export-wide episode sort.
+  await walkTree(root, { maxDepth: MAX_DEPTH, maxEntries: MAX_ENTRIES }, fingerprints, (path, local, info) => {
+    if (!lane.selects(local)) return;
+    bytes += admitFile(path, info); if (bytes > MAX_SNAPSHOT_BYTES) throw new Error("source_snapshot_too_large"); if (files.length >= MAX_FILES) throw new Error("source_file_limit"); files.push(local); fingerprints.set(local, fingerprint(info));
+  });
   if (!files.length) throw new Error("source_no_export_files");
   return { files, fingerprints };
 }
