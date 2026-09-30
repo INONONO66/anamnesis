@@ -61,9 +61,7 @@ const scenarioFiles = {
     "./scripts/qa/g003-byte-budget.test.ts",
     "./scripts/qa/g003-publication.test.ts",
   ],
-  "dynamics-replay": [
-    "./scripts/qa/g003-dynamics-replay.test.ts",
-  ],
+  "dynamics-replay": ["./scripts/qa/g003-policy-authority.test.ts"],
   "extraction-dispositions": ["./scripts/qa/g004-derived-pipeline.test.ts"],
   "generation-model-cutover": ["./scripts/qa/g004-extraction-lifecycle.test.ts"],
   "coverage-reader-aba": ["./scripts/qa/g004-extraction-lifecycle.test.ts"],
