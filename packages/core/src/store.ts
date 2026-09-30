@@ -4,7 +4,7 @@ import neo4j, { Driver, type ManagedTransaction, type RecordShape } from "neo4j-
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
-import { LINK_LATTICE, MemoryElement, MemoryLink, ExtractionAttempt, Generation, ModelTask, Coverage, type MemoryElementInput, type MemoryLinkInput, type LinkRole } from "@anamnesis/protocol";
+import { LINK_LATTICE, MemoryElement, MemoryLink, ExtractionAttempt, Generation, ModelTask, Coverage, type MemoryElementInput, type MemoryLinkInput, type LinkRole, type TimePoint } from "@anamnesis/protocol";
 import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "@anamnesis/protocol";
 import { ObjectStore } from "./objects.ts";
 import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "@anamnesis/protocol";
@@ -172,6 +172,38 @@ function physicalLinkRows(links: PhysicalConductor[]): { expected: Map<string, C
     }
   }
   return { expected, dataIssues, violations };
+}
+
+interface ElementRevision {
+  sourceRevision: string;
+  revisionKey: string;
+  previousRevisionKey: string | null;
+  ingestedAt: number;
+  digest: string;
+  originRole?: string;
+  lineageDigest?: string;
+}
+
+const timeColumns = (time: TimePoint | null) => ({ timeValue: time?.value ?? null, timeUtc: time ? toUtc(time.value) : null, timePrecision: time?.precision ?? null });
+
+/** Revision columns of an Episode row; an element without a revision carries its own canonical digest and the current ingest time. */
+function revisionColumns(revision: ElementRevision | undefined, el: MemoryElement, payloadHash: string | null) {
+  if (!revision) {
+    return { digest: elementDigest(el, { payloadHash }), digestFormat: CANONICAL_DIGEST, episodeDigestVersion: null, originRole: null, lineageDigest: null,
+      sourceRevision: null, revisionKey: null, previousRevisionKey: null, ingestedAt: Date.now() };
+  }
+  return { digest: revision.digest, digestFormat: revision.lineageDigest ? "episode-rfc8785-v2" : CANONICAL_DIGEST, episodeDigestVersion: revision.lineageDigest ? 2 : null,
+    originRole: revision.originRole ?? null, lineageDigest: revision.lineageDigest ?? null, sourceRevision: revision.sourceRevision, revisionKey: revision.revisionKey,
+    previousRevisionKey: revision.previousRevisionKey, ingestedAt: revision.ingestedAt };
+}
+
+/** Submitted output must be what the model-output validator accepts, with the same disposition and spans, and its spans must lie in the source. */
+function checkAttemptOutput(request: CompleteExtractionAttempt, task: ModelTask, source: { content: string }): void {
+  if (!request.output) return;
+  const validated = validateModelOutput(JSON.parse(request.output.canonical_body), task.kind);
+  if (canonicalExtractionBody(validated.output) !== canonicalExtractionBody(request.output) || validated.disposition !== request.disposition
+    || canonicalExtractionBody(request.spans) !== canonicalExtractionBody(validated.spans)) throw new Error("output_mismatch");
+  validateSourceSpans(source.content, request.spans);
 }
 
 export class Store {
@@ -911,15 +943,7 @@ export class Store {
     el: MemoryElement,
     payload: { hash: string; size: number; mediaType: string } | null,
     opts: { enqueue?: boolean; previous?: string },
-    revision?: {
-      sourceRevision: string;
-      revisionKey: string;
-      previousRevisionKey: string | null;
-      ingestedAt: number;
-      digest: string;
-      originRole?: string;
-      lineageDigest?: string;
-    },
+    revision?: ElementRevision,
   ): Promise<void> {
     if (payload) {
       await tx.run(
@@ -952,9 +976,7 @@ export class Store {
         sessionKey: isEpisode ? sessionKey(el.origin) : null,
         id: el.id,
         schema: el.schema,
-        timeValue: time?.value ?? null,
-        timeUtc: time ? toUtc(time.value) : null,
-        timePrecision: time?.precision ?? null,
+        ...timeColumns(time),
         content: el.content,
         source: el.origin.source,
         session: el.origin.session,
@@ -963,17 +985,9 @@ export class Store {
         mass: el.mass,
         properties: JSON.stringify(el.properties),
         payloadHash: payload?.hash ?? null,
-        digest: revision?.digest ?? elementDigest(el, { payloadHash: payload?.hash ?? null }),
-        digestFormat: revision?.lineageDigest ? "episode-rfc8785-v2" : CANONICAL_DIGEST,
-        episodeDigestVersion: revision?.lineageDigest ? 2 : null,
-        originRole: revision?.originRole ?? null,
-        lineageDigest: revision?.lineageDigest ?? null,
+        ...revisionColumns(revision, el, payload?.hash ?? null),
         topologyVersion: isEpisode ? 1 : null,
         previous: isEpisode ? opts.previous ?? null : null,
-        sourceRevision: revision?.sourceRevision ?? null,
-        revisionKey: revision?.revisionKey ?? null,
-        previousRevisionKey: revision?.previousRevisionKey ?? null,
-        ingestedAt: revision?.ingestedAt ?? Date.now(),
       },
     );
     if (payload) {
@@ -2767,20 +2781,50 @@ export class Store {
     return attempt;
   }
 
+  /** A replayed completion: the stored attempt for an identical request, re-authorized when it carries output. */
+  private async replayedAttemptTx(tx: ManagedTransaction, request: CompleteExtractionAttempt, digest: string, policy: PolicyState): Promise<ExtractionAttempt | null> {
+    const oldRows = await tx.run<{ body: string; digest: string }>(`MATCH (a:ExtractionAttempt {id:$id}) RETURN a.body AS body,a.request_digest AS digest`, { id: request.id });
+    const old = oldRows.records[0];
+    if (!old) return null;
+    if (old.get("digest") !== digest) throw new Error("attempt_conflict");
+    const attempt = ExtractionAttempt.parse(JSON.parse(old.get("body")));
+    if (attempt.output) await this.authorizeEpisodesTx(tx, [attempt.source_id], policy);
+    return attempt;
+  }
+
+  /** A judge attempt is checked against its recorded premises and the claim context it judged: stale premises or a
+   * decision set that does not match finish the attempt as failed, a matching one records each disposition. Null when
+   * the attempt may finish as submitted. */
+  private async judgeAttemptTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState, request: CompleteExtractionAttempt, digest: string): Promise<ExtractionAttempt | null> {
+    const premise = await this.extractionRecordTx(tx,'ExtractionJudgeInput',task.attempt_id!,ExtractionJudgeInput);
+    if (premise.policy_revision !== policy.policy_revision || premise.source_head_revision !== await this.extractionHeadTx(tx,task.source_id)) {
+      return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'premises_changed',disposition:null,output:null,spans:[]},digest);
+    }
+    const parent = await this.extractionClaimContextTx(tx,premise.pipeline_id);
+    if (canonicalExtractionBody(parent) !== canonicalExtractionBody(premise.claim_context) || premise.task_id !== task.id || premise.attempt_id !== task.attempt_id) throw new ExtractionAuditError('extraction_audit_conflict');
+    if (!request.output) return null;
+    const body = ExtractionModelOutput.parse(JSON.parse(request.output.canonical_body));
+    // The attempt names the check the judge failed (#218): ABI task, parent digest, or the decision set's shape.
+    const refuse = (detail: ExtractionFailureDetail) => this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',detail,disposition:null,output:null,spans:[]},digest);
+    if (body.task !== 'judge_claims') return refuse('normalize');
+    if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
+    if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
+    for (const d of body.decisions) {
+      const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
+      await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,
+        {id:task.attempt_id,index:neo4j.int(d.claim_index),body:canonicalExtractionBody(decision)});
+    }
+    return null;
+  }
+
   /** Exact completion replay returns the stored immutable outcome. Neither the
    * submitted output nor caller-selected policy context is ever an authority. */
   async recordExtractionAttempt(input: CompleteExtractionAttempt, context: InstallationContext): Promise<ExtractionAttempt> {
     requireInstallation(context);
     const request = CompleteExtractionAttempt.parse(input), digest = extractionBodyDigest(request);
     return this.extractionTx(context, async (tx, policy) => {
-      const oldRows = await tx.run<{ body: string; digest: string }>(`MATCH (a:ExtractionAttempt {id:$id}) RETURN a.body AS body,a.request_digest AS digest`, { id: request.id });
-      const old = oldRows.records[0];
-      if (old) {
-        if (old.get("digest") !== digest) throw new Error("attempt_conflict");
-        const attempt = ExtractionAttempt.parse(JSON.parse(old.get("body")));
-        if (attempt.output) await this.authorizeEpisodesTx(tx, [attempt.source_id], policy);
-        return attempt;
-      }
+      const replayed = await this.replayedAttemptTx(tx, request, digest, policy);
+      if (replayed) return replayed;
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
       this.checkExtractionLease(task, request.lease_epoch);
@@ -2792,32 +2836,10 @@ export class Store {
         if (!(error instanceof ReceiptError) || error.code !== "policy_denied") throw error;
         return this.finishExtractionTx(tx, task, policy, { state: "cancelled", reason: "policy_denied", output: null, disposition: null, spans: [] }, digest);
       }
-      if (request.output) {
-        const validated = validateModelOutput(JSON.parse(request.output.canonical_body), task.kind);
-        if (canonicalExtractionBody(validated.output) !== canonicalExtractionBody(request.output) || validated.disposition !== request.disposition
-          || canonicalExtractionBody(request.spans) !== canonicalExtractionBody(validated.spans)) throw new Error("output_mismatch");
-        validateSourceSpans(source.content, request.spans);
-      }
+      checkAttemptOutput(request, task, source);
       if (task.kind === 'judge_claims') {
-        const premise = await this.extractionRecordTx(tx,'ExtractionJudgeInput',task.attempt_id!,ExtractionJudgeInput);
-        if (premise.policy_revision !== policy.policy_revision || premise.source_head_revision !== await this.extractionHeadTx(tx,task.source_id)) {
-          return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'premises_changed',disposition:null,output:null,spans:[]},digest);
-        }
-        const parent = await this.extractionClaimContextTx(tx,premise.pipeline_id);
-        if (canonicalExtractionBody(parent) !== canonicalExtractionBody(premise.claim_context) || premise.task_id !== task.id || premise.attempt_id !== task.attempt_id) throw new ExtractionAuditError('extraction_audit_conflict');
-        if (request.output) {
-          const body = ExtractionModelOutput.parse(JSON.parse(request.output.canonical_body));
-          // The attempt names the check the judge failed (#218): ABI task, parent digest, or the decision set's shape.
-          const refuse = (detail: ExtractionFailureDetail) => this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',detail,disposition:null,output:null,spans:[]},digest);
-          if (body.task !== 'judge_claims') return refuse('normalize');
-          if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
-          if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
-          for (const d of body.decisions) {
-            const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
-            await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,
-              {id:task.attempt_id,index:neo4j.int(d.claim_index),body:canonicalExtractionBody(decision)});
-          }
-        }
+        const judged = await this.judgeAttemptTx(tx, task, policy, request, digest);
+        if (judged) return judged;
       }
       return this.finishExtractionTx(tx, task, policy, request, digest);
     });
