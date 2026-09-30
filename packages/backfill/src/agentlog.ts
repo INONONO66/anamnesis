@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -99,7 +100,7 @@ function toEpisode(event: RecallableEvent): AgentLogEpisode {
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-message/1",
+      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
       origin: {
         source: event.provider,

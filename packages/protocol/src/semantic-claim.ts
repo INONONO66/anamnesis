@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { ClaimSubKind } from "./element.ts";
+import { ClaimSubKind, EPISODE_SCHEMAS, SCHEMA_ID } from "./element.ts";
 import { canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 const id = z.uuidv7();
@@ -116,7 +116,7 @@ const provenance = z.discriminatedUnion("episode_digest_version", [
 export const SemanticSourceContext = z.strictObject({
   generation: id, fact_language_policy: z.literal("source"), allow_no_single_locus: z.boolean(),
   episode: z.strictObject({
-    id, schema: z.enum(["anamnesis.original-message/1", "anamnesis.original-document/1"]),
+    id, schema: z.enum(EPISODE_SCHEMAS),
     revision_key: hash, content_digest: hash, content: utf8(1048576), content_language: language,
     ingest_seq: count.positive(), time: SemanticResolvedTime,
     speaker: speaker.nullable(), provenance,
@@ -207,7 +207,7 @@ export function validateSemanticClaim(input: unknown, retainedContext: unknown) 
   // Exactly the extracted-Fact meaning fields of docs/01. No arbitrary properties,
   // confidence, raw output, expression, resolution hint or source byte span enters.
   const identity = {
-    generation: context.generation, schema: "anamnesis.claim/1", content: claim.content,
+    generation: context.generation, schema: SCHEMA_ID.CLAIM, content: claim.content,
     content_language: claim.content_language, properties, time, sub_kind: claim.sub_kind, modality: claim.modality,
     primary_episode_id: source.id, max_source_ingest_seq: source.ingest_seq,
     echo_state: ancestry.lineage_mode === "direct" ? "direct" : "context_derived",

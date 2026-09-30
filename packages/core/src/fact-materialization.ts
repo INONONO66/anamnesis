@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "../../protocol/src/element.ts";
 import { createHash } from "node:crypto";
 
 export type RetainedClaim = { text: string; start?: number; end?: number; time: string };
@@ -7,7 +8,7 @@ export type RetainedExtractionAttempt = {
 };
 export type RetainedEpisode = { id: string; content: string; generation: number | string; policyRevision: number };
 export type MaterializedFact = {
-  id: string; schema: "anamnesis.claim/1"; content: string; time: { value: string; precision: "second" };
+  id: string; schema: typeof SCHEMA_ID.CLAIM; content: string; time: { value: string; precision: "second" };
   generation: number | string; policyRevision: number; source_episode_ids: string[]; primary_episode_id: string;
   lineage: { episode_id: string; attempt_id: string; span?: [number, number] };
 };
@@ -31,7 +32,7 @@ export function materializeFacts(
     return { state: "blocked", reason: "stale_evidence", facts: [] };
   }
   const facts = attempt.claims.map((claim, index) => ({
-    id: id(`${attempt.id}:${index}:${claim.text}:${claim.time}`), schema: "anamnesis.claim/1" as const,
+    id: id(`${attempt.id}:${index}:${claim.text}:${claim.time}`), schema: SCHEMA_ID.CLAIM,
     content: claim.text, time: { value: claim.time, precision: "second" as const }, generation: attempt.generation, policyRevision: attempt.policyRevision,
     source_episode_ids: [episode.id], primary_episode_id: episode.id,
     lineage: { episode_id: episode.id, attempt_id: attempt.id, ...(claim.start !== undefined && claim.end !== undefined ? { span: [claim.start, claim.end] as [number, number] } : {}) },

@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "../../protocol/src/element.ts";
 import type { Driver } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -43,9 +44,7 @@ export const RememberInput = z
   .object(MemoryElement.shape)
   .omit({ id: true })
   .extend({
-    schema: MemoryElement.shape.schema.default(
-      "anamnesis.original-message/1",
-    ),
+    schema: MemoryElement.shape.schema.default(SCHEMA_ID.ORIGINAL_MESSAGE),
     payload: z.instanceof(Uint8Array).optional(),
     payload_media_type: z.string().min(1).optional(),
     source_revision: z.string().min(1).optional(),
@@ -391,7 +390,7 @@ export class Engine {
 
   /** Re-extraction rewinds only the mutable cursor, never memory data. */
   async requeueEpisodes(
-    schema = "anamnesis.original-message/1",
+    schema: string = SCHEMA_ID.ORIGINAL_MESSAGE,
   ): Promise<number> {
     return this.store.requeue(schema);
   }

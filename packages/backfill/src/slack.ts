@@ -1,3 +1,4 @@
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { RememberInput } from "@anamnesis/core";
@@ -90,7 +91,7 @@ export function slackEpisode(
   return {
     redactions,
     input: {
-      schema: "anamnesis.original-message/1",
+      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: text,
       origin: {
         source: "slack",
