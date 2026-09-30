@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { notionEpisode } from "@anamnesis/backfill";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
+import { fingerprint, sha } from "./source-files.ts";
 import { ingestSnapshot, type SourceRecord } from "./source.ts";
 
 const MAX_FILES = 1024;
@@ -12,8 +12,6 @@ const MAX_ENTRIES = 4096;
 const MAX_DEPTH = 32;
 const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
-const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const fingerprint = (info: Awaited<ReturnType<typeof fileInfo>>) => [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
 async function fileInfo(path: string) {
   const info = await lstat(path, { bigint: true });
   if (info.isSymbolicLink()) throw new Error(`source_symlink: ${path}`);

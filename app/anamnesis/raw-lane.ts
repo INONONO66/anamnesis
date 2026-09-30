@@ -1,20 +1,18 @@
-import { createHash, type Hash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, opendir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RememberInput } from "@anamnesis/core";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
+import { fileInfo, fingerprint, lines, sha } from "./source-files.ts";
 
 const MAX_FILES = 16_384;
 const MAX_ENTRIES = 65_536;
 const MAX_DEPTH = 64;
-const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_REVISIONS = 100_000;
-const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 /** One caller-owned, offline, producer-sealed raw export format. `selects`
  * decides which files under the root belong to the lane, `parser` builds the
@@ -41,13 +39,6 @@ function getLineageMetadata(actor: string): { origin_role: "user" | "assistant";
   if (actor === "user") return { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
   if (actor === "assistant") return { origin_role: "assistant", lineage_mode: "direct", parent_recall_ids: [] };
   return {};
-}
-const fingerprint = (info: Awaited<ReturnType<typeof fileInfo>>) => [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
-async function fileInfo(path: string) {
-  const info = await lstat(path, { bigint: true });
-  if (info.isSymbolicLink()) throw new Error(`source_symlink: ${path}`);
-  if ((info.mode & 0o444n) === 0n || (info.isDirectory() && (info.mode & 0o111n) === 0n)) throw new Error(`source_permission: ${path}`);
-  return info;
 }
 interface Tree { files: string[]; fingerprints: Map<string, string>; }
 /** Admits one selected export file and returns its byte size. */
@@ -79,42 +70,6 @@ async function tree(root: string, lane: RawLane): Promise<Tree> {
   await walk(root, 0);
   if (!files.length) throw new Error("source_no_export_files");
   return { files, fingerprints };
-}
-
-function assertUtf8(decoder: TextDecoder, record: Uint8Array, at: string): void {
-  try { decoder.decode(record); } catch (cause) { throw new Error(`source_invalid_utf8: ${at}`, { cause }); }
-}
-/** Fixed buffers bound bytes BEFORE decoding or JSON parsing. An open descriptor
- * pins the file; both descriptor and tree identities detect replacement/growth. */
-async function* lines(root: string, name: string, expected: string, hash: Hash): AsyncGenerator<{ bytes: Uint8Array; line: number }> {
-  const file = await open(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const info = await file.stat({ bigint: true });
-    if (!info.isFile() || fingerprint(info) !== expected) throw new Error("source_changed");
-    const buffer = Buffer.allocUnsafe(MAX_LINE_BYTES), chunk = Buffer.allocUnsafe(64 * 1024);
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    let length = 0, line = 1, total = 0;
-    while (true) {
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
-      if (!bytesRead) break;
-      total += bytesRead;
-      if (total > Number(info.size)) throw new Error("source_changed");
-      const bytes = chunk.subarray(0, bytesRead); hash.update(bytes);
-      let start = 0;
-      while (start < bytes.length) {
-        const newline = bytes.indexOf(10, start), end = newline < 0 ? bytes.length : newline;
-        if (length + end - start > MAX_LINE_BYTES) throw new Error(`source_record_too_large: ${name}:${line}`);
-        bytes.copy(buffer, length, start, end); length += end - start;
-        if (newline < 0) break;
-        const record = buffer.subarray(0, length);
-        assertUtf8(decoder, record, `${name}:${line}`);
-        yield { bytes: record, line };
-        line++; length = 0; start = newline + 1;
-      }
-    }
-    if (length) throw new Error(`source_partial_final_line: ${name}:${line}`);
-    if (total !== Number(info.size) || fingerprint(await file.stat({ bigint: true })) !== expected) throw new Error("source_changed");
-  } finally { await file.close(); }
 }
 
 interface Head { native: string; revision: string; key: string; previous: string | null; signature: string }
