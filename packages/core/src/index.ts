@@ -34,3 +34,4 @@ export { ExtractionScheduler, type ExtractionTurn } from "./extraction-scheduler
 export { PacedExtractionProvider } from "./paced-extraction-provider.ts";
 export { elementDigest, verifyLineageRetry } from "./store/digest.ts";
 export { DurableSpool, type SpoolEntry } from "./spool.ts";
+export { backoffMs, managedRestartDelayMs, modelTaskRetryDelayMs } from "./backoff.ts";

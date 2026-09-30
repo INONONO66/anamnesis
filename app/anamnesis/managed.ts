@@ -1,3 +1,4 @@
+import { managedRestartDelayMs } from "@anamnesis/core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rm } from "node:fs/promises";
@@ -64,7 +65,7 @@ export async function managedStatus(root: string): Promise<ManagedState | { stat
 
 /** Foreground supervisor: owns only its spawned child, never a discovered PID.
  * Restart budget is finite, with no readiness polling or endless crash loop. */
-export async function managed(entry: string): Promise<void> {
+export async function managed(entry: string, delay: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<void> {
   const lease = await acquireInstallation(join(runtimeRoot(), "manager"));
   let child: ChildProcess | undefined;
   let stopping = false;
@@ -88,7 +89,9 @@ export async function managed(entry: string): Promise<void> {
       child = undefined;
       if (stopping || result.code === 0) break;
       if (restarts === 3) throw new Error("managed_restart_budget_exhausted");
-      console.error(JSON.stringify({ event: "managed_restart", ...result }));
+      const wait_ms = managedRestartDelayMs(restarts + 1);
+      console.error(JSON.stringify({ event: "managed_restart", ...result, wait_ms }));
+      await delay(wait_ms);
     }
   } finally {
     if (deadline) clearTimeout(deadline);

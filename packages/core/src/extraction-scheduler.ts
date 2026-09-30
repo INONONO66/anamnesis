@@ -7,6 +7,7 @@
 // in-flight promises (at most `maxInFlight`); a terminal settlement re-arms
 // the lane through `wake`, so the loop only advances on real events and an
 // unresolved or failing pipeline waits for the next remember/recovery wake.
+import { modelTaskRetryDelayMs } from "./backoff.ts";
 import { v7 as uuidv7 } from "uuid";
 import type { Engine } from "./engine.ts";
 import type { ExtractionProvider } from "./extraction.ts";
@@ -229,13 +230,21 @@ export class ExtractionScheduler {
     this.deferred = { at, timer };
   }
 
+  /** A failed attempt retries only once its backoff has elapsed; until then the lane defers its wake to that moment. */
+  private retryAfterBackoff(task: ModelTask): Action {
+    const at = task.updated_at + modelTaskRetryDelayMs(task.attempts);
+    if (at <= this.clock()) return { kind: "retry", task };
+    this.deferWake(at);
+    return "unresolved";
+  }
+
   private classify(pipeline: Known): Action {
     const stage = (task: ModelTask): "ok" | Action => {
       switch (task.state) {
         case "succeeded": return "ok";
         case "queued": return "run";
         case "leased": return task.lease && task.lease.expires_at <= this.clock() ? { kind: "settle", task } : "unresolved";
-        case "cancelled": case "failed": return task.attempts < this.maxAttempts && task.state === "failed" ? { kind: "retry", task } : "failed";
+        case "cancelled": case "failed": return task.attempts < this.maxAttempts && task.state === "failed" ? this.retryAfterBackoff(task) : "failed";
         // expired / worker_lost: no provider outcome was received, so the attempt budget is untouched; retry while the
         // lost-lease budget lasts, else cancel into a durable omission.
         default: return (task.lost_leases ?? 0) < this.maxLostLeases ? { kind: "retry", task } : { kind: "cancel", task };
