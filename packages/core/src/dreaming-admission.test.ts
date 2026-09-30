@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DreamAdmission, DreamAdmissionError, FileDreamJobStore } from "./dreaming-admission.ts";
 import { canonicalReceiptJson } from "./receipt-digest.ts";
 
@@ -104,4 +105,15 @@ test("completion is not an admission capability", () => {
   const d = boundary();
   const job = d.admit({ phase: "community", source_ids: [source.id], ...pin });
   expect(() => d.complete(job.job_id, { semantic_writes: true })).toThrow(DreamAdmissionError);
+});
+
+test("FileDreamJobStore refuses a corrupt job file instead of clobbering it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dream-corrupt-"));
+  try {
+    const path = join(dir, "jobs.json");
+    writeFileSync(path, "{not json");
+    const store = new FileDreamJobStore(path);
+    expect(() => store.get("any")).toThrow(new DreamAdmissionError("dream_store_corrupt"));
+    expect(new FileDreamJobStore(join(dir, "absent.json")).get("any")).toBeNull();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

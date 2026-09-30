@@ -6,7 +6,11 @@ export const SCHEMA_VERSION = 1;
 export interface SchemaMigration {
   readonly from: number;
   readonly to: number;
-  /** Cypher run in order inside the init write transaction. */
+  /** Cypher run in order inside the init write transaction. Data statements
+   * only: Neo4j refuses index/constraint DDL in a transaction that also writes
+   * data, and the idempotent DDL already runs in SCHEMA_STATEMENTS before this.
+   * A store is "fresh" when it holds no Element nodes, so a migration may only
+   * depend on Element-derived data; policy or job rows may exist on a fresh store. */
   readonly statements: readonly string[];
 }
 

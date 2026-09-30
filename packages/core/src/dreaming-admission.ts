@@ -33,7 +33,7 @@ export type DreamJob = DreamAdmissionInput & {
 };
 
 export class DreamAdmissionError extends Error {
-  constructor(readonly code: string) { super(code); this.name = "DreamAdmissionError"; }
+  constructor(readonly code: string, options?: ErrorOptions) { super(code, options); this.name = "DreamAdmissionError"; }
 }
 
 export type DreamJobStore = { get(id: string): DreamJob | null; put(job: DreamJob): void };
@@ -60,9 +60,13 @@ class MemoryDreamJobStore implements DreamJobStore {
 /** Atomic JSON store used by the daemon; rename makes restart recovery bounded and durable. */
 export class FileDreamJobStore implements DreamJobStore {
   constructor(private readonly path: string) { mkdirSync(path.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || ".", { recursive: true }); }
+  /** ENOENT is an empty store; a corrupt or unreadable file is a typed refusal, never silently replaced. */
   private readAll(): DreamJob[] {
-    try { return JSON.parse(readFileSync(this.path, "utf8")) as DreamJob[]; }
-    catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return []; throw error; }
+    let raw: string;
+    try { raw = readFileSync(this.path, "utf8"); }
+    catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return []; throw new DreamAdmissionError("dream_store_unreadable", { cause: error }); }
+    try { return JSON.parse(raw) as DreamJob[]; }
+    catch (error) { throw new DreamAdmissionError("dream_store_corrupt", { cause: error }); }
   }
   get(id: string) { return structuredClone(this.readAll().find(j => j.job_id === id) ?? null); }
   put(job: DreamJob) { const all = this.readAll(); const i = all.findIndex(j => j.job_id === job.job_id); if (i < 0) all.push(job); else all[i] = job; const tmp = `${this.path}.tmp`; writeFileSync(tmp, JSON.stringify(all)); renameSync(tmp, this.path); }

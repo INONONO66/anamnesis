@@ -706,7 +706,7 @@ export class Store {
       const row = state.records[0]!;
       const migration = planSchemaMigration(row.get("schema_version"), row.get("elements") > 0);
       for (const step of migration.steps) for (const statement of step.statements) await tx.run(statement);
-      if (row.get("schema_version") !== migration.target) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.schema_version=$version`, { version: migration.target });
+      if (row.get("schema_version") !== migration.target) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.schema_version=toInteger($version)`, { version: migration.target });
       // Only a genuinely policy-empty database may bootstrap revision zero.
       // Missing/incompatible authority never overwrites an existing revision.
       const preserveLegacy = row.get("elements") > 0 && row.get("revision") === null && row.get("format") === null && row.get("events") === 0 && row.get("legacy") === 0;
