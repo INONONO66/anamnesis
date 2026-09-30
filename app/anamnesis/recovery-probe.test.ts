@@ -39,8 +39,7 @@ describe("RecoveryProbe", () => {
     t.fire(); expect(ticks).toBe(0);
   });
   test("the node timers arm and disarm a real timeout at the shipped interval", () => {
-    const probe = new RecoveryProbe(() => {}, RECOVERY_PROBE_MS, nodeTimers);
-    expect(RECOVERY_PROBE_MS).toBe(5000);
+    const probe = new RecoveryProbe(() => { throw new Error("must not fire after disarm"); }, RECOVERY_PROBE_MS, nodeTimers);
     probe.arm(); expect(probe.armed).toBe(true); probe.disarm(); expect(probe.armed).toBe(false);
   });
 });

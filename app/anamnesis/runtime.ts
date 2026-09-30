@@ -178,9 +178,13 @@ export class Runtime {
       if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
-      this.available = false;
-      this.recovery.arm();
+      this.markUnavailable();
     }
+  }
+  /** Every outage observation goes through here so the recovery probe is armed regardless of which lane or RPC saw it first. */
+  private markUnavailable(): void {
+    this.available = false;
+    this.recovery.arm();
   }
   private identity(binding: Binding) {
     return { revision_key: revisionKey(binding.params), body_digest: binding.body_digest, data_incarnation: binding.incarnation };
@@ -332,7 +336,7 @@ export class Runtime {
           if (!previous) await rm(join(this.bindings, key + ".json"));
           throw error;
         }
-        this.available = false;
+        this.markUnavailable();
       }
     }
     if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
@@ -384,7 +388,7 @@ export class Runtime {
       if (batch.drained > 0 || batch.deferred > 0) { this.embedding.requested = true; return "more"; }
       return this.embedding.requested ? "more" : "idle";
     } catch (error) {
-      if (storageUnavailable(error)) { this.available = false; this.embedding.requested = true; return "stalled"; } // Recovery re-schedules the pending wake.
+      if (storageUnavailable(error)) { this.markUnavailable(); this.embedding.requested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.embedding.last_error = String(error).slice(0, 512);
       throw error;
     }
@@ -408,7 +412,7 @@ export class Runtime {
       if (outcome === "more") this.extractionRequested = true;
       return outcome;
     } catch (error) {
-      if (storageUnavailable(error)) { this.available = false; this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
+      if (storageUnavailable(error)) { this.markUnavailable(); this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.extraction.recordError(error);
       throw error;
     }
@@ -444,9 +448,8 @@ export class Runtime {
     } catch (error) {
       await this.drainJob?.return(); this.drainJob = undefined;
       if (!storageUnavailable(error)) throw error;
-      this.available = false;
+      this.markUnavailable();
       this.drainRequested = true; // Recovery will wake a fresh cohort.
-      this.recovery.arm();
       return false;
     }
   }
@@ -577,7 +580,7 @@ export class Runtime {
     let outbox: number | null = null;
     if (this.available) {
       try { outbox = (await runtimeTimed("engine.status", () => this.engine.status())).pendingOutbox; }
-      catch (error) { if (!storageUnavailable(error)) throw error; this.available = false; }
+      catch (error) { if (!storageUnavailable(error)) throw error; this.markUnavailable(); }
     }
     return { version: 1, state: stopping ? "stopping" : this.available && !spool.quarantined && this.quarantined.size === 0 ? "ready" : "degraded",
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
