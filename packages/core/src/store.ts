@@ -102,6 +102,78 @@ const EMBEDDING_MAX_DEFERRALS = 8;
 /** Backoff before a deferred outbox entry is due again: 30 s doubling per deferral, capped at one hour. */
 const embeddingRetryDelay = (deferrals: number): number => Math.min(30_000 * 2 ** (deferrals - 1), 3_600_000);
 
+type PolicyEventRow = { key: string; revision: number; body: string; digest: string };
+
+/** The index-th stored policy event: a well-formed event whose stored key, revision, body and digest all agree with it. */
+function decodePolicyEvent(row: PolicyEventRow, index: number): PolicyEvent {
+  let decoded: unknown;
+  try { decoded = JSON.parse(row.body); }
+  catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new ReceiptError("policy_unavailable"); }
+  const parsed = PolicyEvent.safeParse(decoded);
+  if (!parsed.success) throw new ReceiptError("policy_unavailable");
+  const event = parsed.data, body = policyBody(event);
+  if (event.revision !== index + 1 || row.revision !== event.revision
+    || row.key !== `${event.policy_id}:${event.action}`
+    || row.body !== body || row.digest !== sha256(body)) throw new ReceiptError("policy_unavailable");
+  return event;
+}
+
+/** A deny opens a policy once; a revoke closes an open, unrevoked deny with the same selector and scope. At most 256 stay open. */
+function foldPolicyEvent(event: PolicyEvent, denies: Map<string, PolicyEvent>, revoked: Set<string>): void {
+  const deny = denies.get(event.policy_id);
+  if (event.action === "deny") {
+    if (deny) throw new ReceiptError("policy_unavailable");
+    denies.set(event.policy_id, event);
+  } else {
+    if (!deny || revoked.has(event.policy_id) || canonicalJson(policySelector(deny.selector)) !== canonicalJson(policySelector(event.selector)) || deny.scope !== event.scope) throw new ReceiptError("policy_unavailable");
+    revoked.add(event.policy_id);
+  }
+  if (denies.size - revoked.size > 256) throw new ReceiptError("policy_unavailable");
+}
+
+/** New hits for a feedback commit: one recall_hit per contributing source (deduplicated by idem key against `keys`) and,
+ * for a first outcome, one weighted outcome hit per attributed source. */
+function feedbackHits(receipt: RecallReceipt, request: { operation_id: string; reward?: number | undefined }, adopted: string[], selected: string[],
+  keys: Set<string>, now: number, firstOutcome: boolean): ReceiptHit[] {
+  const hits: ReceiptHit[] = [];
+  const coefficients = new Map<string, number>();
+  for (const item of receipt.primaries.filter((item) => adopted.includes(item.id))) {
+    for (const source of item.sources) coefficients.set(source, Math.min(1, (coefficients.get(source) ?? 0) + 1 / item.sources.length));
+  }
+  const append = (episodeId: string, kind: "recall_hit" | "outcome", value: number): void => {
+    const key = tupleHash([receipt.recall_id, episodeId, kind]);
+    if (keys.has(key)) return;
+    const contributing = kind === "recall_hit" ? adopted : selected;
+    const base = { id: uuidv7(), episode_id: episodeId, operation_id: request.operation_id,
+      namespace: receipt.recall_id, idem_key: key, t: now, config_version: receipt.config_version,
+      attribution: receipt.primaries.filter((item) => contributing.includes(item.id) && item.sources.includes(episodeId)) };
+    hits.push(ReceiptHit.parse(kind === "recall_hit"
+      ? { ...base, kind, kappa_eff: value }
+      : { ...base, kind, kappa_eff: 0, reward: request.reward, weight: value }));
+  };
+  for (const [id, coefficient] of coefficients) append(id, "recall_hit", coefficient);
+  if (firstOutcome) for (const [id, weight] of attributeOutcome(receipt.primaries, selected)) append(id, "outcome", weight);
+  return hits;
+}
+
+/** Each physical link yields one endpoint row per endpoint; malformed links, duplicate ids and self-links are reported alongside. */
+function physicalLinkRows(links: PhysicalConductor[]): { expected: Map<string, ConductingArcRow>; dataIssues: string[]; violations: string[] } {
+  const expected = new Map<string,ConductingArcRow>(), dataIssues: string[] = [], violations: string[] = [], ids = new Set<string>();
+  for (const link of links) {
+    if (!z.uuid().safeParse(link.link_id).success || !z.uuid().safeParse(link.from).success || !z.uuid().safeParse(link.to).success
+      || (link.role === "HAS_MEMBER" && link.source_extraction_generation === null)) dataIssues.push(`invalid-physical:${link.link_id}`);
+    if (ids.has(link.link_id)) dataIssues.push(`duplicate-link-id:${link.link_id}`);
+    ids.add(link.link_id);
+    if (link.from === link.to) violations.push(`self-link:${link.link_id}`);
+    for (const source of new Set([link.from,link.to])) {
+      const row = {source_id:source,peer_id:source===link.from?link.to:link.from,link_id:link.link_id,role:link.role,
+        generation:link.generation,source_extraction_generation:link.source_extraction_generation};
+      expected.set(arcIdentity(row),row);
+    }
+  }
+  return { expected, dataIssues, violations };
+}
+
 export class Store {
   private readonly driver: Driver;
   private readonly database: string;
@@ -366,26 +438,7 @@ export class Store {
       `MATCH (p:PolicyEvent) RETURN p.key AS key,p.revision AS revision,p.body AS body,p.body_digest AS digest ORDER BY p.revision`);
     if (events.records.length !== revision.data) throw new ReceiptError("policy_unavailable");
     const denies = new Map<string, PolicyEvent>(), revoked = new Set<string>();
-    for (const [index, record] of events.records.entries()) {
-      let decoded: unknown;
-      try { decoded = JSON.parse(record.get("body")); }
-      catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new ReceiptError("policy_unavailable"); }
-      const parsed = PolicyEvent.safeParse(decoded);
-      if (!parsed.success) throw new ReceiptError("policy_unavailable");
-      const event = parsed.data, body = policyBody(event);
-      if (event.revision !== index + 1 || record.get("revision") !== event.revision
-        || record.get("key") !== `${event.policy_id}:${event.action}`
-        || record.get("body") !== body || record.get("digest") !== sha256(body)) throw new ReceiptError("policy_unavailable");
-      const deny = denies.get(event.policy_id);
-      if (event.action === "deny") {
-        if (deny) throw new ReceiptError("policy_unavailable");
-        denies.set(event.policy_id, event);
-      } else {
-        if (!deny || revoked.has(event.policy_id) || canonicalJson(policySelector(deny.selector)) !== canonicalJson(policySelector(event.selector)) || deny.scope !== event.scope) throw new ReceiptError("policy_unavailable");
-        revoked.add(event.policy_id);
-      }
-      if (denies.size - revoked.size > 256) throw new ReceiptError("policy_unavailable");
-    }
+    for (const [index, record] of events.records.entries()) foldPolicyEvent(decodePolicyEvent(record.toObject(), index), denies, revoked);
     return { structure_revision: row.get("structure"), policy_revision: revision.data, denies, revoked };
   }
 
@@ -559,26 +612,7 @@ export class Store {
       if (outcome && outcomeDigest !== null && outcome.get("digest") !== outcomeDigest) throw new ReceiptError("idempotency_conflict");
       const existingHits = await tx.run<{ key: string }>(`MATCH (h:Hit {namespace:$id}) RETURN h.idem_key AS key`, { id: receipt.recall_id });
       const keys = new Set(existingHits.records.map((row) => row.get("key")));
-      const hits: ReceiptHit[] = [];
-      const coefficients = new Map<string, number>();
-      for (const item of receipt.primaries.filter((item) => adopted.includes(item.id))) {
-        for (const source of item.sources) coefficients.set(source, Math.min(1, (coefficients.get(source) ?? 0) + 1 / item.sources.length));
-      }
-      const append = (episodeId: string, kind: "recall_hit" | "outcome", value: number): void => {
-        const key = tupleHash([receipt.recall_id, episodeId, kind]);
-        if (keys.has(key)) return;
-        const contributing = kind === "recall_hit" ? adopted : selected;
-        const base = { id: uuidv7(), episode_id: episodeId, operation_id: request.operation_id,
-          namespace: receipt.recall_id, idem_key: key, t: now, config_version: receipt.config_version,
-          attribution: receipt.primaries.filter((item) => contributing.includes(item.id) && item.sources.includes(episodeId)) };
-        hits.push(ReceiptHit.parse(kind === "recall_hit"
-          ? { ...base, kind, kappa_eff: value }
-          : { ...base, kind, kappa_eff: 0, reward: request.reward, weight: value }));
-      };
-      for (const [id, coefficient] of coefficients) append(id, "recall_hit", coefficient);
-      if (request.reward !== undefined && !outcome) {
-        for (const [id, weight] of attributeOutcome(receipt.primaries, selected)) append(id, "outcome", weight);
-      }
+      const hits = feedbackHits(receipt, request, adopted, selected, keys, now, outcomeDigest !== null && !outcome);
       const result: CommitReceiptResult = { operation_id: request.operation_id, recall_id: receipt.recall_id,
         adopted, reward: request.reward ?? null, applied: hits.length > 0 || (outcomeDigest !== null && !outcome) };
       await tx.run(`MATCH (r:RecallReceipt {recall_id:$recallId})
@@ -1224,19 +1258,7 @@ export class Store {
     const truncated = [links,arcs,coverage,generations,extraction].some(rows => rows.length > maxItems);
     const partitions = [...new Map([{stream:"cache",generation:0},...generations,...extraction,...coverage,
       ...links.map(link => conductingPartition(link.role,link.generation))].map(p => [JSON.stringify([p.stream,p.generation]),{stream:p.stream,generation:p.generation}])).values()];
-    const expected = new Map<string,ConductingArcRow>(), dataIssues: string[] = [], violations: string[] = [], ids = new Set<string>();
-    for (const link of links) {
-      if (!z.uuid().safeParse(link.link_id).success || !z.uuid().safeParse(link.from).success || !z.uuid().safeParse(link.to).success
-        || (link.role === "HAS_MEMBER" && link.source_extraction_generation === null)) dataIssues.push(`invalid-physical:${link.link_id}`);
-      if (ids.has(link.link_id)) dataIssues.push(`duplicate-link-id:${link.link_id}`);
-      ids.add(link.link_id);
-      if (link.from === link.to) violations.push(`self-link:${link.link_id}`);
-      for (const source of new Set([link.from,link.to])) {
-        const row = {source_id:source,peer_id:source===link.from?link.to:link.from,link_id:link.link_id,role:link.role,
-          generation:link.generation,source_extraction_generation:link.source_extraction_generation};
-        expected.set(arcIdentity(row),row);
-      }
-    }
+    const { expected, dataIssues, violations } = physicalLinkRows(links);
     const actual = new Map(arcs.map(row => [arcIdentity(row),row]));
     for (const [key,row] of expected) {
       if (!actual.has(key)) dataIssues.push(`missing-row:${key}`);
@@ -1387,6 +1409,27 @@ export class Store {
     return rows.records.map(record => record.toObject());
   }
 
+  /** An Episode element at or before T that no unrevoked deny selects by episode id or origin source. */
+  private async episodeAllowedTx(tx: ManagedTransaction, id: string, policy: PolicyState, T: number): Promise<boolean> {
+    const result = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.time_utc AS time,e.origin_source AS source`, { id });
+    const e = result.records[0];
+    // Derived source/witness authority is not yet materialized by this
+    // runtime. Unknown/derived nodes must not inherit Episode permission.
+    if (!e || !isEpisodeSchema(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
+    return ![...policy.denies.values()].some(deny => !policy.revoked.has(deny.policy_id)
+      && (deny.selector.episode_id === undefined || deny.selector.episode_id === id)
+      && (deny.selector.source === undefined || deny.selector.source === e.get("source")));
+  }
+
+  /** The endpoint row still describes exactly one ungenerated physical NEXT_EPISODE link between source and peer. */
+  private async nextEpisodeLinkIntactTx(tx: ManagedTransaction, source: string, row: ConductingArcRow): Promise<boolean> {
+    const physical = await tx.run(`MATCH (a)-[l:NEXT_EPISODE]->(b) USING INDEX l:NEXT_EPISODE(id)
+      WHERE l.id=$id RETURN a.id AS a,b.id AS b,l.generation AS generation,l.source_extraction_generation AS source_generation`, { id: row.link_id });
+    const link = physical.records[0];
+    return physical.records.length === 1 && link !== undefined && link.get("generation") === null && link.get("source_generation") === null
+      && ((link.get("a") === source && link.get("b") === row.peer_id) || (link.get("b") === source && link.get("a") === row.peer_id));
+  }
+
   async graphEnvelope(seedIds: string[], options: { T?: number; maxNodes?: number; maxArcs?: number } = {}, context?: InstallationContext): Promise<GraphEnvelope> {
     requireInstallation(context!);
     const seeds = [...new Set(z.array(z.uuidv7()).min(1).max(128).parse(seedIds))].sort();
@@ -1397,18 +1440,8 @@ export class Store {
       const policy = await this.receiptLockTx(tx), pin = await this.graphPinTx(tx, policy, T);
       const probes: ConductingArcProbe[] = [], eligible: ConductingArcRow[] = [], ids = new Set<string>();
       let staleTopology = false;
-      const allowed = async (id: string): Promise<boolean> => {
-        const result = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.time_utc AS time,e.origin_source AS source`, { id });
-        const e = result.records[0];
-        // Derived source/witness authority is not yet materialized by this
-        // runtime. Unknown/derived nodes must not inherit Episode permission.
-        if (!e || !isEpisodeSchema(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
-        return ![...policy.denies.values()].some(deny => !policy.revoked.has(deny.policy_id)
-          && (deny.selector.episode_id === undefined || deny.selector.episode_id === id)
-          && (deny.selector.source === undefined || deny.selector.source === e.get("source")));
-      };
       for (const source of seeds) {
-        if (!await allowed(source)) continue;
+        if (!await this.episodeAllowedTx(tx, source, policy, T)) continue;
         ids.add(source);
         const rows = await this.graphRawProbeTx(tx, source);
         probes.push({ source_id: source, count: rows.length, saturated: rows.length === 256, coverage: "complete" });
@@ -1416,15 +1449,8 @@ export class Store {
         if (rows.length === 256) continue;
         for (const row of rows) {
           if (row.role !== "NEXT_EPISODE") continue;
-          if (row.generation !== null || row.source_extraction_generation !== null) { staleTopology = true; continue; }
-          const physical = await tx.run(`MATCH (a)-[l:NEXT_EPISODE]->(b) USING INDEX l:NEXT_EPISODE(id)
-            WHERE l.id=$id RETURN a.id AS a,b.id AS b,l.generation AS generation,l.source_extraction_generation AS source_generation`, { id: row.link_id });
-          const link = physical.records[0];
-          if (physical.records.length !== 1 || !link || link.get("generation") !== null || link.get("source_generation") !== null
-            || !((link.get("a") === source && link.get("b") === row.peer_id) || (link.get("b") === source && link.get("a") === row.peer_id))) {
-            staleTopology = true; continue;
-          }
-          if (!await allowed(row.peer_id)) continue;
+          if (row.generation !== null || row.source_extraction_generation !== null || !await this.nextEpisodeLinkIntactTx(tx, source, row)) { staleTopology = true; continue; }
+          if (!await this.episodeAllowedTx(tx, row.peer_id, policy, T)) continue;
           ids.add(row.peer_id); eligible.push(row);
         }
       }
