@@ -233,26 +233,27 @@ export class Runtime {
     }
     return binding;
   }
+  /** The retained lineage of a v2 Episode, verified against its stored digests, as the remember metadata it implies. */
+  private async retainedLineage(row: StoredEpisode, binding: Binding): Promise<{ origin_role: StoredEpisode["origin_role"]; lineage_mode: EchoLineage["lineage_mode"]; parent_recall_ids: EchoLineage["parent_recall_ids"] }> {
+    const retained = (await this.read<{ body: string; props: Record<string, unknown> }>(
+      "MATCH (l:EchoLineage {episode_id:$id}) RETURN l.body AS body,properties(l) AS props", { id: row.id }))[0];
+    if (!retained) throw new RpcFault("lineage_unavailable", "retained lineage missing");
+    const lineage = EchoLineage.parse(JSON.parse(retained.body));
+    const { body, digest: retainedDigest, ...props } = retained.props;
+    if (lineage.episode_id !== row.id || sha(canonical(lineage)) !== row.lineage_digest
+      || retainedDigest !== row.lineage_digest || canonical(props) !== body || canonical(lineage) !== body)
+      throw new RpcFault("lineage_mismatch", "retained lineage digest mismatch");
+    verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);
+    return { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids };
+  }
   private async committed(binding: Binding, created = false): Promise<RpcCommittedResult | null> {
     const row = (await this.read<{ e: StoredEpisode }>("MATCH (e:Element:Episode {revision_key:$key}) RETURN properties(e) AS e", { key: revisionKey(binding.params) }))[0]?.e;
     if (!row) return null;
     if (row.episode_digest_version !== undefined && row.episode_digest_version !== 2)
       throw new RpcFault("unsupported_digest_version", "stored Episode version is unsupported");
-    let metadata;
-    if (row.episode_digest_version === 2) {
-      const retained = (await this.read<{ body: string; props: Record<string, unknown> }>(
-        "MATCH (l:EchoLineage {episode_id:$id}) RETURN l.body AS body,properties(l) AS props", { id: row.id }))[0];
-      if (!retained) throw new RpcFault("lineage_unavailable", "retained lineage missing");
-      const lineage = EchoLineage.parse(JSON.parse(retained.body));
-      const { body, digest: retainedDigest, ...props } = retained.props;
-      if (lineage.episode_id !== row.id || sha(canonical(lineage)) !== row.lineage_digest
-        || retainedDigest !== row.lineage_digest || canonical(props) !== body || canonical(lineage) !== body)
-        throw new RpcFault("lineage_mismatch", "retained lineage digest mismatch");
-      verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);
-      metadata = { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids };
-    } else if (row.digest_format !== undefined && row.digest_format !== "rfc8785-v1") {
+    if (row.episode_digest_version !== 2 && row.digest_format !== undefined && row.digest_format !== "rfc8785-v1")
       throw new RpcFault("unsupported_digest_version", "stored digest format is unsupported");
-    }
+    const metadata = row.episode_digest_version === 2 ? await this.retainedLineage(row, binding) : undefined;
     const params = RpcRememberParams.parse({ episode: {
       schema: row.schema, time: { value: row.time_value, precision: row.time_precision },
       content: row.content, mass: row.mass, properties: JSON.parse(row.properties),
@@ -296,18 +297,30 @@ export class Runtime {
     const key = revisionKey(params);
     const previous = await this.binding(key);
     const candidate: Binding = { digest_version: 1, params, body_digest: digest(params), incarnation: this.installation.incarnation, fs_epoch: this.installation.epoch };
-    // The immutable database version wins before filesystem delivery equality or
-    // any new role/parent validation. Never rewrite an old delivery binding.
     await this.refresh();
+    const existing = this.available ? await this.rememberExisting(key, previous, candidate) : null;
+    if (existing) return existing;
+    const binding = await this.admitBinding(params, previous, candidate, context);
+    const metadata = lineageMetadata(params);
+    if (!previous) await atomicJson(join(this.bindings, key + ".json"), binding);
     if (this.available) {
-      const existing = await this.committed(candidate);
-      if (existing) {
-        if (previous?.incarnation !== undefined && previous.incarnation !== this.installation.incarnation)
-          throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
-        if (!previous) await atomicJson(join(this.bindings, key + ".json"), candidate);
-        return previous ? { ...existing, ...this.identity(previous) } : existing;
-      }
+      const written = await this.tryWrite(binding, key, previous, context);
+      if (written) return written;
     }
+    if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
+    return this.spoolBinding(params, key, binding);
+  }
+  /** A revision the store already committed: bind the delivery if this is its first sighting and answer from the store. */
+  private async rememberExisting(key: string, previous: Binding | null, candidate: Binding): Promise<RpcCommittedResult | null> {
+    const existing = await this.committed(candidate);
+    if (!existing) return null;
+    if (previous?.incarnation !== undefined && previous.incarnation !== this.installation.incarnation)
+      throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
+    if (!previous) await atomicJson(join(this.bindings, key + ".json"), candidate);
+    return previous ? { ...existing, ...this.identity(previous) } : existing;
+  }
+  /** The admission gates in order: body conflict, incarnation, referenced object, spool health, lineage authority. */
+  private async admitBinding(params: RpcRememberParams, previous: Binding | null, candidate: Binding, context?: InstallationContext): Promise<Binding> {
     if (previous && previous.body_digest !== candidate.body_digest) throw new RpcFault("revision_conflict", "revision already binds a different delivery body");
     const binding = previous ?? candidate;
     if (binding.incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
@@ -319,29 +332,30 @@ export class Runtime {
       if (!this.available) throw new RpcFault("storage_unavailable", "lineage admission requires retained authority", true);
       parseEpisodeLineage(metadata);
     }
-    if (!previous) await atomicJson(join(this.bindings, key + ".json"), binding);
-    if (this.available) {
-      try {
-        const result = await this.write(binding, context);
-        if (result.created) this.wakeDrain();
-        return result;
-      }
-      catch (error) {
-        if (!storageUnavailable(error)) {
-          if (!previous) await rm(join(this.bindings, key + ".json"));
-          throw error;
-        }
-        this.markUnavailable();
-      }
+    return binding;
+  }
+  /** Live write; a non-storage failure unbinds a fresh delivery and rethrows, storage loss marks unavailable and falls through to the spool. */
+  private async tryWrite(binding: Binding, key: string, previous: Binding | null, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
+    try {
+      const result = await this.write(binding, context);
+      if (result.created) this.wakeDrain();
+      return result;
     }
-    if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
+    catch (error) {
+      if (!storageUnavailable(error)) {
+        if (!previous) await rm(join(this.bindings, key + ".json"));
+        throw error;
+      }
+      this.markUnavailable();
+      return null;
+    }
+  }
+  private async spoolBinding(params: RpcRememberParams, key: string, binding: Binding) {
     await this.installation.assertOwned();
     const existing = await this.pendingEntry(key);
     if (existing) { this.validated(existing); return this.spooled(binding, existing.sequence); }
     const sequence = await this.spool.append({ origin: originKey(params), revision: key,
       predecessor: params.expected_previous_revision_key, body: binding, incarnation: binding.incarnation });
-    // The current producer API fsyncs journal/markers; the runtime owns and
-    // syncs their already-created directory before any durable acceptance.
     await syncDirectory(this.spoolRoot);
     await this.installation.assertOwned();
     if (sequence < 1 || (await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool did not publish a verifiable durable entry");
