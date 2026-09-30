@@ -289,32 +289,15 @@ export async function foreground(): Promise<void> {
   const server = createServer(accept("uds"));
   const tcpServer = listen ? createServer(accept("tcp")) : undefined;
   const listeners = tcpServer ? [server, tcpServer] : [server];
-  async function dispatch(connection: Connection, request: RpcRequest): Promise<unknown> {
-    if (!runtime) throw new RpcFault("storage_unavailable", "runtime is starting", true);
-    if (request.method === "hello") {
-      if (connection.authenticated) throw new RpcFault("already_authenticated", "hello already completed");
-      const supplied = Buffer.from(request.params.token);
-      const expected = Buffer.from(installation.token);
-      if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new RpcFault("authentication_failed", "invalid installation token");
-      connection.authenticated = true;
-      connection.context = Object.freeze({ principal: "installation", commit_mode: request.params.commit_mode, client_binding: randomUUID() });
-      return { version: 1, principal: "installation", commit_mode: request.params.commit_mode,
-        data_incarnation: installation.incarnation, fs_epoch: installation.epoch, capabilities: runtime.capabilities,
-        limits: { frame_bytes: RPC_LIMITS.frame_bytes, chunk_bytes: RPC_LIMITS.chunk_bytes, object_bytes: RPC_LIMITS.object_bytes, content_bytes: RPC_LIMITS.content_bytes } };
-    }
-    if (!connection.authenticated) throw new RpcFault("unauthenticated", "hello authentication is required");
+  /** Object uploads, audit pipelines, embedding recovery, backup/restore and hit-cache maintenance. */
+  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" }>): unknown {
     switch (request.method) {
-      case "status": return runtime.status(pending, stopping);
-      case "remember": return runtime.remember(request.params, connection.context!);
-      case "ingest.status": return runtime.ingestStatus(request.params);
       case "object.begin": return runtime.uploads.begin(connection, { hash: request.params.sha256, size: request.params.size, media_type: request.params.media_type });
       case "object.chunk": return runtime.uploads.chunk(connection, request.params.upload_id, request.params.seq, Buffer.from(request.params.bytes_b64, "base64"));
       case "object.commit": return runtime.uploads.commit(connection, request.params.upload_id);
-      case "recall": return runtime.recall(request.params, connection.context!);
       case "extraction.audit.create": return runtime.createExtractionPipeline(request.params,connection.context!);
       case "extraction.audit.run": return runtime.runExtractionPipeline(request.params,connection.context!);
       case "extraction.audit.status": return runtime.extractionPipelineStatus(request.params.pipeline_id,connection.context!);
-      case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "embedding.recover": return runtime.recoverEmbedding(request.params, connection.context!);
       case "embedding.status": return runtime.embeddingStatus(request.params.operation_id, connection.context!);
       case "embedding.requeue": return runtime.requeueQuarantinedEmbeddings(request.params, connection.context!);
@@ -322,6 +305,32 @@ export async function foreground(): Promise<void> {
       case "restore": return runtime.restore(connection.context!, request.params.archive, request.params.operation_id);
       case "backup.status": return runtime.backupStatus(request.params.operation_id);
       case "restore.status": return runtime.restoreStatus(request.params.operation_id);
+      case "hit-cache.verify": return runtime.verifyHitCache();
+      case "hit-cache.rebuild": return runtime.rebuildHitCache();
+    }
+  }
+  /** The hello handshake: constant-time token check, then the connection is bound and the runtime's capabilities and limits are announced. */
+  function hello(connection: Connection, params: Extract<RpcRequest, { method: "hello" }>["params"]) {
+    if (connection.authenticated) throw new RpcFault("already_authenticated", "hello already completed");
+    const supplied = Buffer.from(params.token);
+    const expected = Buffer.from(installation.token);
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new RpcFault("authentication_failed", "invalid installation token");
+    connection.authenticated = true;
+    connection.context = Object.freeze({ principal: "installation", commit_mode: params.commit_mode, client_binding: randomUUID() });
+    return { version: 1, principal: "installation", commit_mode: params.commit_mode,
+      data_incarnation: installation.incarnation, fs_epoch: installation.epoch, capabilities: runtime!.capabilities,
+      limits: { frame_bytes: RPC_LIMITS.frame_bytes, chunk_bytes: RPC_LIMITS.chunk_bytes, object_bytes: RPC_LIMITS.object_bytes, content_bytes: RPC_LIMITS.content_bytes } };
+  }
+  async function dispatch(connection: Connection, request: RpcRequest): Promise<unknown> {
+    if (!runtime) throw new RpcFault("storage_unavailable", "runtime is starting", true);
+    if (request.method === "hello") return hello(connection, request.params);
+    if (!connection.authenticated) throw new RpcFault("unauthenticated", "hello authentication is required");
+    switch (request.method) {
+      case "status": return runtime.status(pending, stopping);
+      case "remember": return runtime.remember(request.params, connection.context!);
+      case "ingest.status": return runtime.ingestStatus(request.params);
+      case "recall": return runtime.recall(request.params, connection.context!);
+      case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "commit":
         if (connection.context!.commit_mode !== "receipt") throw new RpcFault("commit_mode_mismatch", "commit requires receipt-mode authentication");
         return runtime.commit(request.params, connection.context!);
@@ -331,12 +340,11 @@ export async function foreground(): Promise<void> {
       case "policy.revoke":
         await cancelPublications();
         return runtime.revokePolicy(request.params, connection.context!);
-      case "hit-cache.verify": return runtime.verifyHitCache();
-      case "hit-cache.rebuild": return runtime.rebuildHitCache();
       case "shutdown":
         stopping = true;
         setImmediate(() => { void stop().catch(logError); });
         return { state: "stopping" };
+      default: return maintenance(runtime, connection, request);
     }
   }
   const stop = (): Promise<void> => shutdown ??= (async () => {
