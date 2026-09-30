@@ -19,6 +19,7 @@ import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
 import { fault, RpcFault, storageUnavailable } from "./wire.ts";
+import { RECOVERY_PROBE_MS, RecoveryProbe, nodeTimers } from "./recovery-probe.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
@@ -122,6 +123,8 @@ export class Runtime {
   /** Wraps the configured provider so every model call (scheduler and audit RPCs alike) is metered; present with `extraction`. */
   private readonly pacer: PacedExtractionProvider | undefined;
   private extractionRequested = false;
+  /** While storage is unavailable, ticks re-enter the spool lane so drainTurn retries refresh() on the daemon's serial queue. */
+  private readonly recovery = new RecoveryProbe(() => { if (!this.drainStopped) this.scheduleDrain("spool"); }, RECOVERY_PROBE_MS, nodeTimers);
   constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const unpaced = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
@@ -160,7 +163,7 @@ export class Runtime {
     try { return (await runtimeTimed("neo4j.read", () => session.run<Row>(query, params, { timeout: 5000 }), daemonTiming ? timingHash(query) : undefined)).records.map(record => record.toObject()); }
     finally { await runtimeTimed("neo4j.session.close", () => session.close()); }
   }
-  /** Reconnect is demand-driven by status/remember/startup, without polling timers. */
+  /** Reconnect runs on demand (status/remember/startup) and, while unavailable, on the recovery probe's bounded timer. */
   async refresh(): Promise<void> {
     await this.installation.assertOwned();
     try {
@@ -171,10 +174,12 @@ export class Runtime {
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const recovered = !this.available;
       this.available = true;
+      this.recovery.disarm();
       if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
       this.available = false;
+      this.recovery.arm();
     }
   }
   private identity(binding: Binding) {
@@ -420,6 +425,7 @@ export class Runtime {
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {
+    if (!this.drainStopped && !this.available) await this.refresh();
     if (this.drainStopped || !this.available) {
       await this.drainJob?.return(); this.drainJob = undefined;
       return false;
@@ -439,7 +445,8 @@ export class Runtime {
       await this.drainJob?.return(); this.drainJob = undefined;
       if (!storageUnavailable(error)) throw error;
       this.available = false;
-      this.drainRequested = true; // Explicit recovery will wake a fresh cohort.
+      this.drainRequested = true; // Recovery will wake a fresh cohort.
+      this.recovery.arm();
       return false;
     }
   }
@@ -706,6 +713,7 @@ export class Runtime {
     return this.engine.rebuildHitCache();
   }
   async close(): Promise<void> {
+    this.recovery.stop();
     this.cancelDrain();
     await this.drainJob?.return(); this.drainJob = undefined;
     await this.extraction?.close(); // In-flight pipelines settle before the writer goes away.
