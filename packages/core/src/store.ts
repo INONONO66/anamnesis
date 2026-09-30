@@ -2797,16 +2797,24 @@ export class Store {
     });
   }
 
-  async cancelModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
+  /** A CAS-guarded ModelTask transition: the task is loaded inside an extraction transaction, its version checked, and its state gated. */
+  private modelTaskTransition(input: ModelTaskCAS, context: InstallationContext, from: readonly ModelTask["state"][],
+    body: (tx: ManagedTransaction, policy: PolicyState, task: ModelTask, request: ModelTaskCAS) => Promise<ModelTask>): Promise<ModelTask> {
     requireInstallation(context);
     const request = ModelTaskCAS.parse(input);
     return this.extractionTx(context, async (tx, policy) => {
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
+      if (!from.includes(task.state)) throw new Error("invalid_transition");
+      return body(tx, policy, task, request);
+    });
+  }
+
+  async cancelModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
+    return this.modelTaskTransition(input, context, ["queued", "leased", "expired", "worker_lost"], async (tx, policy, task, request) => {
       // Open work is cancelled in place. An expired or lost lease is unresolved work, not an outcome (extractionPipelineOmission);
       // cancelling it is how a caller whose retry budget is spent turns it into a durable, coverable omission. The cancel is a
       // fresh content-free attempt record, so the settled lease attempt stays immutable and the attempt count is unchanged.
-      if (!["queued", "leased", "expired", "worker_lost"].includes(task.state)) throw new Error("invalid_transition");
       const open = task.state === "queued" || task.state === "leased" ? task : { ...task, attempt_id: null, lease: null, attempts: task.attempts - 1 };
       await this.finishExtractionTx(tx, open, policy, { state: "cancelled", reason: "cancelled", output: null, disposition: null, spans: [] }, extractionBodyDigest({ action: "cancel", ...request }));
       return this.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
@@ -2836,12 +2844,7 @@ export class Store {
   }
 
   async retryModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
-    requireInstallation(context);
-    const request = ModelTaskCAS.parse(input);
-    return this.extractionTx(context, async (tx, policy) => {
-      const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
-      this.checkExtractionCAS(task, request.expected_version);
-      if (!["failed", "expired", "worker_lost"].includes(task.state)) throw new Error("invalid_transition");
+    return this.modelTaskTransition(input, context, ["failed", "expired", "worker_lost"], async (tx, policy, task) => {
       await this.writableExtractionGenerationTx(tx, task.generation_id);
       await this.authorizeEpisodesTx(tx, [task.source_id], policy);
       await this.validateExtractionSourceTx(tx, task);
