@@ -1,3 +1,4 @@
+import { asRecord, byEpisodeTime, optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -42,15 +43,7 @@ export interface CodexRawEpisode {
   redactions: number;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 /**
  * Rollout files are appended live, so a session killed mid-write leaves a
@@ -342,11 +335,5 @@ export async function collectCodexRaw(
   for (const path of await rolloutFiles(root)) {
     episodes.push(...(await collectFile(path)));
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }

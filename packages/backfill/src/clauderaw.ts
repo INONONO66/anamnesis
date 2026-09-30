@@ -1,3 +1,4 @@
+import { byEpisodeTime, optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
@@ -76,9 +77,6 @@ interface AcceptedRecord {
   occurredAt: number;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
 function optionalFlag(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
@@ -587,11 +585,5 @@ export async function collectClaudeRaw(
   for (const transcript of await transcriptFiles(root)) {
     episodes.push(...(await collectFile(transcript)));
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }

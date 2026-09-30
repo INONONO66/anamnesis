@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Database } from "bun:sqlite";
-import { CONVERSATION_ROLES, createSessionParser, isRecord, messageText, optionalText, parseEvent, SESSION_HEADER, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
+import { CONVERSATION_ROLES, SESSION_HEADER, byEpisodeTime, createSessionParser, isRecord, messageText, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
 
 /** Beyond this the transcript turn lives in the object store, not the node. */
 
@@ -211,11 +211,5 @@ export async function collectOmoRaw(root: string): Promise<OmoRawEpisode[]> {
       episodes.push(omoEpisode(event));
     }
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }

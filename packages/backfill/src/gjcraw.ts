@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { createSessionParser, isRecord, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
+import { byEpisodeTime, createSessionParser, isRecord, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
 
 /** Beyond this the transcript turn lives in the object store, not the node. */
 
@@ -77,11 +77,5 @@ export async function collectGjcRaw(root: string): Promise<GjcRawEpisode[]> {
       episodes.push(gjcEpisode(event));
     }
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }

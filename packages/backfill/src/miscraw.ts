@@ -1,3 +1,4 @@
+import { asRecord, byEpisodeTime, optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
@@ -57,15 +58,7 @@ interface MiscTurn {
   properties: Record<string, string>;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 /**
  * A transcript line the runtime wrote mid-crash is the one line that must not
@@ -458,11 +451,5 @@ export async function collectMiscRaw(root: string): Promise<MiscRawEpisode[]> {
     turns.push(...(await collect(storeRoot)));
   }
   return turns
-    .sort((a, b) => {
-      const at = a.input.time?.value ?? "";
-      const bt = b.input.time?.value ?? "";
-      return at === bt
-        ? a.input.origin.record.localeCompare(b.input.origin.record)
-        : at.localeCompare(bt);
-    });
+    .sort(byEpisodeTime);
 }

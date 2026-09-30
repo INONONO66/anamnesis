@@ -29,6 +29,13 @@ export function optionalText(value: unknown): string | undefined {
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+export const asRecord = (value: unknown): Record<string, unknown> | undefined => isRecord(value) ? value : undefined;
+/** Collected episodes sort by occurrence time, then by origin record, so every adapter replays in one order. */
+export function byEpisodeTime(a: { input: RememberInput }, b: { input: RememberInput }): number {
+  const at = a.input.time?.value ?? "";
+  const bt = b.input.time?.value ?? "";
+  return at === bt ? a.input.origin.record.localeCompare(b.input.origin.record) : at.localeCompare(bt);
+}
 /** Only `text` parts carry the turn; thinking, toolCall and toolResult parts are not conversation. */
 export function messageText(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined;

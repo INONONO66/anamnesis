@@ -1,3 +1,4 @@
+import { byEpisodeTime, optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { open, readdir, readFile } from "node:fs/promises";
@@ -25,9 +26,6 @@ export interface AgentLogEpisode {
   redactions: number;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
 function requiredText(value: unknown, field: string, line: string): string {
   const text = optionalText(value);
@@ -196,11 +194,5 @@ export async function collectAgentLog(root: string): Promise<AgentLogEpisode[]> 
       if (isRecallable(event)) episodes.push(toEpisode(event));
     }
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }
