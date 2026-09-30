@@ -5,8 +5,9 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { asideSessionId, createMiscRawParser, type MiscRawContext } from "@anamnesis/backfill";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
+import { Revisions } from "./raw-lane.ts";
 import { fileInfo, fingerprint, sha, textLines } from "./source-files.ts";
-import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
+import { ingestSnapshot, type SourceRecord } from "./source.ts";
 
 const SEAL = "miscraw.snapshot.json";
 const MAX_FILES = 16_384, MAX_ENTRIES = 65_536, MAX_DEPTH = 64;
@@ -109,8 +110,7 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
       if (hash.digest("hex") !== manifest.get(name)) throw new Error("source_seal_mismatch");
     }
     async function* records(): AsyncGenerator<SourceRecord> {
-      const heads = new Map<string, { native: string; revision: string; key: string; previous: string | null; signature: string }>();
-      const seen = new Set<string>(); let ordinal = 0;
+      const revisions = new Revisions();
       for (const name of initial.files) {
         if (name === SEAL || INDEX.test(name)) continue;
         const aside = ASIDE.exec(name), antigravity = ANTIGRAVITY.exec(name);
@@ -121,21 +121,11 @@ export async function ingestMiscRaw(root: string, checkpoint: string, client: Rp
           let episodes;
           try { episodes = parse(text); } catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
           for (const { input } of episodes) {
-            ordinal++;
             const body = input.payload === undefined ? undefined : Buffer.from(input.payload);
             let base: RpcRememberParams;
             try { base = RpcRememberParams.parse({ episode: { schema: input.schema, time: input.time, content: input.content, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...(body ? { payload_hash: sha(body) } : {}) }); }
             catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
-            const o = base.episode.origin, origin = sha(JSON.stringify([o.source, o.session, o.actor, o.record]));
-            const native = base.source_revision, signature = sha(JSON.stringify(base)), head = heads.get(origin), duplicate = head?.native === native;
-            if (duplicate && head.signature !== signature) throw new Error(`source_revision_conflict: ${name}:${line}`);
-            const seenKey = sha(JSON.stringify([origin, native]));
-            const revision = duplicate ? head.revision : seen.has(seenKey) ? `${native}:occurrence:${ordinal}` : native;
-            const params = RpcRememberParams.parse({ ...base, source_revision: revision, expected_previous_revision_key: duplicate ? head.previous : head?.key ?? null });
-            if (!duplicate) {
-              if (seen.size >= MAX_REVISIONS || heads.size >= MAX_REVISIONS) throw new Error("source_revision_limit");
-              seen.add(seenKey); heads.set(origin, { native, revision, key: sourceRevisionKey(params), previous: params.expected_previous_revision_key, signature });
-            }
+            const { params, native } = revisions.admit(base, false, `${name}:${line}`);
             yield { params, context: { file: name, line, native_source_revision: native }, ...(body ? { payload: { bytes_b64: body.toString("base64"), media_type: input.payload_media_type! } } : {}) };
           }
         }

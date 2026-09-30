@@ -5,12 +5,12 @@ import { basename, join, relative, resolve } from "node:path";
 import { RPC_LIMITS, RpcRememberParams } from "@anamnesis/protocol";
 import { isSlackSlop, parseSlackMessage, slackEpisode } from "@anamnesis/backfill";
 import { fingerprint, sha, textLines } from "./source-files.ts";
-import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
+import { ingestSnapshot, type SourceRecord } from "./source.ts";
 import { RpcClient } from "./client.ts";
+import { Revisions } from "./raw-lane.ts";
 
 const MAX_FILES = 2048;
 const MAX_ENTRIES = 8192;
-const MAX_REVISIONS = 100_000;
 const MAX_INDEX_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
 const unicode = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
@@ -88,9 +88,7 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
     }
     manifest.push({ file: "index.jsonl", sha256: indexHash.digest("hex") });
     async function* records(validating = false): AsyncGenerator<SourceRecord> {
-      const heads = new Map<string, { native: string; revision: string; key: string; previous: string | null; signature: string }>();
-      const seen = new Set<string>();
-      let ordinal = 0;
+      const revisions = new Revisions();
       for (const name of initial.files.slice(1)) {
         const channel = channelId(name), hash = createHash("sha256");
         for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash, { ignoreBOM: true })) {
@@ -111,20 +109,9 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
             }
             base = RpcRememberParams.parse({ episode: { schema: input.schema, time: input.time, content, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...(body ? { payload_hash: sha(body) } : {}) });
           } catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
-          ordinal++;
-          const native = base.source_revision, origin = sha(JSON.stringify(base.episode.origin));
-          const signature = sha(JSON.stringify(base)), head = heads.get(origin), duplicate = head?.native === native;
-          if (duplicate && head.signature !== signature) throw new Error(`source_revision_conflict: ${name}:${line}`);
-          const seenKey = sha(JSON.stringify([origin, native]));
-          const revision = duplicate ? head.revision : seen.has(seenKey) ? `${native}:occurrence:${ordinal}` : native;
-          let params: RpcRememberParams;
-          try { params = RpcRememberParams.parse({ ...base, source_revision: revision, expected_previous_revision_key: duplicate ? head.previous : head?.key ?? null }); }
-          catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
-          if (!duplicate) {
-            if (seen.size >= MAX_REVISIONS || heads.size >= MAX_REVISIONS) throw new Error("source_revision_limit");
-            seen.add(seenKey);
-            heads.set(origin, { native, revision, key: sourceRevisionKey(params), previous: params.expected_previous_revision_key, signature });
-          }
+          let params: RpcRememberParams, native: string;
+          try { ({ params, native } = revisions.admit(base, false, `${name}:${line}`)); }
+          catch (cause) { if (!(cause instanceof Error && cause.name === "ZodError")) throw cause; throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
           yield { params, context: { file: name, line, native_source_revision: native }, ...(body ? { payload: { bytes_b64: body.toString("base64"), media_type: "text/plain" } } : {}) };
         }
         const digest = hash.digest("hex");

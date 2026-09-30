@@ -76,7 +76,7 @@ async function tree(root: string, lane: RawLane): Promise<Tree> {
 interface Head { native: string; revision: string; key: string; previous: string | null; signature: string }
 /** Physical file/line/block order defines observed occurrences; full validated
  * replay reconstructs session headers and revision predecessors. */
-class Revisions {
+export class Revisions {
   private readonly heads = new Map<string, Head>();
   private readonly seen = new Set<string>();
   private ordinal = 0;
