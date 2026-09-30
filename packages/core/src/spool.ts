@@ -72,13 +72,7 @@ class MetadataJson {
       let char = await this.take();
       if (!char || char.charCodeAt(0) < 32) throw new CorruptSpool("invalid completion string");
       if (char === '"') { if (text) yield text; return; }
-      if (char === "\\") {
-        const escape = await this.take();
-        let encoded = "\\" + escape;
-        if (escape === "u") for (let i = 0; i < 4; i++) encoded += await this.take();
-        try { char = JSON.parse('"' + encoded + '"'); }
-        catch { throw new CorruptSpool("invalid completion escape"); }
-      }
+      if (char === "\\") char = await this.escape();
       text += char;
       // Hash UTF-8 only on complete surrogate pairs, including escaped pairs.
       const last = text.charCodeAt(text.length - 1);
@@ -87,6 +81,13 @@ class MetadataJson {
         yield carry ? text.slice(0, -1) : text; text = carry;
       }
     }
+  }
+  private async escape(): Promise<string> {
+    const escape = await this.take();
+    let encoded = "\\" + escape;
+    if (escape === "u") for (let i = 0; i < 4; i++) encoded += await this.take();
+    try { return JSON.parse('"' + encoded + '"'); }
+    catch { throw new CorruptSpool("invalid completion escape"); }
   }
   async smallString(cap = 64 * 1024): Promise<string> {
     let text = "";
@@ -173,6 +174,22 @@ async function completionPayload(json: MetadataJson, target: number, output?: { 
     advanced: sequences.advanced, arrayField: sequences.field };
 }
 
+/** Entries after `start` are taken until the page holds `limit` of them or the next one would exceed `maxBytes`;
+ * a page that cannot even hold its first entry is too small. limit 0 takes nothing. */
+interface Frame { header: Buffer; data: Buffer; length: number; record: SpoolRecord }
+const assertFresh = (cursor: PageCursor | null, fresh: (cursor: PageCursor) => boolean): void => { if (cursor && !fresh(cursor)) throw new Error("stale spool page cursor"); };
+class PageBudget {
+  readonly entries: SpoolEntry[] = [];
+  tooSmall = false;
+  private full: boolean;
+  private encodedBytes = 0;
+  constructor(private readonly limit: number, private readonly maxBytes: number, private readonly start: number) { this.full = limit === 0; }
+  offer(record: SpoolRecord, sequence: number, encoded: number): void {
+    if (sequence <= this.start || this.full) return;
+    if (this.entries.length === this.limit || this.encodedBytes + encoded > this.maxBytes) { this.full = true; this.tooSmall = this.entries.length === 0; return; }
+    this.entries.push({ ...record, sequence }); this.encodedBytes += encoded;
+  }
+}
 export class DurableSpool {
   private readonly journal: string; private readonly done: string; private readonly durable: string;
   private readonly maxBytes: number; private readonly maxFrameBytes: number;
@@ -328,6 +345,53 @@ export class DurableSpool {
       return { boundary: value.boundary, count: value.count, index: value.index, proof: value.proof, identity: value.identity };
     } catch { throw new Error("invalid spool page cursor"); }
   }
+  /** The durable marker and its proof must describe a prefix of the journal; anything else is a corrupt admission. */
+  private admission(markerBytes: Buffer | null, proofBytes: Buffer | null, info: { size: number } | undefined): { marker: string; boundary: number; proof: string } {
+    const marker = markerBytes?.toString(); const boundary = Number(marker);
+    if (!info || !marker || !/^[1-9][0-9]*$/.test(marker) || !Number.isSafeInteger(boundary) ||
+      boundary > info.size || !proofBytes || !/^[a-f0-9]{64}$/.test(proofBytes.toString())) throw new CorruptSpool("invalid admission");
+    return { marker, boundary, proof: proofBytes.toString() };
+  }
+  /** One length-prefixed, checksummed, canonical-JSON frame at offset; every violation is a CorruptSpool. */
+  private async readFrame(handle: Awaited<ReturnType<typeof open>>, offset: number, boundary: number): Promise<Frame> {
+    if (boundary - offset < 4) throw new CorruptSpool("short frame header");
+    const header = await this.readAt(handle, offset, 4); const length = header.readUInt32BE(0);
+    if (length + 36 > this.maxFrameBytes || offset + length + 36 > boundary) throw new CorruptSpool("invalid frame length");
+    const data = await this.readAt(handle, offset + 4, length + 32);
+    const body = data.subarray(0, length);
+    if (!checksum(body).equals(data.subarray(length))) throw new CorruptSpool("frame checksum mismatch");
+    let record: SpoolRecord;
+    try {
+      const parsed: unknown = JSON.parse(body.toString()); assertRecord(parsed);
+      if (!Buffer.from(stable(parsed)).equals(body)) throw new Error();
+      record = parsed;
+    } catch { throw new CorruptSpool("invalid canonical record"); }
+    return { header, data, length, record };
+  }
+  /** Identity survives ordinary reopen/append, but not root relocation or file replacement. */
+  private identity(info: { dev: number; ino: number; birthtimeMs: number }): string {
+    return checksum(Buffer.from(JSON.stringify([resolve(this.root), info.dev, info.ino, info.birthtimeMs]))).toString("hex");
+  }
+  private emptyPage(cursor: PageCursor | null): SpoolState {
+    if (cursor) throw new Error("stale spool page cursor");
+    return emptyState();
+  }
+  private async truncateTail(boundary: number): Promise<void> {
+    const writable = await open(this.journal, "r+");
+    try { await writable.truncate(boundary); await writable.sync(); } finally { await writable.close(); }
+  }
+  /** Every admitted frame in order; snapshotCount is the sequence at the snapshot boundary. */
+  private async walkFrames(handle: Awaited<ReturnType<typeof open>>, boundary: number, snapshotBoundary: number, visit: (frame: Frame & { offset: number; sequence: number }) => void): Promise<{ count: number; snapshotCount: number }> {
+    let offset = 0, count = 0, snapshotCount = 0;
+    while (offset < boundary) {
+      const frame = await this.readFrame(handle, offset, boundary);
+      count++;
+      visit({ ...frame, offset, sequence: count });
+      offset += frame.length + 36;
+      if (offset === snapshotBoundary) snapshotCount = count;
+    }
+    return { count, snapshotCount };
+  }
   private async scan(cursor: PageCursor | null, limit: number, maxBytes: number, sequence = 0): Promise<SpoolState> {
     const markerBytes = await this.readMarker(this.durable, 16);
     const proofBytes = await this.readMarker(this.durable + ".sha256", 64);
@@ -335,59 +399,29 @@ export class DurableSpool {
     const handle = await this.openOptional(this.journal);
     try {
       const info = await handle?.stat();
-      if (!info?.size && markerBytes === null && proofBytes === null && !completion.present) {
-        if (cursor) throw new Error("stale spool page cursor");
-        return emptyState();
-      }
-      const marker = markerBytes?.toString(); const boundary = Number(marker);
-      if (!handle || !info || !marker || !/^[1-9][0-9]*$/.test(marker) || !Number.isSafeInteger(boundary) ||
-        boundary > info.size || !proofBytes || !/^[a-f0-9]{64}$/.test(proofBytes.toString())) throw new CorruptSpool("invalid admission");
-      // Identity survives ordinary reopen/append, but not root relocation or file replacement.
-      const identity = checksum(Buffer.from(JSON.stringify([resolve(this.root), info.dev, info.ino, info.birthtimeMs]))).toString("hex");
-      if (cursor && (cursor.identity !== identity || cursor.boundary > boundary)) throw new Error("stale spool page cursor");
+      if (!info?.size && markerBytes === null && proofBytes === null && !completion.present) return this.emptyPage(cursor);
+      if (!handle) throw new CorruptSpool("invalid admission");
+      const { marker, boundary, proof: admitted } = this.admission(markerBytes, proofBytes, info);
+      const identity = this.identity(info!);
+      assertFresh(cursor, c => c.identity === identity && c.boundary <= boundary);
       const start = cursor?.index ?? completion.frontier;
       const snapshotBoundary = cursor?.boundary ?? boundary;
       const admissionHash = createHash("sha256").update(`spool.durable.v1\0${marker}\0`);
       const snapshotHash = createHash("sha256").update(`spool.durable.v1\0${snapshotBoundary}\0`);
-      const entries: SpoolEntry[] = [];
-      let offset = 0, count = 0, snapshotCount = 0, encodedBytes = 0;
-      let full = limit === 0, tooSmall = false;
-      while (offset < boundary) {
-        if (boundary - offset < 4) throw new CorruptSpool("short frame header");
-        const header = await this.readAt(handle, offset, 4); const length = header.readUInt32BE(0);
-        if (length + 36 > this.maxFrameBytes || offset + length + 36 > boundary) throw new CorruptSpool("invalid frame length");
-        const data = await this.readAt(handle, offset + 4, length + 32);
-        admissionHash.update(header).update(data);
-        if (offset < snapshotBoundary) snapshotHash.update(header).update(data);
-        const body = data.subarray(0, length);
-        if (!checksum(body).equals(data.subarray(length))) throw new CorruptSpool("frame checksum mismatch");
-        let record: SpoolRecord;
-        try {
-          const parsed: unknown = JSON.parse(body.toString()); assertRecord(parsed);
-          if (!Buffer.from(stable(parsed)).equals(body)) throw new Error();
-          record = parsed;
-        } catch { throw new CorruptSpool("invalid canonical record"); }
-        count++;
-        if (offset < snapshotBoundary && count > start && !full) {
-          if (entries.length === limit || encodedBytes + length + 36 > maxBytes) {
-            full = true; tooSmall = entries.length === 0;
-          } else { entries.push({ ...record, sequence: count }); encodedBytes += length + 36; }
-        }
-        offset += length + 36;
-        if (offset === snapshotBoundary) snapshotCount = count;
-      }
-      if (admissionHash.digest("hex") !== proofBytes.toString() || completion.maximum > count) throw new CorruptSpool("invalid protected metadata");
+      const page = new PageBudget(limit, maxBytes, start);
+      const { count, snapshotCount } = await this.walkFrames(handle, boundary, snapshotBoundary, frame => {
+        admissionHash.update(frame.header).update(frame.data);
+        if (frame.offset < snapshotBoundary) { snapshotHash.update(frame.header).update(frame.data); page.offer(frame.record, frame.sequence, frame.length + 36); }
+      });
+      if (admissionHash.digest("hex") !== admitted || completion.maximum > count) throw new CorruptSpool("invalid protected metadata");
       const proof = snapshotHash.digest("hex");
-      if (cursor && (snapshotCount !== cursor.count || proof !== cursor.proof)) throw new Error("stale spool page cursor");
-      if (tooSmall) throw new Error("spool page byte budget too small");
+      assertFresh(cursor, c => snapshotCount === c.count && proof === c.proof);
+      if (page.tooSmall) throw new Error("spool page byte budget too small");
       // Preserve recovery ordering: validate every admitted frame and done metadata first.
-      if (info.size > boundary) {
-        const writable = await open(this.journal, "r+");
-        try { await writable.truncate(boundary); await writable.sync(); } finally { await writable.close(); }
-      }
-      const index = start + entries.length;
-      return { boundary, count, completion, quarantined: false, entries,
-        nextCursor: limit > 0 && index < snapshotCount ? this.encodePageCursor({ boundary: snapshotBoundary, count: snapshotCount, index, proof, identity }) : null };
+      if (info!.size > boundary) await this.truncateTail(boundary);
+      const index = start + page.entries.length;
+      const nextCursor = limit > 0 && index < snapshotCount ? this.encodePageCursor({ boundary: snapshotBoundary, count: snapshotCount, index, proof, identity }) : null;
+      return { boundary, count, completion, quarantined: false, entries: page.entries, nextCursor };
     } finally { await handle?.close(); }
   }
   private async readCompletion(sequence = 0, output?: { selected: Completion; emit: (value: number) => Promise<void> }): Promise<Completion> {
