@@ -2,8 +2,8 @@ import { createHash, type Hash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { classifyClaudeTranscript, createClaudeRawParser } from "../../packages/backfill/src/clauderaw.ts";
-import { RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
+import { classifyClaudeTranscript, createClaudeRawParser } from "@anamnesis/backfill";
+import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
 

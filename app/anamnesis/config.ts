@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtractionDialect } from "../../packages/core/src/openai-extraction-provider.ts";
-import { RpcEmbeddingAttempt, RpcExtractionPacing, RpcIngestStatusParams } from "../../packages/protocol/src/rpc.ts";
+import type { ExtractionDialect } from "@anamnesis/core";
+import { RpcEmbeddingAttempt, RpcExtractionPacing, RpcIngestStatusParams } from "@anamnesis/protocol";
 
 // Reuse the protocol's Zod schemas; the app has no independent Zod dependency.
 const providerUrl = RpcEmbeddingAttempt.shape.model.refine(value => URL.canParse(value) && ["http:", "https:"].includes(new URL(value).protocol));

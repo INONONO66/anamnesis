@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { notionEpisode } from "../../packages/backfill/src/notion.ts";
-import { RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
+import { notionEpisode } from "@anamnesis/backfill";
+import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { ingestSnapshot, type SourceRecord } from "./source.ts";
 

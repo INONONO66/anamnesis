@@ -74,3 +74,6 @@ export type { RpcEpisodeInput, RpcRememberParamsInput, RpcRequestInput } from ".
 
 export { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticResolution, SemanticReviewOutput, SemanticReviewPremises, RetainedSemanticProposal, semanticReviewClaimBody } from "./materialization.ts";
 export type { ProposeRetainedClaim as ProposeRetainedClaimInput, MaterializeRetainedClaim as MaterializeRetainedClaimInput, ReviewRetainedClaim as ReviewRetainedClaimInput, MaterializationResult as MaterializationResultRecord, SemanticResolution as SemanticResolutionRecord, SemanticReviewProvider } from "./materialization.ts";
+export { parseEpisodeLineage } from "./episode-lineage.ts";
+export { RpcPolicySetParams, RpcPolicyRevokeParams, RpcEmbeddingRequeueParams, RpcExtractionPacing, RpcWorkersStatus, RpcPolicyResult, RpcEmbeddingRequeueResult } from "./rpc.ts";
+export { ReadExtractionCoverage, ExtractionSelection } from "./extraction.ts";

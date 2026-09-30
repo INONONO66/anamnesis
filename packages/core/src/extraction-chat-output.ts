@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ExtractionModelOutput, ExtractionSpan } from "../../protocol/src/extraction.ts";
+import { ExtractionModelOutput, ExtractionSpan } from "@anamnesis/protocol";
 import { countBudget } from "./dynamics/budget.ts";
 import { validateModelOutput, validateSourceSpans, type ExtractionProviderInput } from "./extraction.ts";
 

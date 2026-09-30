@@ -11,8 +11,8 @@ import { v7 as uuidv7 } from "uuid";
 import type { Engine } from "./engine.ts";
 import type { ExtractionProvider } from "./extraction.ts";
 import { GenerationReadinessError, type InstallationContext } from "./store.ts";
-import { Generation, ModelTask } from "../../protocol/src/extraction.ts";
-import type { ExtractionPipeline } from "../../protocol/src/extraction-audit.ts";
+import { Generation, ModelTask } from "@anamnesis/protocol";
+import type { ExtractionPipeline } from "@anamnesis/protocol";
 
 /** "waiting": pipelines are in flight and their settlement wakes the lane; "more": re-arm immediately. */
 export type ExtractionTurn = "more" | "waiting" | "idle";

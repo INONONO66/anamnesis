@@ -2,8 +2,8 @@ import { createHash, type Hash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import { RPC_LIMITS, RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
-import { isSlackSlop, parseSlackMessage, slackEpisode } from "../../packages/backfill/src/slack.ts";
+import { RPC_LIMITS, RpcRememberParams } from "@anamnesis/protocol";
+import { isSlackSlop, parseSlackMessage, slackEpisode } from "@anamnesis/backfill";
 import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
 import { RpcClient } from "./client.ts";
 

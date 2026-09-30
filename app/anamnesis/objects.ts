@@ -1,8 +1,8 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { ObjectStore } from "../../packages/core/src/objects.ts";
-import { RPC_LIMITS, RpcObjectMetadata } from "../../packages/protocol/src/rpc.ts";
+import { ObjectStore } from "@anamnesis/core";
+import { RPC_LIMITS, RpcObjectMetadata } from "@anamnesis/protocol";
 import { hasCode, syncDirectory } from "./config.ts";
 import { RpcFault } from "./wire.ts";
 

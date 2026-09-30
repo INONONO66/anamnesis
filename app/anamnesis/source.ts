@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult } from "@anamnesis/protocol";
 import { acquireInstallation, atomicJson, hasCode, syncDirectory } from "./config.ts";
 import { RpcClient } from "./client.ts";
 

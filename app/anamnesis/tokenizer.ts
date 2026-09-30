@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { createContext, Script } from "node:vm";
-import { RPC_LIMITS } from "../../packages/protocol/src/rpc.ts";
-import { RecallError, type Tokenizers } from "../../packages/core/src/recall.ts";
+import { RPC_LIMITS } from "@anamnesis/protocol";
+import { RecallError, type Tokenizers } from "@anamnesis/core";
 
 function object(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw new Error("invalid tokenizer configuration");

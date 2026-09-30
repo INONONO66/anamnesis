@@ -1,4 +1,4 @@
-import { SCHEMA_ID } from "../../protocol/src/element.ts";
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import type { Driver } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,13 +31,13 @@ import {
 
 import { EmbeddingConfig, HttpEmbeddingProvider } from "./embedding.ts";
 import { ExtractionProviderConfig, HttpExtractionProvider, ExtractionProviderError, validateModelOutput, validateSourceSpans, type ExtractionProvider } from "./extraction.ts";
-import { ExtractionModelOutput, type CreateModelTask, type LeaseModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage, type Generation, type ExtractionCoverageRead } from "../../protocol/src/extraction.ts";
-import { bindGenerationProfile, type GenerationProfileInput, type GenerationIdentityReceipt } from "../../protocol/src/generation-identity.ts";
-import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from '../../protocol/src/extraction-audit.ts';
-import { MaterializeRetainedClaim, ProposeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, type SemanticReviewProvider } from "../../protocol/src/materialization.ts";
-import { validateSemanticClaim } from "../../protocol/src/semantic-claim.ts";
-import type { RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "../../protocol/src/rpc.ts";
-import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcPolicyResult } from "../../protocol/src/rpc.ts";
+import { ExtractionModelOutput, type CreateModelTask, type LeaseModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage, type Generation, type ExtractionCoverageRead } from "@anamnesis/protocol";
+import { bindGenerationProfile, type GenerationProfileInput, type GenerationIdentityReceipt } from "@anamnesis/protocol";
+import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from "@anamnesis/protocol";
+import { MaterializeRetainedClaim, ProposeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, type SemanticReviewProvider } from "@anamnesis/protocol";
+import { validateSemanticClaim } from "@anamnesis/protocol";
+import type { RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcPolicyResult } from "@anamnesis/protocol";
 
 export const RememberInput = z
   .object(MemoryElement.shape)
@@ -283,7 +283,7 @@ export class Engine {
     return this.store.embeddingStatus(operationId, context);
   }
 
-  async recallHybrid(input: z.input<typeof import("../../protocol/src/rpc.ts").RpcRecallParams>, context: InstallationContext) {
+  async recallHybrid(input: z.input<typeof import("@anamnesis/protocol").RpcRecallParams>, context: InstallationContext) {
     return this.store.recall(input, context);
   }
 

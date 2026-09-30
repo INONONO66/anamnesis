@@ -1,4 +1,4 @@
-import { RpcPolicySetParams } from "../../../protocol/src/rpc.ts";
+import { RpcPolicySetParams } from "@anamnesis/protocol";
 import { z } from "zod";
 import { canonicalJson } from "./digest.ts";
 import { receiptTime, ReceiptError } from "./receipts.ts";

@@ -19,8 +19,22 @@
     "qa:e2e-daemon": "bun scripts/qa/e2e-daemon.ts"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stryker-mutator/core": "^10.0.0",
     "@types/bun": "^1.2.21",
+    "eslint": "^10.11.0",
+    "eslint-plugin-sonarjs": "^4.2.2",
+    "fta-cli": "^3.0.1",
+    "jscpd": "^5.3.3",
+    "knip": "^6.39.0",
+    "madge": "^8.0.0",
     "neo4j-driver": "^6.2.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.71.0"
+  },
+  "dependencies": {
+    "@anamnesis/backfill": "workspace:*",
+    "@anamnesis/core": "workspace:*",
+    "@anamnesis/protocol": "workspace:*"
   }
 }

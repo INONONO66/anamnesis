@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, ExtractionOutput, ExtractionSpan, type ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
+import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, ExtractionOutput, ExtractionSpan, type ExtractionFailureDetail } from "@anamnesis/protocol";
 
 export const ExtractionProviderConfig = z.strictObject({ endpoint: z.url().refine(v => ["http:", "https:"].includes(new URL(v).protocol)), model: z.string().min(1).max(256), model_incarnation: z.string().regex(/^[0-9a-f]{64}$/), timeout_ms: z.number().int().min(1).max(30000).default(5000) });
 export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;

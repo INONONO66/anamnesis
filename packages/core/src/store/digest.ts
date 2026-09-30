@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { MemoryElement, type Origin, type TimePoint } from "@anamnesis/protocol";
-import { EchoLineage, EpisodeLineageError, parseEpisodeLineage } from "../../../protocol/src/episode-lineage.ts";
-import { type ValidatedSemanticClaim } from "../../../protocol/src/semantic-claim.ts";
-import { canonicalExtractionBody } from "../../../protocol/src/extraction.ts";
-import { SemanticReviewPremises } from "../../../protocol/src/materialization.ts";
+import { EchoLineage, EpisodeLineageError, parseEpisodeLineage } from "@anamnesis/protocol";
+import { type ValidatedSemanticClaim } from "@anamnesis/protocol";
+import { canonicalExtractionBody } from "@anamnesis/protocol";
+import { SemanticReviewPremises } from "@anamnesis/protocol";
 import { carriesTime } from "./schema.ts";
 
 export function semanticClaimTime(time: { value: string; precision: "second" | "minute" | "day" | "month" | "year" }) {

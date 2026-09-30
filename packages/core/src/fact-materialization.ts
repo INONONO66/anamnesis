@@ -1,4 +1,4 @@
-import { SCHEMA_ID } from "../../protocol/src/element.ts";
+import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 
 export type RetainedClaim = { text: string; start?: number; end?: number; time: string };

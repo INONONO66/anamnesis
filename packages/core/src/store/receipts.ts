@@ -1,8 +1,8 @@
 import { RpcCommitParams } from "@anamnesis/protocol";
-import { RecallLineageSelection } from "../../../protocol/src/episode-lineage.ts";
+import { RecallLineageSelection } from "@anamnesis/protocol";
 import { z } from "zod";
 import { ADOPTION_NUMERIC_VERSION } from "../dynamics/adoption-numeric.ts";
-import { RpcRecallResult } from "../../../protocol/src/rpc.ts";
+import { RpcRecallResult } from "@anamnesis/protocol";
 
 export function luceneQuery(raw: string): string {
   return raw

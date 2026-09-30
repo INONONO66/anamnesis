@@ -2,11 +2,11 @@ import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmod, rm } from "node:fs/promises";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { once } from "node:events";
-import { RPC_LIMITS, RpcTcpAuth, type RpcRequest } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RpcTcpAuth, type RpcRequest } from "@anamnesis/protocol";
 import { acquireInstallation, loadListenConfig, runtimeRoot, socketPath } from "./config.ts";
 import { daemonTiming, timingContext, timingHash } from "./timing.ts";
 import { Runtime } from "./runtime.ts";
-import type { InstallationContext, RecallTransportInput } from "../../packages/core/src/store.ts";
+import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
 import { Frames, RpcByteBudget, RpcFault, decodeRequest, encode, envelope, errorResponse, fault, type ByteAccount, type ByteReservation } from "./wire.ts";
 
 /** authorized: transport admission (always for the socket, bearer frame for TCP); authenticated: hello. */

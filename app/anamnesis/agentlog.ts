@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { streamAgentLogFile } from "../../packages/backfill/src/agentlog.ts";
-import { RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
+import { streamAgentLogFile } from "@anamnesis/backfill";
+import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { sourceRevisionKey, ingestSnapshot, type SourceRecord } from "./source.ts";
 

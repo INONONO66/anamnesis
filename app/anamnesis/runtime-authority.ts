@@ -7,8 +7,8 @@ import neo4j from "neo4j-driver";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import type { ArchiveManifest, AuthoritySnapshot } from "./archive-manifest.ts";
-import type { InstallationContext } from "../../packages/core/src/store.ts";
-import type { Engine } from "../../packages/core/src/engine.ts";
+import type { InstallationContext } from "@anamnesis/core";
+import type { Engine } from "@anamnesis/core";
 import type { Installation } from "./config.ts";
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");

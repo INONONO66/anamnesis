@@ -1,5 +1,5 @@
 import { TextDecoder } from "node:util";
-import { RPC_LIMITS, RPC_METHODS, RpcErrorCode, RpcErrorResponse, RpcRequest, RpcResponse, type RpcErrorCode as ErrorCode } from "../../packages/protocol/src/rpc.ts";
+import { RPC_LIMITS, RPC_METHODS, RpcErrorCode, RpcErrorResponse, RpcRequest, RpcResponse, type RpcErrorCode as ErrorCode } from "@anamnesis/protocol";
 
 export class RpcFault extends Error {
   constructor(readonly code: ErrorCode, message: string, readonly retryable = false) { super(message); }

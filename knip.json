@@ -1,0 +1,20 @@
+{
+  "entry": [
+    "app/anamnesis/main.ts",
+    "app/anamnesis/ops.ts",
+    "packages/*/src/index.ts",
+    "scripts/**/*.ts",
+    "scripts/**/*.mjs",
+    "app/anamnesis/*.mjs"
+  ],
+  "project": [
+    "app/anamnesis/**/*.ts",
+    "packages/*/src/**/*.ts"
+  ],
+  "ignore": [
+    "**/*.test.*",
+    "**/*.fixture.*",
+    ".omo/**",
+    "dist/**"
+  ]
+}

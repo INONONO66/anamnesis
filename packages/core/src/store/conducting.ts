@@ -1,6 +1,6 @@
-import { LINK_LATTICE, type LinkRole } from "@anamnesis/protocol";
 import { z } from "zod";
 import { sessionKey } from "./digest.ts";
+import { CONDUCTING_ROLES } from "./schema.ts";
 
 export type ConductingArcRow = {
   source_id: string; link_id: string; peer_id: string; role: string;
@@ -17,8 +17,6 @@ export class GraphAccessError extends Error {
 }
 
 
-export const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
-export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
 export type ConductingPartition = { stream: string; generation: number | string; state?: string };
 export type PhysicalConductor = ConductingArcRow & { from: string; to: string; registry_source: number | null };
 export type ConductingArcVerification = {

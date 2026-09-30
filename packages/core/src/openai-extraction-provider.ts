@@ -7,7 +7,7 @@ import {
   type ExtractionProviderInput,
 } from "./extraction.ts";
 import { chatExtractionSchema, normalizeChatExtraction } from "./extraction-chat-output.ts";
-import type { ExtractionFailureDetail } from "../../protocol/src/extraction.ts";
+import type { ExtractionFailureDetail } from "@anamnesis/protocol";
 
 export type ExtractionDialect = "openai_chat" | "anthropic_messages";
 export type OpenAiChatExtractionProviderOptions = {

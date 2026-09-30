@@ -1,0 +1,21 @@
+{
+  "threshold": 0,
+  "minLines": 8,
+  "minTokens": 60,
+  "reporters": [
+    "console"
+  ],
+  "ignore": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/.omo/**",
+    "**/*.test.*",
+    "**/*.fixture.*",
+    "**/scripts/**",
+    "**/schemas/**"
+  ],
+  "format": [
+    "typescript"
+  ],
+  "gitignore": true
+}
