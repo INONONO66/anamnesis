@@ -168,14 +168,11 @@ try {
   assert.equal(degraded.diagnostics.vector_reason, 'provider_rejected'); assert.ok(!degraded.diagnostics.channels_used.includes('vector'));
   assert.equal(degraded.results[0].id, a.id);
   mode = 'ok';
-  const feedback = { operation_id: uuid(), recall_id: hybrid.recall_id, adopted: [a.id], reward: 0 };
-  assert.equal((await client.request('commit', feedback)).applied, true);
-  assert.equal((await client.request('commit', feedback)).applied, false);
-  assert.equal((await query('MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n', { id: hybrid.recall_id }))[0].n, 2);
+  // Receipt mode appends no exposure Hits, and the wire `commit` report is deferred.
+  assert.equal((await query('MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n', { id: hybrid.recall_id }))[0].n, 0);
   const policy = { policy_id: uuid(), selector: { episode_id: a.id }, scope: 'content' };
   await client.request('policy.set', policy);
   const denied = await client.request('recall', request); assert.ok(!denied.results.some(item => item.id === a.id));
-  await assert.rejects(client.request('commit', feedback), { code: 'policy_denied' });
   await client.request('policy.revoke', { policy_id: policy.policy_id });
   // Immutable revisions retain their own vectors; superseded input never serves as primary.
   const a2 = await remember('a', 'needle revised A\né🙂', 'small', a.revision_key, 'v2');
@@ -212,9 +209,6 @@ try {
   await assert.rejects(client.request('embedding.status', { operation_id: failedRequest.operation_id }), { code: 'policy_denied' });
   assert.equal(JSON.parse((await query('MATCH (a:EmbeddingAttempt {operation_id:$id}) RETURN a.body AS body', { id: failedRequest.operation_id }))[0].body).state, 'quarantined');
   assert.deepEqual(JSON.parse((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: hybrid.recall_id }))[0].body), receipt);
-  const allowedFeedback = { operation_id: uuid(), recall_id: identity.recall_id, adopted: [b.id], reward: 0 };
-  assert.equal((await client.request('commit', allowedFeedback)).applied, true);
-  assert.equal((await client.request('commit', allowedFeedback)).applied, false);
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
   // A quarantined Episode returns to the outbox through embedding.requeue; the call itself wakes the lane.
   mode = 'fail';

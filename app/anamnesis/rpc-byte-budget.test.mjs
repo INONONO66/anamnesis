@@ -188,12 +188,13 @@ test('real Socket backpressure replaces allowance with actual output until callb
 test('parse/UTF-8/schema rejection and invalid length retain only reserved error output until completion', { timeout: 20000 }, () => fixture(async ctx => {
   const p = await ctx.peer();
   await ctx.command('hold-writes');
-  for (const body of [Buffer.from('{'), Buffer.from([255]), Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'status', params: { extra: true } }))]) {
+  // Parse failures reply with id:null; an in-envelope refusal echoes the request id.
+  for (const [body, id, code] of [[Buffer.from('{'), null, 'parse_error'], [Buffer.from([255]), null, 'parse_error'], [Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'status', params: { extra: true } })), 1, 'invalid_params']]) {
     const bytes = Buffer.alloc(body.length + 4); bytes.writeUInt32BE(body.length); body.copy(bytes, 4);
-    const ready = event(ctx.signals, 'write-ready', x => x.id === null);
-    const reply = event(p.replies, 'reply', x => x.id === null);
+    const ready = event(ctx.signals, 'write-ready', x => x.id === id);
+    const reply = event(p.replies, 'reply', x => x.id === id);
     await ctx.input(p, bytes); const output = await ready;
-    assert.ok(['parse_error', 'invalid_params'].includes((await reply).error.data.code));
+    assert.equal((await reply).error.data.code, code);
     assert.deepEqual((await ctx.command('snapshot')).pools, { ...zero, general: bytes.length + output.bytes });
     await ctx.command('finish-writes'); assert.deepEqual((await ctx.command('snapshot')).pools, zero);
     await ctx.command('hold-writes');

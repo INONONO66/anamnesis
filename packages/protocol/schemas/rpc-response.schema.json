@@ -91,7 +91,7 @@
                   "type": "object",
                   "properties": {
                     "methods": {
-                      "maxItems": 25,
+                      "maxItems": 24,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -107,7 +107,6 @@
                           "object.commit",
                           "remember",
                           "ingest.status",
-                          "commit",
                           "graph.envelope",
                           "hit-cache.verify",
                           "hit-cache.rebuild",
@@ -366,7 +365,7 @@
                   "type": "object",
                   "properties": {
                     "methods": {
-                      "maxItems": 25,
+                      "maxItems": 24,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -382,7 +381,6 @@
                           "object.commit",
                           "remember",
                           "ingest.status",
-                          "commit",
                           "graph.envelope",
                           "hit-cache.verify",
                           "hit-cache.rebuild",
@@ -1592,121 +1590,6 @@
                   "additionalProperties": false
                 }
               ]
-            }
-          },
-          "required": [
-            "jsonrpc",
-            "id",
-            "structure_revision",
-            "policy_revision",
-            "server_time",
-            "method",
-            "result"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "jsonrpc": {
-              "type": "string",
-              "const": "2.0"
-            },
-            "id": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128,
-                  "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
-                  "x-maxUtf8Bytes": 128
-                }
-              ]
-            },
-            "structure_revision": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "policy_revision": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "server_time": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "method": {
-              "type": "string",
-              "const": "commit"
-            },
-            "result": {
-              "type": "object",
-              "properties": {
-                "operation_id": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
-                },
-                "recall_id": {
-                  "type": "string",
-                  "format": "uuid",
-                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
-                },
-                "adopted": {
-                  "maxItems": 64,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
-                  }
-                },
-                "reward": {
-                  "anyOf": [
-                    {
-                      "type": "number",
-                      "minimum": -1,
-                      "maximum": 1
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "applied": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "operation_id",
-                "recall_id",
-                "adopted",
-                "reward",
-                "applied"
-              ],
-              "additionalProperties": false
             }
           },
           "required": [

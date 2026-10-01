@@ -4,6 +4,10 @@ import { RPC_LIMITS, RPC_METHODS, RpcErrorCode, RpcErrorResponse, RpcRequest, Rp
 export class RpcFault extends Error {
   constructor(readonly code: ErrorCode, message: string, readonly retryable = false) { super(message); }
 }
+/** A frame refused before dispatch; `id` echoes the request envelope so a real client can match the reply. */
+export class FrameFault extends RpcFault {
+  constructor(code: ErrorCode, message: string, readonly id: unknown) { super(code, message); }
+}
 export function storageUnavailable(error: unknown): boolean {
   if (!(error instanceof Error) || !("code" in error)) return false;
   return ["ServiceUnavailable", "SessionExpired", "Neo.TransientError.General.DatabaseUnavailable"].includes(String(error.code));
@@ -46,9 +50,10 @@ export function decodeRequest(bytes: Buffer): RpcRequest {
   const result = RpcRequest.safeParse(value);
   if (result.success) return result.data;
   if (value && typeof value === "object" && "method" in value) {
-    if (typeof value.method === "string" && !RPC_METHODS.some(method => method === value.method)) throw new RpcFault("unsupported_method", "method is not implemented by this ingest-only runtime");
-    if (value.method === "hello" && "params" in value && value.params && typeof value.params === "object" && "version" in value.params && value.params.version !== 1) throw new RpcFault("unsupported_version", "unsupported RPC version");
-    throw new RpcFault("invalid_params", "request parameters do not match the RPC contract");
+    const id = "id" in value ? value.id : null;
+    if (typeof value.method === "string" && !RPC_METHODS.some(method => method === value.method)) throw new FrameFault("unsupported_method", "method is not implemented by this ingest-only runtime", id);
+    if (value.method === "hello" && "params" in value && value.params && typeof value.params === "object" && "version" in value.params && value.params.version !== 1) throw new FrameFault("unsupported_version", "unsupported RPC version", id);
+    throw new FrameFault("invalid_params", "request parameters do not match the RPC contract", id);
   }
   throw new RpcFault("invalid_request", "invalid RPC request envelope");
 }

@@ -52,7 +52,6 @@ export {
   RpcEmbeddingRecoverParams, RpcEmbeddingStatusParams, RpcEmbeddingAttempt,
   RpcHelloParams,
   RpcIngestStatusParams,
-  RpcCommitParams,
   RpcHitCacheParams,
   RpcRequest,
   RpcTcpAuth,

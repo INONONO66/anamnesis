@@ -25,8 +25,9 @@ function peer(path) {
     while (buffer.length >= 4 && buffer.length >= 4 + buffer.readUInt32BE()) {
       const size = buffer.readUInt32BE(), reply = JSON.parse(buffer.subarray(4, 4 + size));
       buffer = buffer.subarray(4 + size);
-      // Decode failures deliberately use id:null. This fixture sends one
-      // request at a time, so that response has exactly one possible owner.
+      // Parse and envelope failures reply with id:null (an in-envelope refusal
+      // echoes the id). This fixture sends one request at a time, so that
+      // response has exactly one possible owner.
       const key = reply.id === null && pending.size === 1 ? pending.keys().next().value : reply.id;
       const waiter = pending.get(key); pending.delete(key); waiter?.resolve(reply);
     }
@@ -169,7 +170,7 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     };
     await reject({ ...params('missing-lineage-schema'), origin_role: 'assistant' }, 'invalid_params');
     const badWire = await runtime.request('remember', { ...direct('bad-wire'), episode_digest_version: 2 });
-    assert.equal(badWire.id, null); assert.equal(badWire.error.data.code, 'invalid_params');
+    assert.equal(typeof badWire.id, 'number'); assert.equal(badWire.error.data.code, 'invalid_params');
     await reject(linked('unknown-parent', [uuid()]), 'unknown_recall');
     await reject(linked('parent-cap-overflow', Array.from({ length: 5 }, uuid)), 'invalid_params');
     await reject(linked('duplicate-parent', [receipt.recall_id, receipt.recall_id]), 'invalid_params');
@@ -254,14 +255,14 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     const revisedParams = { ...childParams, source_revision: 'child-v2', expected_previous_revision_key: child.revision_key,
       episode: { ...childParams.episode, content: 'revised child' } };
     const revised = await remember(revisedParams);
-    await runtime.close(); runtime = await daemon(root, Date.now() + 7200000);
+    const expiredNow = Date.now() + 7200000;
+    await runtime.close(); runtime = await daemon(root, expiredNow);
+    assert.ok(parent.expires_at <= expiredNow, 'parent receipt must be expired under the restarted daemon clock');
     const beforeExpiredWireRetry = await snapshot();
     assert.equal((await remember(childParams)).id, child.id);
     assert.equal((await remember(revisedParams)).id, revised.id);
     assert.deepEqual(await snapshot(), beforeExpiredWireRetry);
-    const expiredWire = await runtime.request('commit', { operation_id: uuid(), recall_id: parent.recall_id, adopted: [source.id] });
-    assert.equal(expiredWire.error.data.code, 'receipt_expired');
-    console.log(JSON.stringify({ checkpoint: 'node-uds-expired-parent-exact-current-and-historical-retries', expiredWire }));
+    console.log(JSON.stringify({ checkpoint: 'node-uds-expired-parent-exact-current-and-historical-retries', parent_expires_at: parent.expires_at, daemon_now: expiredNow }));
     await query('MATCH (r:RecallReceipt {recall_id:$id}) DETACH DELETE r', { id: parent.recall_id });
     const beforeRetry = await snapshot();
     assert.equal((await remember(childParams)).id, child.id);

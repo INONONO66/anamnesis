@@ -688,8 +688,9 @@ attribution sufficient to rebuild utility even after receipt expiry.
 Auto mode appends audit-only `exposure` for the top **included** three primary
 results after response delivery, through the same policy-checked commit path.
 Failures are reported operationally; they do not change the delivered response.
-Exposure does not change S or t_last_hit. Receipt mode accepts authenticated
-`commit {recall_id, adopted?, reward?}`; auto-mode explicit commit is rejected.
+Exposure does not change S or t_last_hit. Receipt mode owns the authenticated
+`commit {recall_id, adopted?, reward?}` report (deferred on the wire; in-process
+`Engine.commitReceipt`); auto-mode explicit commit is rejected.
 Reward must be finite and in [-1,1], not clamped. Missing reward differs from
 zero: zero is an observed outcome and enters the utility denominator.
 

@@ -8,7 +8,7 @@ import { acquireInstallation, loadListenConfig, runtimeRoot, socketPath } from "
 import { daemonTiming, timingContext, timingHash } from "./timing.ts";
 import { Runtime } from "./runtime.ts";
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
-import { Frames, RpcByteBudget, RpcFault, decodeRequest, encode, envelope, errorResponse, fault, type ByteAccount, type ByteReservation } from "./wire.ts";
+import { FrameFault, Frames, RpcByteBudget, RpcFault, decodeRequest, encode, envelope, errorResponse, fault, type ByteAccount, type ByteReservation } from "./wire.ts";
 
 /** authorized: transport admission (always for the socket, bearer frame for TCP); authenticated: hello. */
 interface Connection { socket: Socket; authorized: boolean; authenticated: boolean; context?: InstallationContext; pending: number; closed: boolean; bytes: ByteAccount; cancel: Set<() => void>; writes: Set<() => void>; }
@@ -222,7 +222,7 @@ export async function foreground(): Promise<void> {
       if (stopping) { send(connection, errorResponse(null, new RpcFault("shutting_down", "runtime is stopping")), reservation); return false; }
       let request: RpcRequest;
       try { request = decodeRequest(bytes); }
-      catch (error) { send(connection, errorResponse(null, fault(error)), reservation); return true; }
+      catch (error) { send(connection, errorResponse(error instanceof FrameFault ? error.id : null, fault(error)), reservation); return true; }
       const receivedAt = performance.now();
       const context = { method: request.method, id: request.id, connection: connectionId };
       const timing = daemonTiming && ["status", "remember", "ingest.status"].includes(request.method)
@@ -331,9 +331,6 @@ export async function foreground(): Promise<void> {
       case "ingest.status": return runtime.ingestStatus(request.params);
       case "recall": return runtime.recall(request.params, connection.context!);
       case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
-      case "commit":
-        if (connection.context!.commit_mode !== "receipt") throw new RpcFault("commit_mode_mismatch", "commit requires receipt-mode authentication");
-        return runtime.commit(request.params, connection.context!);
       case "policy.set":
         await cancelPublications();
         return runtime.setPolicy(request.params, connection.context!);

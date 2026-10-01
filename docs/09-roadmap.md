@@ -53,7 +53,7 @@ derived layer, no PPR.
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
-| commit path | `commitHits` with producers 1 (receipt `recall_hit` + `outcome`) and 2 (exposure); only `recall_hit` moves `S`/`t_last_hit`, the rest audit-only; `hello.commit_mode`; idem_key | 04 §5–6, 05 §10 |
+| commit path | `commitHits` with producers 1 (receipt `recall_hit` + `outcome`, in-process only: the `commit` RPC is deferred) and 2 (exposure); only `recall_hit` moves `S`/`t_last_hit`, the rest audit-only; `hello.commit_mode`; idem_key | 04 §5–6, 05 §10 |
 | receipts | append-only RecallReceipt control records (delivered IDs, snapshots, versions, channels, ranking state, digests); exact-once adoption per source and outcome per recall; explicit TTL, expired commit rejected, absence never a label | 05, D45 |
 | utility | per-Episode `U` from rank-weighted outcome attribution (`Σ w_e = 1`), rebuildable utility cache, `(1 + β·U)` in score; zero and missing distinct | 04, D45 |
 | policy | `policy.set` / `policy.revoke` RPCs, `anamnesis.memory-policy/1` Episodes, active-policy cache rebuild, policy-revision barrier, `content` scope over raw text, control Episodes excluded from search, structured-selector limit reported | 02, D43 |

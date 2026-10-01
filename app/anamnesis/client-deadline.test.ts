@@ -12,7 +12,7 @@ import { Frames, encode } from "./wire.ts";
 
 type TimingEvent = Parameters<TimingSink>[0];
 // A literal rather than runtime.ts's constant: importing runtime.ts would load the Neo4j-backed graph into a pure test.
-const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
+const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: false, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 const remember = { episode: { schema: "anamnesis.original-message/1", content: "slow", time: { value: "2026-09-09T00:00:00Z", precision: "second" }, origin: { source: "test", session: "s", actor: "a", record: "r" }, mass: 1 }, source_revision: "v1", expected_previous_revision_key: null } as const;
 
 test("a reply that never arrives rejects at the deadline as UNKNOWN and closes the transport", async () => {

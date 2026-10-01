@@ -78,14 +78,14 @@ describe("strict versioned RPC requests", () => {
   });
 
   test("keeps the v1 method registry aligned with request and capability surfaces", () => {
-    for (const method of ["commit", "hit-cache.verify", "hit-cache.rebuild"])
+    for (const method of ["hit-cache.verify", "hit-cache.rebuild"])
       expect(RpcMethod.safeParse(method).success).toBe(true);
-    expect(RPC_METHODS).toContain("commit");
+    expect(RPC_METHODS).not.toContain("commit");
     expect(RPC_METHODS).toContain("hit-cache.verify");
     expect(RPC_METHODS).toContain("hit-cache.rebuild");
-    expect(RPC_FUTURE_METHODS).not.toContain("commit");
+    expect(RPC_FUTURE_METHODS).toContain("commit");
     expect(RpcCapabilities.parse({
-      methods: [...RPC_METHODS], recall: false, commit: true, policy: false,
+      methods: [...RPC_METHODS], recall: false, commit: false, policy: false,
       extraction: false, embeddings: false, writer_fence: "database",
     }).methods).toEqual([...RPC_METHODS]);
   });
@@ -164,7 +164,7 @@ describe("strict RPC responses", () => {
     const capabilities = {
       methods: ["hello", "status", "shutdown", "object.begin", "object.chunk", "object.commit", "remember", "ingest.status"],
       recall: false,
-      commit: true,
+      commit: false,
       policy: false,
       extraction: false,
       embeddings: false,

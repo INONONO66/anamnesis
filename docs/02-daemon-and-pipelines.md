@@ -169,13 +169,13 @@ zod in `packages/protocol`; server and clients share the same schema.
 
 | Method | Writes | Meaning |
 |---|---|---|
-| `hello {client, commit_mode, token}` | — | Authenticate the UDS session; `commit_mode: auto \| receipt` (docs/04 §6) |
+| `hello {client, commit_mode, token}` | — | Authenticate the UDS session; `commit_mode: auto \| receipt` (docs/04 §6). Receipt mode is accepted, but its `commit` report is deferred, so a receipt-mode session currently yields receipts with no feedback channel (no exposure Hits either); `capabilities.commit:false` signals this |
 | `object.begin {sha256, size, media_type}` | temp file | Start or resume a bounded payload upload; existing hash is a no-op |
 | `object.chunk {upload_id, seq, bytes_b64}` | temp file | Append one raw chunk ≤ 512 KiB in sequence |
 | `object.commit {upload_id}` | objects/ | Verify size/hash, fsync and atomically publish the object |
 | `remember {episode, payload_hash?}` | yes | Ingest one Episode referencing an already committed object. Idempotent |
 | `recall {query, session?, T?, limit?, budget?}` | dispatcher receipt | Read-only semantic handler; dispatcher durably appends control impression before publication (docs/05) |
-| `commit {recall_id, adopted?, reward?}` | Hit | Receipt-mode client's adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`) (docs/04 §6) |
+| `commit {recall_id, adopted?, reward?}` | Hit | **Deferred** (listed in `RPC_FUTURE_METHODS`, absent from `RPC_METHODS`, so the daemon answers `unsupported_method`): receipt-mode adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`). The semantics ship in-process as `Engine.commitReceipt` (docs/04 §6) until a client needs the wire form |
 | `policy.set {policy_id, selector, scope}` | policy Episode/cache | Explicit authenticated deny command; idempotent by policy ID and canonical body |
 | `policy.revoke {policy_id}` | policy Episode/cache | Explicit authenticated revocation of that immutable deny |
 | `adjudication.review {review_id, proposal_id, action: accept\|reject, reason}` | review record | Authenticated operator decision on one shadow proposal; `SHADOW → ACCEPTED\|REJECTED` only (§5.2) |
@@ -285,7 +285,7 @@ therefore cannot guarantee matching facts hidden in unextracted text: policy
 responses report that limitation.
 Commands return the effective policy revision only after the serving barrier;
 they do not acknowledge deferred spool entries. Neo4j unavailable means
-`policy.set`, `policy.revoke` and `commit` fail with retryable
+`policy.set`, `policy.revoke` (and `commit`, once served) fail with retryable
 `storage_unavailable`, never report unapplied effects as accepted. Revocation
 does not implicitly re-extract skipped assertions. Background rebuild removes
 denied derived material from serving indexes/caches, not immutable originals,
@@ -1134,7 +1134,7 @@ no committable receipt and triggers no exposure. No memory content may be
 returned without current policy and durable receipt authority. This explicit
 exception does not permit returning a cached result or an unrecorded receipt.
 
-`commit`, `policy.set`, `policy.revoke`, `adjudication.review`,
+`commit` (deferred), `policy.set`, `policy.revoke`, `adjudication.review`,
 `adjudication.correct`, `embedding.retry`, `embedding.skip`,
 `embedding.cancel` and `gen ... qualify` return retryable
 `storage_unavailable` when Neo4j is unavailable, before any
@@ -1142,7 +1142,7 @@ feedback, policy, review, correction or resolution acceptance. With Neo4j
 available, missing/unrebuildable policy cache returns retryable
 `policy_unavailable`; failure to persist a receipt returns retryable
 `receipt_unavailable` before any memory delivery. Invalid contracts and policy
-races remain explicit errors. `recall_id:null` is never accepted by `commit`;
+races remain explicit errors. `recall_id:null` is never accepted by `commit` (deferred; in-process today);
 unknown non-null receipt IDs reject `unknown_recall`. Do not confuse inability
 to read the store with evidence that a receipt is unknown or expired.
 
