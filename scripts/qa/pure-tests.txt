@@ -38,10 +38,16 @@ app/anamnesis/slack.test.ts
 app/anamnesis/managed.test.ts
 app/anamnesis/upload-lifecycle.test.mjs
 app/anamnesis/codexraw.test.ts
-app/anamnesis/g003-v01-acceptance.test.mjs
 app/anamnesis/clauderaw.test.ts
 app/anamnesis/notion.test.ts
 app/anamnesis/config.test.ts
 app/anamnesis/omoraw.test.ts
 app/anamnesis/managed-supervisor.test.ts
 packages/core/src/backoff.test.ts
+app/anamnesis/timing.test.ts
+packages/core/src/store/digest.test.ts
+packages/protocol/src/materialization.test.ts
+packages/core/src/legacy-format.test.ts
+app/anamnesis/recovery-probe.test.ts
+packages/core/src/schema-migrations.test.ts
+app/anamnesis/client-deadline.test.ts

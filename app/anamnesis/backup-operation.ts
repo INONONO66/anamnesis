@@ -1,9 +1,9 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import fs from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { atomicJson, hasCode, syncDirectory } from "./config.ts";
-import { parseArchiveCompletion, parseArchiveManifest } from "./archive-manifest.ts";
+import { canonical, parseArchiveCompletion, parseArchiveManifest, sha256 as hash } from "./archive-manifest.ts";
 
 /** Control journal only; not a backup executor, data authority, RPC, or writer fence.
  * The future orchestrator must retain exclusive custody of source/destination
@@ -98,12 +98,6 @@ function record(value: unknown, keys: string[], code: BackupOperationCode): Reco
 }
 function text(value: unknown, pattern: RegExp): value is string { return typeof value === "string" && pattern.test(value); }
 function integer(value: unknown, min: number, max: number): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max; }
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value !== null && typeof value === "object") { const obj = value as Record<string, unknown>; return `{${Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(",")}}`; }
-  return JSON.stringify(value);
-}
-function hash(value: string | Uint8Array): string { return createHash("sha256").update(value).digest("hex"); }
 function decode(bytes: string | Uint8Array, max: number, code: BackupOperationCode): unknown {
   try {
     need(typeof bytes === "string" || bytes instanceof Uint8Array, code, "expected UTF-8 bytes");

@@ -10,6 +10,7 @@ import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { Engine } from "./engine.ts";
 import { ExtractionScheduler } from "./extraction-scheduler.ts";
+import { modelTaskRetryDelayMs } from "./backoff.ts";
 import { ExtractionProviderError, type ExtractionProvider, type ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
 
@@ -61,14 +62,22 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     origin: { source: root, session: root, actor: "user", record: String(++record) }, source_revision: "v1", expected_previous_revision_key: null },
     { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context });
   const bodies = async (label: string) => (await query(`MATCH (n:${label}) RETURN n.body AS body ORDER BY n.id`)).map(row => JSON.parse(String(row.body)) as Record<string, unknown>);
+  /** Moves the shared clock past every failed task's retry backoff (the persisted schedule, not the lane's timer). */
+  const elapseBackoff = async () => {
+    const failed = (await bodies("ModelTask")).filter(task => task.state === "failed") as { attempts: number; updated_at: number }[];
+    const due = Math.max(...failed.map(task => task.updated_at + modelTaskRetryDelayMs(task.attempts)));
+    offset = Math.max(offset, due - Date.now() + 1);
+  };
   return {
     query, bodies, remember,
-    /** Turns daemon A until the selected provider call is in flight (the state a SIGTERM/SIGKILL finds). */
+    /** Turns daemon A until the selected provider call is in flight (the state a SIGTERM/SIGKILL finds). A failed attempt
+     * retries only after its backoff, so between turns the shared clock moves past every failed task's retry moment. */
     async runUntilHung() {
-      for (let turns = 0; turns < 8; turns++) {
+      for (let turns = 0; turns < 16; turns++) {
         await schedulerA.turn();
         const settled = await Promise.race([inFlightAtStop.then(() => "hung" as const), Promise.allSettled(inFlight(schedulerA)).then(() => "settled" as const)]);
         if (settled === "hung") return;
+        await elapseBackoff();
       }
       throw new Error("daemon A never reached the in-flight call");
     },

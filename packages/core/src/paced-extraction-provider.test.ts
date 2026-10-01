@@ -48,6 +48,8 @@ test("identity passes through and options are validated at construction", () => 
   expect(paced.model).toBe("haiku-fixture");
   expect(paced.modelIncarnation).toBe("a".repeat(64));
   expect(paced.stats()).toEqual({ calls_total: 0, waited_total_ms: 0, last_call_at: null });
+  expect(paced.reportedModelIncarnation).toBeUndefined();
+  expect(new PacedExtractionProvider({ ...provider, reportedModelIncarnation: "haiku-2026-06-01" }, { minIntervalMs: 0 }).reportedModelIncarnation).toBe("haiku-2026-06-01");
   for (const minIntervalMs of [-1, 0.5, 600001, Number.NaN, Number.POSITIVE_INFINITY]) {
     expect(() => new PacedExtractionProvider(provider, { minIntervalMs })).toThrow(RangeError);
   }

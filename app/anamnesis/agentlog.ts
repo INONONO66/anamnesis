@@ -6,12 +6,12 @@ import { basename, join, resolve } from "node:path";
 import { streamAgentLogFile } from "@anamnesis/backfill";
 import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
-import { sourceRevisionKey, ingestSnapshot, type SourceRecord } from "./source.ts";
+import { Revisions } from "./raw-lane.ts";
+import { ingestSnapshot, type SourceRecord } from "./source.ts";
 
 // Finite source metadata, not an episode collection. Larger exports must be
 // partitioned intentionally; no eviction can invent a missing predecessor.
 const MAX_FILES = 1024;
-const MAX_REVISIONS = 100_000;
 const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 async function files(root: string): Promise<string[]> {
   const entries = await readdir(root);
@@ -53,16 +53,12 @@ export async function ingestAgentLog(root: string, checkpointPath: string, clien
       for (const path of paths) if (await fingerprint(path) !== fingerprints.get(path)) throw new Error("source_changed");
     };
     async function* records(): AsyncGenerator<SourceRecord> {
-      const heads = new Map<string, { native: string; revision: string; key: string; previous: string | null; signature: string }>();
-      const seen = new Set<string>();
-      let ordinal = 0;
+      const revisions = new Revisions();
       for (const path of paths) {
         for await (const { line, episode } of streamAgentLogFile(path)) {
           if (!episode) continue;
-          ordinal++;
           const input = episode.input;
           const o = input.origin;
-          const origin = JSON.stringify([o.source, o.session, o.actor, o.record]);
           const native = input.source_revision!;
           const body = input.payload === undefined ? undefined : Buffer.from(input.payload);
           const base = RpcRememberParams.parse({
@@ -70,19 +66,7 @@ export async function ingestAgentLog(root: string, checkpointPath: string, clien
             source_revision: native, expected_previous_revision_key: null,
             ...(body === undefined ? {} : { payload_hash: sha(body) }),
           });
-          const signature = sha(JSON.stringify(base));
-          const head = heads.get(origin);
-          const duplicate = head?.native === native;
-          if (duplicate && head.signature !== signature) throw new Error(`source_revision_conflict: ${path}:${line}`);
-          const seenKey = JSON.stringify([origin, native]);
-          const revision = duplicate ? head.revision : seen.has(seenKey) ? `${native}:occurrence:${ordinal}` : native;
-          const params = RpcRememberParams.parse({ ...base, source_revision: revision, expected_previous_revision_key: duplicate ? head.previous : head?.key ?? null });
-          if (!duplicate) {
-            if (seen.size >= MAX_REVISIONS || heads.size >= MAX_REVISIONS) throw new Error("source_revision_limit");
-            seen.add(seenKey);
-            const key = sourceRevisionKey(params);
-            heads.set(origin, { native, revision, key, previous: params.expected_previous_revision_key, signature });
-          }
+          const { params } = revisions.admit(base, false, `${path}:${line}`);
           yield { params, context: { file: basename(path), line, native_source_revision: native },
             ...(body === undefined ? {} : { payload: { bytes_b64: body.toString("base64"), media_type: input.payload_media_type! } }) };
         }

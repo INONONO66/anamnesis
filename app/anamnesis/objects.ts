@@ -1,5 +1,5 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile, unlink, type FileHandle } from "node:fs/promises";
+import fs, { type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { ObjectStore } from "@anamnesis/core";
 import { RPC_LIMITS, RpcObjectMetadata } from "@anamnesis/protocol";
@@ -51,9 +51,9 @@ export class Uploads {
     this.clock = lifecycle.clock ?? clock;
   }
   async init(): Promise<void> {
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
-    await mkdir(this.temporary, { recursive: true, mode: 0o700 });
-    const directory = await lstat(this.temporary);
+    await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
+    await fs.mkdir(this.temporary, { recursive: true, mode: 0o700 });
+    const directory = await fs.lstat(this.temporary);
     if (!directory.isDirectory() || directory.uid !== process.getuid?.() || (directory.mode & 0o777) !== 0o700) {
       throw new Error("upload temporary directory must be private and owned");
     }
@@ -61,8 +61,8 @@ export class Uploads {
     // Installation ownership is acquired before init. Never recover session
     // handles. Count everything first; only this implementation's private,
     // single-link UUID files are eligible for abandoned-temp reclamation.
-    for (const name of await readdir(this.temporary)) {
-      const path = join(this.temporary, name), info = await lstat(path);
+    for (const name of await fs.readdir(this.temporary)) {
+      const path = join(this.temporary, name), info = await fs.lstat(path);
       if (!info.isFile()) throw new Error("unrecognized upload artifact; admission stopped");
       this.survivingCount++;
       this.survivingBytes += info.size;
@@ -71,11 +71,11 @@ export class Uploads {
       }
     }
     for (const artifact of abandoned) {
-      const info = await lstat(artifact.path);
+      const info = await fs.lstat(artifact.path);
       if (info.ino !== artifact.ino || info.dev !== artifact.dev || info.size !== artifact.size || !info.isFile() || info.nlink !== 1) {
         throw new Error("upload artifact changed during recovery");
       }
-      await unlink(artifact.path);
+      await fs.unlink(artifact.path);
       this.survivingBytes -= artifact.size; this.survivingCount--;
     }
     await syncDirectory(this.temporary);
@@ -107,7 +107,7 @@ export class Uploads {
   async metadata(hash: string): Promise<RpcObjectMetadata | null> {
     const path = join(this.root, hash.slice(0, 2), hash);
     let raw: string;
-    try { raw = await readFile(path + ".json", "utf8"); }
+    try { raw = await fs.readFile(path + ".json", "utf8"); }
     catch (error) { if (hasCode(error, "ENOENT")) return null; throw error; }
     const metadata = JSON.parse(raw) as Record<string, unknown>;
     const parsed = RpcObjectMetadata.safeParse({ hash: metadata["hash"], size: metadata["size"], media_type: metadata["mediaType"] });
@@ -115,7 +115,7 @@ export class Uploads {
       throw new RpcFault("object_corrupt", "object data or metadata failed verification");
     }
     for (const name of [path, path + ".json"]) {
-      const file = await open(name, "r");
+      const file = await fs.open(name, "r");
       try { await file.sync(); } finally { await file.close(); }
     }
     await syncDirectory(join(this.root, hash.slice(0, 2)));
@@ -142,7 +142,7 @@ export class Uploads {
     const id = randomUUID();
     const path = join(this.temporary, id);
     let file: FileHandle;
-    try { file = await open(path, "wx", 0o600); }
+    try { file = await fs.open(path, "wx", 0o600); }
     catch (error) {
       if (hasCode(error, "ENOSPC") || hasCode(error, "EDQUOT") || hasCode(error, "EMFILE") || hasCode(error, "ENFILE")) {
         throw new RpcFault("resource_exhausted", `upload open failed: ${String(error)}`);
@@ -201,7 +201,7 @@ export class Uploads {
       if (existing && existing.media_type !== upload.expected.media_type) throw new RpcFault("object_metadata_conflict", "object metadata changed during upload");
       // Current Engine/ObjectStore consume Uint8Array; only this bounded,
       // serialized commit materializes up to object_bytes, never each chunk.
-      await this.store.put(await readFile(upload.path), upload.expected.media_type);
+      await this.store.put(await fs.readFile(upload.path), upload.expected.media_type);
       const committed = await this.metadata(upload.expected.hash);
       if (!committed) throw new RpcFault("object_corrupt", "object publication lacks durable metadata");
       return committed;
@@ -210,7 +210,7 @@ export class Uploads {
   private async remove(id: string, upload: Upload): Promise<void> {
     upload.invalid = true; // Cleanup failure must not resurrect a public handle.
     await upload.file.close();
-    try { await unlink(upload.path); }
+    try { await fs.unlink(upload.path); }
     catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
     this.uploads.delete(id); // Retain count and byte reservation until deletion.
   }

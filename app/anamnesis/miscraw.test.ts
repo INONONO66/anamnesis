@@ -67,6 +67,10 @@ test("all supported stores retain backfill bodies, native ordinals, tool exclusi
   expect(m.params.map(p => p.episode.origin.record)).toEqual(["native:1", "native:2", "brain:42", "brain:43", "prompt-history:0"]);
   expect((await saved(cp)).next).toBe(5);
 }));
+test("a turn the parser accepts but the protocol refuses is a source_invalid_record at its line", () => fixture(async (source, cp) => {
+  await put(source, aside, line(turn("ok")) + line(turn("lone surrogate \ud800"))); await seal(source);
+  await expect(ingestMiscRaw(source, cp, mock(cp).client)).rejects.toThrow(`source_invalid_record: ${aside}:2`);
+}));
 test("Aside normalized index joins by user and session suffix, never session_runs duplicates", () => fixture(async (source, cp) => {
   await put(source, index, line({ id: "native", title: "title", cwd: "/work" })); await seal(source);
   const m = mock(cp); await ingestMiscRaw(source, cp, m.client);

@@ -13,18 +13,21 @@ export const EpisodeLineageInput = z.strictObject({
 });
 export type EpisodeLineageInput = z.infer<typeof EpisodeLineageInput>;
 const sortedIds = (max: number) => ids(max).refine(v => v.every((id, i) => i === 0 || v[i - 1]! < id), "IDs must be sorted");
-export const EchoLineage = z.strictObject({
+const lineageShape = z.strictObject({
   episode_id: z.uuidv7(), lineage_mode: z.enum(["direct", "receipts"]),
   parent_recall_ids: sortedIds(4), context_digests: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(4),
   root_episode_ids: sortedIds(16), echo_depth: z.number().int().min(0).max(8), complete: z.boolean(),
-}).superRefine((v, ctx) => {
+});
+/** Direct lineage has no parents and roots at itself; receipts lineage has parents and depth; a complete lineage names its roots. */
+function lineageInvariants(v: z.infer<typeof lineageShape>, ctx: z.RefinementCtx): void {
   if (v.parent_recall_ids.length !== v.context_digests.length
     || (v.lineage_mode === "direct" && (v.parent_recall_ids.length !== 0 || v.echo_depth !== 0 || !v.complete
       || v.root_episode_ids.length !== 1 || v.root_episode_ids[0] !== v.episode_id))
     || (v.lineage_mode === "receipts" && (v.parent_recall_ids.length === 0 || v.echo_depth === 0))
     || (v.complete && v.root_episode_ids.length === 0))
     ctx.addIssue({ code: "custom", message: "invalid retained lineage" });
-});
+}
+export const EchoLineage = lineageShape.superRefine(lineageInvariants);
 export type EchoLineage = z.infer<typeof EchoLineage>;
 /** Snapshots are server materialized. Empty roots mean unknown, never direct. */
 export const RecallLineageSelection = z.array(z.strictObject({

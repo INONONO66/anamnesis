@@ -23,9 +23,9 @@
     "gate:dead": "knip",
     "gate:cycles": "madge --circular --extensions ts app/anamnesis/main.ts app/anamnesis/ops.ts packages/core/src/index.ts packages/protocol/src/index.ts packages/backfill/src/index.ts",
     "gate:types": "bun scripts/gate/any-unknown.ts",
-    "gate:halstead": "fta app packages --json --score-cap 100000",
-    "gate:mutation": "stryker run",
-    "gate:coverage": "bun test --coverage --coverage-reporter=text $(cat scripts/qa/pure-tests.txt) app/anamnesis/recovery-probe.test.ts packages/core/src/schema-migrations.test.ts"
+    "gate:halstead": "bun scripts/gate/halstead.ts",
+    "gate:mutation": "bun scripts/gate/mutation.ts",
+    "gate:coverage": "bun test --coverage --coverage-reporter=text $(cat scripts/qa/pure-tests.txt)"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -33,7 +33,6 @@
     "@types/bun": "^1.2.21",
     "eslint": "^10.11.0",
     "eslint-plugin-sonarjs": "^4.2.2",
-    "fta-cli": "^3.0.1",
     "jscpd": "^5.3.3",
     "knip": "^6.39.0",
     "madge": "^8.0.0",

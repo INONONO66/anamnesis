@@ -1,3 +1,4 @@
+import { optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -18,9 +19,6 @@ function text(value: unknown, fallback: string): string {
   return typeof value === "string" && value !== "" ? value : fallback;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
 export function parseSlackMessage(line: string): SlackMessage {
   const raw: Record<string, unknown> = JSON.parse(line);

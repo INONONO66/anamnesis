@@ -19,6 +19,14 @@ const physical = (rows: readonly any[]) => (sourceId: string, linkId: string) =>
     expect(result.facts[0]).toMatchObject({ schema: "anamnesis.claim/1", generation: 7, policyRevision: 3, source_episode_ids: ["ep-1"], lineage: { episode_id: "ep-1", attempt_id: "attempt-1", span: [0, 10] } });
   });
 
+  test("refuses evidence from another generation, policy revision, episode or a failed attempt", () => {
+    const arc = { source_id: "527b4b70f974c5305da161e499616fd9", link_id: "l-1", peer_id: episode.id, role: "DERIVED_FROM" as const, generation: 7 };
+    const options = { semanticWrites: true, independentShadowReview: true, conductingArc: arc, conductingArcLookup: physical([arc]) };
+    for (const stale of [{ generation: 8 }, { policyRevision: 4 }, { episodeId: "ep-2" }, { state: "failed" as const }]) {
+      expect(materializeFacts({ ...attempt, ...stale }, episode, options)).toEqual({ state: "blocked", reason: "stale_evidence", facts: [] });
+    }
+  });
+
   test("refuses unpersisted or caller-shaped arcs", () => {
     expect(materializeFacts(attempt, episode, { semanticWrites: true, independentShadowReview: true })).toEqual({ state: "blocked", reason: "conducting_arc_unavailable", facts: [] });
     const arc = { source_id: "other-fact", link_id: "arbitrary", peer_id: episode.id, role: "DERIVED_FROM" as const, generation: 7 };

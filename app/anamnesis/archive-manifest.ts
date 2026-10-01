@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AuthoritySnapshot } from "@anamnesis/core";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, opendir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -43,14 +44,7 @@ interface ArchiveMember { path: string; role: Role; bytes: number; sha256: strin
 interface ArchiveObject { hash: string; size: number; media_type: string }
 /** Cutoff authority evidence. This is deliberately separate from the opaque
  * dump: a dump without this set cannot establish what was backed up. */
-export interface AuthoritySnapshot {
-  members: string[];
-  retained_generations: number[];
-  coverage: { ingest_seq: number; structure_revision: number; policy_revision: number };
-  physical_links: { id: string; from: string; to: string; role: "DERIVED_FROM" | "ConductingArc" }[];
-  invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
-  source_hashes: string[];
-}
+export type { AuthoritySnapshot };
 type AuthoritySnapshotRefusal = "authority_members_missing" | "authority_generations_missing" |
   "authority_coverage_missing" | "authority_links_missing" | "authority_invalidation_missing" | "authority_sources_missing";
 class AuthoritySnapshotError extends Error {
@@ -149,7 +143,7 @@ function text(value: unknown, pattern: RegExp, max = 256): value is string {
 function array(value: unknown, max: number, code: ArchiveAdmissionCode): unknown[] {
   need(Array.isArray(value) && value.length <= max, code, "array exceeds admission limit or is absent"); return value;
 }
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const obj = value as Record<string, unknown>;
@@ -157,7 +151,34 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
-function sha256(bytes: string | Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
+export function sha256(bytes: string | Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
+/** Index of the quote closing the string opened at `open`, honouring backslash escapes (raw.length when unterminated). */
+function stringEnd(raw: string, open: number): number {
+  let i = open + 1;
+  while (i < raw.length && raw[i] !== '"') { if (raw[i] === "\\") i++; i++; }
+  return i;
+}
+/** A string is an object key when the next non-space character after it is a colon. */
+function isKey(raw: string, end: number): boolean {
+  let next = end + 1; while (/\s/.test(raw[next] ?? "x")) next++;
+  return raw[next] === ":";
+}
+/** Rejects duplicate object keys and over-deep nesting before JSON.parse, which would silently keep the last key. */
+function scanJson(raw: string, code: ArchiveAdmissionCode): void {
+  const stack: Array<Set<string> | null> = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '"') {
+      const start = i; i = stringEnd(raw, i);
+      if (isKey(raw, i)) {
+        const key = JSON.parse(raw.slice(start, i + 1)) as string, keys = stack.at(-1);
+        need(keys && !keys.has(key), code, "duplicate JSON key"); keys.add(key);
+      }
+    } else if (c === "{" || c === "[") {
+      stack.push(c === "{" ? new Set() : null); need(stack.length <= ARCHIVE_LIMITS.json_depth, code, "JSON depth limit");
+    } else if (c === "}" || c === "]") stack.pop();
+  }
+}
 /** Duplicate keys must reject even for legacy ObjectStore sidecars, whose
  * insertion-ordered JSON is not the canonical manifest byte representation. */
 function decode(bytes: string | Uint8Array, max: number, code: ArchiveAdmissionCode, requireCanonical: boolean): unknown {
@@ -165,21 +186,7 @@ function decode(bytes: string | Uint8Array, max: number, code: ArchiveAdmissionC
   let raw: string, value: unknown;
   try {
     raw = typeof bytes === "string" ? bytes : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    const stack: Array<Set<string> | null> = [];
-    for (let i = 0; i < raw.length; i++) {
-      const c = raw[i];
-      if (c === '"') {
-        const start = i++;
-        while (i < raw.length && raw[i] !== '"') { if (raw[i] === "\\") i++; i++; }
-        let next = i + 1; while (/\s/.test(raw[next] ?? "x")) next++;
-        if (raw[next] === ":") {
-          const key = JSON.parse(raw.slice(start, i + 1)) as string, keys = stack.at(-1);
-          need(keys && !keys.has(key), code, "duplicate JSON key"); keys.add(key);
-        }
-      } else if (c === "{" || c === "[") {
-        stack.push(c === "{" ? new Set() : null); need(stack.length <= ARCHIVE_LIMITS.json_depth, code, "JSON depth limit");
-      } else if (c === "}" || c === "]") stack.pop();
-    }
+    scanJson(raw, code);
     value = JSON.parse(raw) as unknown;
   } catch (cause) {
     if (cause instanceof ArchiveAdmissionError) throw cause;
@@ -196,6 +203,41 @@ function sortedUnique(keys: string[], code: ArchiveAdmissionCode): void {
  * canonical JSON numbers/strings, sorted identity arrays; ASCII schema fields.
  * The completion hash binds these exact UTF-8 bytes, not a reserialized input.
  */
+function parseCutoff(value: unknown, code: ArchiveAdmissionCode): ArchiveManifest["cutoff"] {
+const c0 = record(value, ["ingest_seq", "structure_revision", "policy_revision"], code);
+need(integer(c0.ingest_seq) && integer(c0.structure_revision) && integer(c0.policy_revision), code, "invalid cutoff counter");
+return { ingest_seq: c0.ingest_seq, structure_revision: c0.structure_revision, policy_revision: c0.policy_revision };
+}
+function parseCompatibility(value: unknown, code: ArchiveAdmissionCode): ArchiveManifest["compatibility"] {
+const k = record(value, ["schema_version", "neo4j_version", "neo4j_image_digest", "episode_digest_version_ceiling"], code);
+need(text(k.schema_version, /^anamnesis\.storage\/[1-9][0-9]{0,5}$/) && text(k.neo4j_version, NEO4J) &&
+  text(k.neo4j_image_digest, IMAGE) && (k.episode_digest_version_ceiling === 1 || k.episode_digest_version_ceiling === 2), code, "invalid compatibility contract");
+return { schema_version: k.schema_version, neo4j_version: k.neo4j_version, neo4j_image_digest: k.neo4j_image_digest, episode_digest_version_ceiling: k.episode_digest_version_ceiling };
+}
+function parseConfiguration(value: unknown, code: ArchiveAdmissionCode): ArchiveManifest["configuration"] {
+const g = record(value, ["config_sha256", "receipt_retention_ms", "prior_version", "calibration_version", "dynamics_version"], code);
+need(text(g.config_sha256, HEX) && integer(g.receipt_retention_ms, ARCHIVE_LIMITS.receipt_retention_ms, 1) &&
+  text(g.prior_version, VERSION) && text(g.calibration_version, VERSION) && text(g.dynamics_version, VERSION), code, "invalid config pins");
+return { config_sha256: g.config_sha256, receipt_retention_ms: g.receipt_retention_ms, prior_version: g.prior_version, calibration_version: g.calibration_version, dynamics_version: g.dynamics_version };
+}
+/** Embedding profiles in fingerprint order; the active profile, when named, must be one of them. */
+function parseProfiles(list: unknown, active: unknown, code: ArchiveAdmissionCode): { profiles: ArchiveEmbeddingProfile[]; activeId: string | null } {
+  const profiles = array(list, ARCHIVE_LIMITS.embedding_profiles, code).map((value): ArchiveEmbeddingProfile => {
+  const p = record(value, ["embedding_profile_id", "embedding_model_id", "vector_index_id"], code);
+  need(text(p.embedding_profile_id, HEX) && text(p.embedding_model_id, HEX) && text(p.vector_index_id, HEX), code, "invalid embedding fingerprint");
+  need(p.embedding_profile_id === sha256(canonical({ embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id })), code, "profile fingerprint mismatch");
+  return { embedding_profile_id: p.embedding_profile_id, embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id };
+  });
+  sortedUnique(profiles.map(p => p.embedding_profile_id), code);
+  need(active === null || (typeof active === "string" && profiles.some(p => p.embedding_profile_id === active)), code, "unknown active profile");
+  return { profiles, activeId: active as string | null };
+}
+function parseExtraction(value: unknown, code: ArchiveAdmissionCode): ArchiveManifest["models"]["extraction"] {
+  if (value === null) return null;
+  const e = record(value, ["generation", "fact_language_policy", "grouping_version", "judge_profile_id"], code);
+  need(integer(e.generation, Number.MAX_SAFE_INTEGER, 1) && text(e.fact_language_policy, VERSION) && text(e.grouping_version, VERSION) && text(e.judge_profile_id, HEX), code, "invalid extraction pins");
+  return { generation: e.generation, fact_language_policy: e.fact_language_policy, grouping_version: e.grouping_version, judge_profile_id: e.judge_profile_id };
+}
 /** @public consumed by the .mjs harnesses through dynamic import */
 export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifest {
   const code = "invalid_manifest";
@@ -204,33 +246,12 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
   const m = record(decoded,
     Object.hasOwn(decoded, "authority") ? ["format", "operation_id", "cutoff", "compatibility", "configuration", "models", "objects", "members", "authority"] : ["format", "operation_id", "cutoff", "compatibility", "configuration", "models", "objects", "members"], code);
   need(m.format === "anamnesis.archive/1" && text(m.operation_id, UUID7), code, "unsupported format or operation identity");
-  const c0 = record(m.cutoff, ["ingest_seq", "structure_revision", "policy_revision"], code);
-  need(integer(c0.ingest_seq) && integer(c0.structure_revision) && integer(c0.policy_revision), code, "invalid cutoff counter");
-  const cutoff: ArchiveManifest["cutoff"] = { ingest_seq: c0.ingest_seq, structure_revision: c0.structure_revision, policy_revision: c0.policy_revision };
-  const k = record(m.compatibility, ["schema_version", "neo4j_version", "neo4j_image_digest", "episode_digest_version_ceiling"], code);
-  need(text(k.schema_version, /^anamnesis\.storage\/[1-9][0-9]{0,5}$/) && text(k.neo4j_version, NEO4J) &&
-    text(k.neo4j_image_digest, IMAGE) && (k.episode_digest_version_ceiling === 1 || k.episode_digest_version_ceiling === 2), code, "invalid compatibility contract");
-  const compatibility: ArchiveManifest["compatibility"] = { schema_version: k.schema_version, neo4j_version: k.neo4j_version, neo4j_image_digest: k.neo4j_image_digest, episode_digest_version_ceiling: k.episode_digest_version_ceiling };
-  const g = record(m.configuration, ["config_sha256", "receipt_retention_ms", "prior_version", "calibration_version", "dynamics_version"], code);
-  need(text(g.config_sha256, HEX) && integer(g.receipt_retention_ms, ARCHIVE_LIMITS.receipt_retention_ms, 1) &&
-    text(g.prior_version, VERSION) && text(g.calibration_version, VERSION) && text(g.dynamics_version, VERSION), code, "invalid config pins");
-  const config: ArchiveManifest["configuration"] = { config_sha256: g.config_sha256, receipt_retention_ms: g.receipt_retention_ms, prior_version: g.prior_version, calibration_version: g.calibration_version, dynamics_version: g.dynamics_version };
+  const cutoff = parseCutoff(m.cutoff, code);
+  const compatibility = parseCompatibility(m.compatibility, code);
+  const config = parseConfiguration(m.configuration, code);
   const models = record(m.models, ["active_embedding_profile_id", "embedding_profiles", "embedding_coverages", "extraction"], code);
-  const profiles = array(models.embedding_profiles, ARCHIVE_LIMITS.embedding_profiles, code).map((value): ArchiveEmbeddingProfile => {
-    const p = record(value, ["embedding_profile_id", "embedding_model_id", "vector_index_id"], code);
-    need(text(p.embedding_profile_id, HEX) && text(p.embedding_model_id, HEX) && text(p.vector_index_id, HEX), code, "invalid embedding fingerprint");
-    need(p.embedding_profile_id === sha256(canonical({ embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id })), code, "profile fingerprint mismatch");
-    return { embedding_profile_id: p.embedding_profile_id, embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id };
-  });
-  sortedUnique(profiles.map(p => p.embedding_profile_id), code);
-  const activeId = models.active_embedding_profile_id;
-  need(activeId === null || (typeof activeId === "string" && profiles.some(p => p.embedding_profile_id === activeId)), code, "unknown active profile");
-  let extraction: ArchiveManifest["models"]["extraction"] = null;
-  if (models.extraction !== null) {
-    const e = record(models.extraction, ["generation", "fact_language_policy", "grouping_version", "judge_profile_id"], code);
-    need(integer(e.generation, Number.MAX_SAFE_INTEGER, 1) && text(e.fact_language_policy, VERSION) && text(e.grouping_version, VERSION) && text(e.judge_profile_id, HEX), code, "invalid extraction pins");
-    extraction = { generation: e.generation, fact_language_policy: e.fact_language_policy, grouping_version: e.grouping_version, judge_profile_id: e.judge_profile_id };
-  }
+  const { profiles, activeId } = parseProfiles(models.embedding_profiles, models.active_embedding_profile_id, code);
+  const extraction = parseExtraction(models.extraction, code);
   const extractionGeneration = extraction?.generation ?? null;
   const modelIds = new Set(profiles.map(p => p.embedding_model_id)), coverageKeys = new Set<string>();
   const coverages = array(models.embedding_coverages, ARCHIVE_LIMITS.embedding_coverages, code).map((value): ArchiveEmbeddingCoverage => {

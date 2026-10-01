@@ -1,10 +1,10 @@
 import { planSchemaMigration } from "./schema-migrations.ts";
 import { EPISODE_SCHEMAS, SCHEMA_ID, isEpisodeSchema } from "@anamnesis/protocol";
-import neo4j, { Driver, type ManagedTransaction, type RecordShape } from "neo4j-driver";
+import neo4j, { Driver, type ManagedTransaction, type Record as Neo4jRecord, type RecordShape } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
-import { LINK_LATTICE, MemoryElement, MemoryLink, ExtractionAttempt, Generation, ModelTask, Coverage, type MemoryElementInput, type MemoryLinkInput, type LinkRole } from "@anamnesis/protocol";
+import { LINK_LATTICE, MemoryElement, MemoryLink, ExtractionAttempt, Generation, ModelTask, Coverage, type MemoryElementInput, type MemoryLinkInput, type LinkRole, type TimePoint } from "@anamnesis/protocol";
 import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "@anamnesis/protocol";
 import { ObjectStore } from "./objects.ts";
 import { EchoLineage, EpisodeLineageError, RecallLineageSelection, parseEpisodeLineage, type EpisodeLineageInput } from "@anamnesis/protocol";
@@ -101,6 +101,323 @@ export interface IntegrityIssue {
 const EMBEDDING_MAX_DEFERRALS = 8;
 /** Backoff before a deferred outbox entry is due again: 30 s doubling per deferral, capped at one hour. */
 const embeddingRetryDelay = (deferrals: number): number => Math.min(30_000 * 2 ** (deferrals - 1), 3_600_000);
+
+type PolicyEventRow = { key: string; revision: number; body: string; digest: string };
+
+/** The index-th stored policy event: a well-formed event whose stored key, revision, body and digest all agree with it. */
+function decodePolicyEvent(row: PolicyEventRow, index: number): PolicyEvent {
+  let decoded: unknown;
+  try { decoded = JSON.parse(row.body); }
+  catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new ReceiptError("policy_unavailable"); }
+  const parsed = PolicyEvent.safeParse(decoded);
+  if (!parsed.success) throw new ReceiptError("policy_unavailable");
+  const event = parsed.data, body = policyBody(event);
+  if (event.revision !== index + 1 || row.revision !== event.revision
+    || row.key !== `${event.policy_id}:${event.action}`
+    || row.body !== body || row.digest !== sha256(body)) throw new ReceiptError("policy_unavailable");
+  return event;
+}
+
+/** A deny opens a policy once; a revoke closes an open, unrevoked deny with the same selector and scope. At most 256 stay open. */
+function foldPolicyEvent(event: PolicyEvent, denies: Map<string, PolicyEvent>, revoked: Set<string>): void {
+  const deny = denies.get(event.policy_id);
+  if (event.action === "deny") {
+    if (deny) throw new ReceiptError("policy_unavailable");
+    denies.set(event.policy_id, event);
+  } else {
+    if (!deny || revoked.has(event.policy_id) || canonicalJson(policySelector(deny.selector)) !== canonicalJson(policySelector(event.selector)) || deny.scope !== event.scope) throw new ReceiptError("policy_unavailable");
+    revoked.add(event.policy_id);
+  }
+  if (denies.size - revoked.size > 256) throw new ReceiptError("policy_unavailable");
+}
+
+/** New hits for a feedback commit: one recall_hit per contributing source (deduplicated by idem key against `keys`) and,
+ * for a first outcome, one weighted outcome hit per attributed source. */
+function feedbackHits(receipt: RecallReceipt, request: { operation_id: string; reward?: number | undefined }, adopted: string[], selected: string[],
+  keys: Set<string>, now: number, firstOutcome: boolean): ReceiptHit[] {
+  const hits: ReceiptHit[] = [];
+  const coefficients = new Map<string, number>();
+  for (const item of receipt.primaries.filter((item) => adopted.includes(item.id))) {
+    for (const source of item.sources) coefficients.set(source, Math.min(1, (coefficients.get(source) ?? 0) + 1 / item.sources.length));
+  }
+  const append = (episodeId: string, kind: "recall_hit" | "outcome", value: number): void => {
+    const key = tupleHash([receipt.recall_id, episodeId, kind]);
+    if (keys.has(key)) return;
+    const contributing = kind === "recall_hit" ? adopted : selected;
+    const base = { id: uuidv7(), episode_id: episodeId, operation_id: request.operation_id,
+      namespace: receipt.recall_id, idem_key: key, t: now, config_version: receipt.config_version,
+      attribution: receipt.primaries.filter((item) => contributing.includes(item.id) && item.sources.includes(episodeId)) };
+    hits.push(ReceiptHit.parse(kind === "recall_hit"
+      ? { ...base, kind, kappa_eff: value }
+      : { ...base, kind, kappa_eff: 0, reward: request.reward, weight: value }));
+  };
+  for (const [id, coefficient] of coefficients) append(id, "recall_hit", coefficient);
+  if (firstOutcome) for (const [id, weight] of attributeOutcome(receipt.primaries, selected)) append(id, "outcome", weight);
+  return hits;
+}
+
+/** Each physical link yields one endpoint row per endpoint; malformed links, duplicate ids and self-links are reported alongside. */
+function physicalLinkRows(links: PhysicalConductor[]): { expected: Map<string, ConductingArcRow>; dataIssues: string[]; violations: string[] } {
+  const expected = new Map<string,ConductingArcRow>(), dataIssues: string[] = [], violations: string[] = [], ids = new Set<string>();
+  for (const link of links) {
+    if (!z.uuid().safeParse(link.link_id).success || !z.uuid().safeParse(link.from).success || !z.uuid().safeParse(link.to).success
+      || (link.role === "HAS_MEMBER" && link.source_extraction_generation === null)) dataIssues.push(`invalid-physical:${link.link_id}`);
+    if (ids.has(link.link_id)) dataIssues.push(`duplicate-link-id:${link.link_id}`);
+    ids.add(link.link_id);
+    if (link.from === link.to) violations.push(`self-link:${link.link_id}`);
+    for (const source of new Set([link.from,link.to])) {
+      const row = {source_id:source,peer_id:source===link.from?link.to:link.from,link_id:link.link_id,role:link.role,
+        generation:link.generation,source_extraction_generation:link.source_extraction_generation};
+      expected.set(arcIdentity(row),row);
+    }
+  }
+  return { expected, dataIssues, violations };
+}
+
+interface ElementRevision {
+  sourceRevision: string;
+  revisionKey: string;
+  previousRevisionKey: string | null;
+  ingestedAt: number;
+  digest: string;
+  originRole?: string;
+  lineageDigest?: string;
+}
+
+const timeColumns = (time: TimePoint | null) => ({ timeValue: time?.value ?? null, timeUtc: time ? toUtc(time.value) : null, timePrecision: time?.precision ?? null });
+
+/** Revision columns of an Episode row; an element without a revision carries its own canonical digest and the current ingest time. */
+function revisionColumns(revision: ElementRevision | undefined, el: MemoryElement, payloadHash: string | null) {
+  if (!revision) {
+    return { digest: elementDigest(el, { payloadHash }), digestFormat: CANONICAL_DIGEST, episodeDigestVersion: null, originRole: null, lineageDigest: null,
+      sourceRevision: null, revisionKey: null, previousRevisionKey: null, ingestedAt: Date.now() };
+  }
+  return { digest: revision.digest, digestFormat: revision.lineageDigest ? "episode-rfc8785-v2" : CANONICAL_DIGEST, episodeDigestVersion: revision.lineageDigest ? 2 : null,
+    originRole: revision.originRole ?? null, lineageDigest: revision.lineageDigest ?? null, sourceRevision: revision.sourceRevision, revisionKey: revision.revisionKey,
+    previousRevisionKey: revision.previousRevisionKey, ingestedAt: revision.ingestedAt };
+}
+
+/** Submitted output must be what the model-output validator accepts, with the same disposition and spans, and its spans must lie in the source. */
+function checkAttemptOutput(request: CompleteExtractionAttempt, task: ModelTask, source: { content: string }): void {
+  if (!request.output) return;
+  const validated = validateModelOutput(JSON.parse(request.output.canonical_body), task.kind);
+  if (canonicalExtractionBody(validated.output) !== canonicalExtractionBody(request.output) || validated.disposition !== request.disposition
+    || canonicalExtractionBody(request.spans) !== canonicalExtractionBody(validated.spans)) throw new Error("output_mismatch");
+  validateSourceSpans(source.content, request.spans);
+}
+
+type RecallLists = Record<string, { id: string }[]>;
+interface RecallScope { T: string; denies: ReturnType<typeof policySelector>[]; schemas: string[] }
+
+/** An Episode is servable when it is visible at T, no active deny selects it, and no effective INVALIDATES targets it. */
+const RECALL_ALLOWED = `e.schema IN $schemas AND e.time_utc <= $T
+        AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
+        AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL }`;
+
+/** The candidate channels of a recall: identity, BM25, session and vector, each a policy-scoped Episode list. */
+async function episodeChannelsTx(tx: ManagedTransaction, scope: RecallScope, request: RpcRecallParams, queryVector: number[] | null, profileId: string | null) {
+  const lists: RecallLists = {}, nodes = new Map<string, ElementNode>();
+  const channel = async (name: string, query: string, params: Record<string, unknown>) => {
+    const rows = await tx.run<{ e: ElementNode }>(query, { ...scope, ...params });
+    lists[name] = rows.records.map(row => { const e = row.get("e"); const id = String(e.properties["id"]); nodes.set(id, e); return { id }; });
+  };
+  await channel("identity", `MATCH (e:Element:Episode {id:$id}) WHERE ${RECALL_ALLOWED} RETURN e LIMIT 1`, { id: request.query });
+  const q = luceneQuery(request.query);
+  if (q) await channel("bm25", `CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
+    WITH node AS e,score WHERE e:Episode AND ${RECALL_ALLOWED} RETURN e ORDER BY score DESC,e.id ASC LIMIT 64`, { q });
+  if (request.session) await channel("session", `MATCH (e:Episode {session_key:$session}) WHERE ${RECALL_ALLOWED}
+    RETURN e ORDER BY e.time_utc DESC,e.ingest_seq DESC,e.id ASC LIMIT 32`, { session: tupleHash([request.session.source, request.session.session]) });
+  if (queryVector && profileId) await channel("vector", `CALL db.index.vector.queryNodes($index,256,$vector) YIELD node,score
+    MATCH (e:Element:Episode {id:node.episode_id}) WHERE node.profile_id=$profile AND node.input_revision=e.revision_key AND node.input_digest=e.digest AND ${RECALL_ALLOWED}
+    RETURN e ORDER BY score DESC,e.id ASC LIMIT 64`, { index: `vec_episode_${profileId}`, vector: queryVector, profile: profileId });
+  return { lists, nodes };
+}
+
+/** Every candidate Episode as a ranked item: retention-decayed mass, RRF relevance across channels and cached utility. */
+async function rankedEpisodesTx(tx: ManagedTransaction, nodes: Map<string, ElementNode>, lists: RecallLists, now: number): Promise<RpcRecallItem[]> {
+  const cacheRows = await tx.run<{ id: string; s: number | null; last: number | null; utility: number | null }>(
+    `UNWIND $ids AS id OPTIONAL MATCH (c:HitCache {episode_id:id})
+     RETURN id,c.s AS s,c.t_last_hit AS last,c.utility AS utility`, { ids: [...nodes.keys()] });
+  const caches = new Map(cacheRows.records.map(row => [row.get("id"), row]));
+  const ranked: RpcRecallItem[] = [];
+  for (const [id, node] of nodes) {
+    const props = nodeProps(node), e = toElement(props), cache = caches.get(id)!;
+    const mass = e.mass * retention(Math.max(0, now - (cache.get("last") ?? Number(props["ingested_at"]))) / 86400000, cache.get("s") ?? initialStability(e.mass));
+    const relevance = normalizedRrf(lists, id), utility = cache.get("utility") ?? 0;
+    const item = { id, kind: "Episode", schema: e.schema, epistemic: "observed", content: e.content, time: e.time,
+      mass, utility, relevance, score: relevance * Math.sqrt(Math.max(mass, 0.02)) * (1 + 0.25 * utility), sources: [id],
+      provenance: { derived_from: [{ id, kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false, contrasts: [], warnings: [] },
+      channels: Object.keys(lists).filter(name => lists[name]!.some(candidate => candidate.id === id)) };
+    ranked.push(RpcRecallResult.shape.results.element.parse(item));
+  }
+  return ranked;
+}
+
+/** Facts of the selected generation matching the query join the BM25 list as derived candidates. */
+async function derivedCandidatesTx(tx: ManagedTransaction, query: string, generation: string, T: string, lists: RecallLists): Promise<Map<string, ElementNode>> {
+  const derivedNodes = new Map<string, ElementNode>(), q = luceneQuery(query);
+  if (!q) return derivedNodes;
+  const derivedRows = await tx.run(`CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
+    WITH node AS f,score WHERE f:Fact AND f.generation=$generation AND f.time_utc <= $T
+    RETURN f,score ORDER BY score DESC,f.id ASC LIMIT 64`, { q, generation, T });
+  const bm25 = lists["bm25"] ?? (lists["bm25"] = []);
+  for (const row of derivedRows.records) {
+    const fact = row.get("f") as ElementNode, id = String(fact.properties["id"]);
+    derivedNodes.set(id, fact); bm25.push({ id });
+  }
+  return derivedNodes;
+}
+
+/** Personalized PageRank over the generation's conducting arcs around every candidate; null when nothing seeds it. */
+async function pprScoresTx(tx: ManagedTransaction, generation: string, lists: RecallLists, derivedNodes: Map<string, ElementNode>): Promise<Map<string, number> | null> {
+  const seeds = [...new Set(Object.values(lists).flat().map(hit => hit.id).concat([...derivedNodes.keys()]))];
+  if (seeds.length === 0) return null;
+  const graph = await tx.run(`MATCH (a:ConductingArc)
+    WHERE a.generation=$generation AND (a.source_id IN $seeds OR a.peer_id IN $seeds)
+    RETURN a.source_id AS source,a.peer_id AS peer,a.role AS role,a.link_id AS id LIMIT 1024`, { generation, seeds });
+  const arcs = graph.records.map(record => ({ from: record.get("source"), to: record.get("peer"), role: record.get("role"), id: record.get("id") }));
+  const graphNodes = [...new Set(seeds.concat(arcs.flatMap(arc => [arc.from, arc.to])))];
+  const solved = solvePpr({ nodes: graphNodes, arcs, seeds: new Map(seeds.map(id => [id, 1])) });
+  const sorted = [...graphNodes].sort();
+  return new Map(sorted.map((id, index) => [id, solved.values[index]!]));
+}
+
+/** The bounded prior-revision view of a primary: up to eight superseded Episodes, a withheld one or an overflow flagged by warning. */
+async function supersedesTx(tx: ManagedTransaction, primary: RpcRecallItem, denies: PolicyEvent[]): Promise<void> {
+  const supersedes = await tx.run<{ e: ElementNode }>(`MATCH (:Element:Episode {id:$id})-[:INVALIDATES]->(e:Element:Episode)
+    RETURN DISTINCT e ORDER BY e.id ASC LIMIT 9`, { id: primary.id });
+  for (const row of supersedes.records.slice(0, 8)) {
+    const old = toElement(nodeProps(row.get("e")));
+    const denied = denies.some(deny => (deny.selector.episode_id === undefined || deny.selector.episode_id === old.id)
+      && (deny.selector.source === undefined || deny.selector.source === old.origin.source));
+    if (denied) primary.provenance.supersedes_redacted = true;
+    else primary.provenance.supersedes.push({ id: old.id, content: old.content });
+  }
+  if (primary.provenance.supersedes_redacted) primary.provenance.warnings.push({ code: "supersedes_withheld", content: "Prior revision content is withheld by current policy." });
+  if (supersedes.records.length > 8) primary.provenance.warnings.push({ code: "supersedes_incomplete", content: "Prior revision provenance exceeds the bounded eight-entry view." });
+}
+
+/** Only model-reported confidence admits a claim to semantic writes. Audit-only
+ * output (no confidence) stays an auditable decision and never becomes a Fact. */
+function admittedClaims(decisions: ExtractionDisposition[], claimOutput: Extract<ExtractionModelOutput, { task: "claim" }>) {
+  return decisions.flatMap(decision => {
+    if (decision.disposition !== "retain" && decision.disposition !== "correct") return [];
+    const extracted = claimOutput.claims[decision.claim_index];
+    if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
+    const confidence = decision.confidence ?? extracted.confidence;
+    return confidence === undefined ? [] : [{ decision, extracted, confidence }];
+  });
+}
+type AdmittedClaim = ReturnType<typeof admittedClaims>[number];
+
+/** What one materialization pass over a source shares between its claims. Entities first seen in the pass keep one
+ * allocated id per entity_key, so two claims of one source share a single new Entity whichever is written first. */
+interface MaterializationPass {
+  judge: ExtractionAttempt; pipelineId: string; source: Omit<SemanticSourceContext["episode"], "content_language">;
+  language: string; profile: string; allocatedEntities: Map<string, string>;
+}
+
+/** Per-source custody is written exactly once; readiness requires every covered source to carry custody even when the
+ * judge admitted nothing or every claim was refused. Returns whether any Fact was created. */
+async function custodyRecordTx(tx: ManagedTransaction, custody: string, pass: MaterializationPass, written: { factIds: string[]; refused: string[]; duplicates: string[] }): Promise<boolean> {
+  const { judge, source, profile } = pass, { factIds, refused, duplicates } = written;
+  const created = factIds.length > 0;
+  await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
+    { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused, duplicates }),
+      result: canonicalExtractionBody({ created, facts: factIds.length, refused, ...(duplicates.length ? { duplicates } : {}) }), key: custody, source: source.id, generation: judge.generation_id, profile,
+      fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
+  return created;
+}
+
+/** An advance must start at the cursor the caller saw and move forward by at most 256. */
+function checkCoverageAdvance(request: AdvanceExtractionCoverage, covered: number): void {
+  if (covered !== request.expected_covered_ingest_seq) throw new Error("coverage_conflict");
+  if (request.covered_ingest_seq < covered) throw new Error("coverage_regression");
+  if (request.covered_ingest_seq - covered > 256) throw new Error("coverage_batch_too_large");
+}
+
+type CoveredRow = Neo4jRecord<{ source: string; seq: number; task: string | null; attempt: string | null }>;
+
+/** The task and attempt a covered Episode row must carry: the expected sequence, a terminal task, and an attempt that is the task's own. */
+function coveredRow(row: CoveredRow, seq: number, generationId: string): { task: ModelTask; attempt: ExtractionAttempt } {
+  if (row.get("seq") !== seq || !row.get("task")) throw new Error("coverage_hole");
+  const task = ModelTask.parse(JSON.parse(row.get("task")!));
+  if (task.pipeline && (task.state === "queued" || task.state === "leased" || !row.get("attempt"))) throw new ExtractionAuditError("extraction_audit_incomplete");
+  if (!row.get("attempt")) throw new Error("coverage_hole");
+  const attempt = ExtractionAttempt.parse(JSON.parse(row.get("attempt")!));
+  if (task.state === "queued" || task.state === "leased" || attempt.state !== task.state || attempt.id !== task.attempt_id
+    || attempt.task_id !== task.id || attempt.source_id !== row.get("source") || attempt.source_ingest_seq !== row.get("seq") || attempt.generation_id !== generationId) throw new Error("coverage_hole");
+  return { task, attempt };
+}
+
+type CoveredSource = Neo4jRecord<{ id: string; operations: number; task: string | null }>;
+
+/** The existing access-index prerequisites must be online; this does not certify
+ * nonexistent generation-scoped derived indexes or an ordered query plan. */
+async function checkAccessIndexesTx(tx: ManagedTransaction): Promise<void> {
+  const indexes = await tx.run(`SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state`, {
+    names: ["conducting_arc_source_link", "conducting_arc_coverage", "extraction_coverage_key", "extraction_generation_id", "meta_key", "fact_generation_id", "entity_generation_key"],
+  });
+  if (indexes.records.length !== 7 || indexes.records.some(index => index.get("state") !== "ONLINE")) throw new GraphAccessError("ordered_probe_unavailable");
+}
+
+/** Every DERIVED_FROM link of the generation names its Fact, source and link id, within the bounded view. */
+async function derivedLinksBadTx(tx: ManagedTransaction, generation: string, maxDerived: number): Promise<boolean> {
+  const links = await tx.run(`MATCH (f:Element:Fact)-[l:DERIVED_FROM]->(e:Element:Episode)
+    WHERE l.generation=$generation RETURN f.id AS fact,e.id AS source,l.id AS link,l.generation AS generation LIMIT $limit`, { generation, limit: neo4j.int(maxDerived + 1) });
+  return links.records.length > maxDerived || links.records.some(row => row.get("generation") !== generation || !row.get("fact") || !row.get("source") || !row.get("link"));
+}
+
+/** Several Facts may mention one Entity; the witness requirement is per distinct entity at the current policy revision. */
+async function entityWitnessesBadTx(tx: ManagedTransaction, generation: string, policyRevision: number, maxDerived: number): Promise<boolean> {
+  const entities = await tx.run(`MATCH (f:Element:Fact {generation:$generation}) UNWIND coalesce(f.entity_ids,[]) AS entity
+    WITH DISTINCT entity OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
+    RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation, policy: neo4j.int(policyRevision), limit: neo4j.int(maxDerived + 1) });
+  return entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
+}
+
+/** The selected embedding profile must be the only configured one and must carry a vector for every covered source. */
+async function embeddingCoverageBadTx(tx: ManagedTransaction, profileId: string, sources: CoveredSource[]): Promise<boolean> {
+  const configured = await tx.run(`MATCH (p:EmbeddingProfile) RETURN p.id AS id`);
+  const vectors = await tx.run(`MATCH (v:EmbeddingVector {profile_id:$profile}) RETURN v.episode_id AS episode`, { profile: profileId });
+  const vectorEpisodes = new Set(vectors.records.map(record => record.get("episode")));
+  return configured.records.length !== 1 || configured.records[0]?.get("id") !== profileId || sources.some(source => !vectorEpisodes.has(source.get("id")));
+}
+
+/** A stored digest format is absent (historical), canonical, or the Episode lineage format, whose version marker must agree with it. */
+function supportedDigestFormat(format: string | number | null, version: string | number | null | undefined): format is string | null {
+  return !((format !== null && format !== CANONICAL_DIGEST && format !== "episode-rfc8785-v2")
+    || (version != null && version !== 2)
+    || (format === "episode-rfc8785-v2") !== (version === 2));
+}
+
+interface DecodedElement { el: MemoryElement; payloadHash: string | null; previousRevisionKey: string | null }
+
+/** The element as stored, decoded by its existing format; null when the row is malformed. */
+function decodeStoredElement(p: ElementProperties, format: string | null): DecodedElement | null {
+  try {
+    const payloadHash = StoredHash.parse(p["payload_hash"] ?? null);
+    const previousRevisionKey = StoredHash.parse(p["previous_revision_key"] ?? null);
+    return { el: format === null ? decodeHistoricalElement(p) : toElement(p), payloadHash, previousRevisionKey };
+  } catch (error) {
+    if (!(error instanceof z.ZodError) && !(error instanceof SyntaxError)) throw error;
+    return null;
+  }
+}
+
+/** Every Episode's persisted NEXT_EPISODE edges must be the version-1 lattice its parents imply. */
+function topologyIssues(rows: ReturnType<typeof topologyExpectations>): IntegrityIssue[] {
+  const issues: IntegrityIssue[] = [];
+  for (const row of rows) {
+    if (row.version !== 1) {
+      issues.push({ elementId: row.id, kind: "unsupported-topology-format" });
+    } else if (row.actual.filter((edge) => edge !== null).length !== row.parents.length || row.parents.some((parent) =>
+      !row.actual.some((edge) => edge !== null && edge.from === parent && edge.key === tupleHash([row.sessionKey, parent, row.id])))) {
+      issues.push({ elementId: row.id, kind: "topology-mismatch" });
+    }
+  }
+  return issues;
+}
 
 export class Store {
   private readonly driver: Driver;
@@ -366,26 +683,7 @@ export class Store {
       `MATCH (p:PolicyEvent) RETURN p.key AS key,p.revision AS revision,p.body AS body,p.body_digest AS digest ORDER BY p.revision`);
     if (events.records.length !== revision.data) throw new ReceiptError("policy_unavailable");
     const denies = new Map<string, PolicyEvent>(), revoked = new Set<string>();
-    for (const [index, record] of events.records.entries()) {
-      let decoded: unknown;
-      try { decoded = JSON.parse(record.get("body")); }
-      catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new ReceiptError("policy_unavailable"); }
-      const parsed = PolicyEvent.safeParse(decoded);
-      if (!parsed.success) throw new ReceiptError("policy_unavailable");
-      const event = parsed.data, body = policyBody(event);
-      if (event.revision !== index + 1 || record.get("revision") !== event.revision
-        || record.get("key") !== `${event.policy_id}:${event.action}`
-        || record.get("body") !== body || record.get("digest") !== sha256(body)) throw new ReceiptError("policy_unavailable");
-      const deny = denies.get(event.policy_id);
-      if (event.action === "deny") {
-        if (deny) throw new ReceiptError("policy_unavailable");
-        denies.set(event.policy_id, event);
-      } else {
-        if (!deny || revoked.has(event.policy_id) || canonicalJson(policySelector(deny.selector)) !== canonicalJson(policySelector(event.selector)) || deny.scope !== event.scope) throw new ReceiptError("policy_unavailable");
-        revoked.add(event.policy_id);
-      }
-      if (denies.size - revoked.size > 256) throw new ReceiptError("policy_unavailable");
-    }
+    for (const [index, record] of events.records.entries()) foldPolicyEvent(decodePolicyEvent(record.toObject(), index), denies, revoked);
     return { structure_revision: row.get("structure"), policy_revision: revision.data, denies, revoked };
   }
 
@@ -559,26 +857,7 @@ export class Store {
       if (outcome && outcomeDigest !== null && outcome.get("digest") !== outcomeDigest) throw new ReceiptError("idempotency_conflict");
       const existingHits = await tx.run<{ key: string }>(`MATCH (h:Hit {namespace:$id}) RETURN h.idem_key AS key`, { id: receipt.recall_id });
       const keys = new Set(existingHits.records.map((row) => row.get("key")));
-      const hits: ReceiptHit[] = [];
-      const coefficients = new Map<string, number>();
-      for (const item of receipt.primaries.filter((item) => adopted.includes(item.id))) {
-        for (const source of item.sources) coefficients.set(source, Math.min(1, (coefficients.get(source) ?? 0) + 1 / item.sources.length));
-      }
-      const append = (episodeId: string, kind: "recall_hit" | "outcome", value: number): void => {
-        const key = tupleHash([receipt.recall_id, episodeId, kind]);
-        if (keys.has(key)) return;
-        const contributing = kind === "recall_hit" ? adopted : selected;
-        const base = { id: uuidv7(), episode_id: episodeId, operation_id: request.operation_id,
-          namespace: receipt.recall_id, idem_key: key, t: now, config_version: receipt.config_version,
-          attribution: receipt.primaries.filter((item) => contributing.includes(item.id) && item.sources.includes(episodeId)) };
-        hits.push(ReceiptHit.parse(kind === "recall_hit"
-          ? { ...base, kind, kappa_eff: value }
-          : { ...base, kind, kappa_eff: 0, reward: request.reward, weight: value }));
-      };
-      for (const [id, coefficient] of coefficients) append(id, "recall_hit", coefficient);
-      if (request.reward !== undefined && !outcome) {
-        for (const [id, weight] of attributeOutcome(receipt.primaries, selected)) append(id, "outcome", weight);
-      }
+      const hits = feedbackHits(receipt, request, adopted, selected, keys, now, outcomeDigest !== null && !outcome);
       const result: CommitReceiptResult = { operation_id: request.operation_id, recall_id: receipt.recall_id,
         adopted, reward: request.reward ?? null, applied: hits.length > 0 || (outcomeDigest !== null && !outcome) };
       await tx.run(`MATCH (r:RecallReceipt {recall_id:$recallId})
@@ -877,15 +1156,7 @@ export class Store {
     el: MemoryElement,
     payload: { hash: string; size: number; mediaType: string } | null,
     opts: { enqueue?: boolean; previous?: string },
-    revision?: {
-      sourceRevision: string;
-      revisionKey: string;
-      previousRevisionKey: string | null;
-      ingestedAt: number;
-      digest: string;
-      originRole?: string;
-      lineageDigest?: string;
-    },
+    revision?: ElementRevision,
   ): Promise<void> {
     if (payload) {
       await tx.run(
@@ -918,9 +1189,7 @@ export class Store {
         sessionKey: isEpisode ? sessionKey(el.origin) : null,
         id: el.id,
         schema: el.schema,
-        timeValue: time?.value ?? null,
-        timeUtc: time ? toUtc(time.value) : null,
-        timePrecision: time?.precision ?? null,
+        ...timeColumns(time),
         content: el.content,
         source: el.origin.source,
         session: el.origin.session,
@@ -929,17 +1198,9 @@ export class Store {
         mass: el.mass,
         properties: JSON.stringify(el.properties),
         payloadHash: payload?.hash ?? null,
-        digest: revision?.digest ?? elementDigest(el, { payloadHash: payload?.hash ?? null }),
-        digestFormat: revision?.lineageDigest ? "episode-rfc8785-v2" : CANONICAL_DIGEST,
-        episodeDigestVersion: revision?.lineageDigest ? 2 : null,
-        originRole: revision?.originRole ?? null,
-        lineageDigest: revision?.lineageDigest ?? null,
+        ...revisionColumns(revision, el, payload?.hash ?? null),
         topologyVersion: isEpisode ? 1 : null,
         previous: isEpisode ? opts.previous ?? null : null,
-        sourceRevision: revision?.sourceRevision ?? null,
-        revisionKey: revision?.revisionKey ?? null,
-        previousRevisionKey: revision?.previousRevisionKey ?? null,
-        ingestedAt: revision?.ingestedAt ?? Date.now(),
       },
     );
     if (payload) {
@@ -1224,19 +1485,7 @@ export class Store {
     const truncated = [links,arcs,coverage,generations,extraction].some(rows => rows.length > maxItems);
     const partitions = [...new Map([{stream:"cache",generation:0},...generations,...extraction,...coverage,
       ...links.map(link => conductingPartition(link.role,link.generation))].map(p => [JSON.stringify([p.stream,p.generation]),{stream:p.stream,generation:p.generation}])).values()];
-    const expected = new Map<string,ConductingArcRow>(), dataIssues: string[] = [], violations: string[] = [], ids = new Set<string>();
-    for (const link of links) {
-      if (!z.uuid().safeParse(link.link_id).success || !z.uuid().safeParse(link.from).success || !z.uuid().safeParse(link.to).success
-        || (link.role === "HAS_MEMBER" && link.source_extraction_generation === null)) dataIssues.push(`invalid-physical:${link.link_id}`);
-      if (ids.has(link.link_id)) dataIssues.push(`duplicate-link-id:${link.link_id}`);
-      ids.add(link.link_id);
-      if (link.from === link.to) violations.push(`self-link:${link.link_id}`);
-      for (const source of new Set([link.from,link.to])) {
-        const row = {source_id:source,peer_id:source===link.from?link.to:link.from,link_id:link.link_id,role:link.role,
-          generation:link.generation,source_extraction_generation:link.source_extraction_generation};
-        expected.set(arcIdentity(row),row);
-      }
-    }
+    const { expected, dataIssues, violations } = physicalLinkRows(links);
     const actual = new Map(arcs.map(row => [arcIdentity(row),row]));
     for (const [key,row] of expected) {
       if (!actual.has(key)) dataIssues.push(`missing-row:${key}`);
@@ -1387,6 +1636,27 @@ export class Store {
     return rows.records.map(record => record.toObject());
   }
 
+  /** An Episode element at or before T that no unrevoked deny selects by episode id or origin source. */
+  private async episodeAllowedTx(tx: ManagedTransaction, id: string, policy: PolicyState, T: number): Promise<boolean> {
+    const result = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.time_utc AS time,e.origin_source AS source`, { id });
+    const e = result.records[0];
+    // Derived source/witness authority is not yet materialized by this
+    // runtime. Unknown/derived nodes must not inherit Episode permission.
+    if (!e || !isEpisodeSchema(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
+    return ![...policy.denies.values()].some(deny => !policy.revoked.has(deny.policy_id)
+      && (deny.selector.episode_id === undefined || deny.selector.episode_id === id)
+      && (deny.selector.source === undefined || deny.selector.source === e.get("source")));
+  }
+
+  /** The endpoint row still describes exactly one ungenerated physical NEXT_EPISODE link between source and peer. */
+  private async nextEpisodeLinkIntactTx(tx: ManagedTransaction, source: string, row: ConductingArcRow): Promise<boolean> {
+    const physical = await tx.run(`MATCH (a)-[l:NEXT_EPISODE]->(b) USING INDEX l:NEXT_EPISODE(id)
+      WHERE l.id=$id RETURN a.id AS a,b.id AS b,l.generation AS generation,l.source_extraction_generation AS source_generation`, { id: row.link_id });
+    const link = physical.records[0];
+    return physical.records.length === 1 && link !== undefined && link.get("generation") === null && link.get("source_generation") === null
+      && ((link.get("a") === source && link.get("b") === row.peer_id) || (link.get("b") === source && link.get("a") === row.peer_id));
+  }
+
   async graphEnvelope(seedIds: string[], options: { T?: number; maxNodes?: number; maxArcs?: number } = {}, context?: InstallationContext): Promise<GraphEnvelope> {
     requireInstallation(context!);
     const seeds = [...new Set(z.array(z.uuidv7()).min(1).max(128).parse(seedIds))].sort();
@@ -1397,18 +1667,8 @@ export class Store {
       const policy = await this.receiptLockTx(tx), pin = await this.graphPinTx(tx, policy, T);
       const probes: ConductingArcProbe[] = [], eligible: ConductingArcRow[] = [], ids = new Set<string>();
       let staleTopology = false;
-      const allowed = async (id: string): Promise<boolean> => {
-        const result = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.time_utc AS time,e.origin_source AS source`, { id });
-        const e = result.records[0];
-        // Derived source/witness authority is not yet materialized by this
-        // runtime. Unknown/derived nodes must not inherit Episode permission.
-        if (!e || !isEpisodeSchema(e.get("schema")) || typeof e.get("time") !== "string" || !(Date.parse(e.get("time")) <= T)) return false;
-        return ![...policy.denies.values()].some(deny => !policy.revoked.has(deny.policy_id)
-          && (deny.selector.episode_id === undefined || deny.selector.episode_id === id)
-          && (deny.selector.source === undefined || deny.selector.source === e.get("source")));
-      };
       for (const source of seeds) {
-        if (!await allowed(source)) continue;
+        if (!await this.episodeAllowedTx(tx, source, policy, T)) continue;
         ids.add(source);
         const rows = await this.graphRawProbeTx(tx, source);
         probes.push({ source_id: source, count: rows.length, saturated: rows.length === 256, coverage: "complete" });
@@ -1416,15 +1676,8 @@ export class Store {
         if (rows.length === 256) continue;
         for (const row of rows) {
           if (row.role !== "NEXT_EPISODE") continue;
-          if (row.generation !== null || row.source_extraction_generation !== null) { staleTopology = true; continue; }
-          const physical = await tx.run(`MATCH (a)-[l:NEXT_EPISODE]->(b) USING INDEX l:NEXT_EPISODE(id)
-            WHERE l.id=$id RETURN a.id AS a,b.id AS b,l.generation AS generation,l.source_extraction_generation AS source_generation`, { id: row.link_id });
-          const link = physical.records[0];
-          if (physical.records.length !== 1 || !link || link.get("generation") !== null || link.get("source_generation") !== null
-            || !((link.get("a") === source && link.get("b") === row.peer_id) || (link.get("b") === source && link.get("a") === row.peer_id))) {
-            staleTopology = true; continue;
-          }
-          if (!await allowed(row.peer_id)) continue;
+          if (row.generation !== null || row.source_extraction_generation !== null || !await this.nextEpisodeLinkIntactTx(tx, source, row)) { staleTopology = true; continue; }
+          if (!await this.episodeAllowedTx(tx, row.peer_id, policy, T)) continue;
           ids.add(row.peer_id); eligible.push(row);
         }
       }
@@ -1815,6 +2068,40 @@ export class Store {
    * resolution, packing and receipt issuance share the Meta write barrier.
    * The daemon serial owner writes the response before acknowledging any policy
    * command. No derived authority, profile-cache anchors or PPR are invented. */
+  /** Derived Facts as ranked items: each is rechecked against policy through its source Episode, its contrast peers
+   * become companions, and every served Fact joins `ranked`. */
+  private async factItemsTx(tx: ManagedTransaction, policy: PolicyState, generation: string, T: string, derivedNodes: Map<string, ElementNode>,
+    pprScores: Map<string, number>, ranked: RpcRecallItem[]): Promise<Map<string, RpcRecallItem>> {
+    const factItems = new Map<string, RpcRecallItem>();
+    const factItem = async (node: ElementNode): Promise<RpcRecallItem | null> => {
+      const id = String(node.properties["id"]), cached = factItems.get(id);
+      if (cached) return cached;
+      const sourceRows = await tx.run(`MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) RETURN e.id AS source LIMIT 2`, { id });
+      const sourceId = sourceRows.records[0]?.get("source");
+      if (typeof sourceId !== "string") return null;
+      try { await this.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
+      catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") return null; throw error; }
+      const fact = toElement(nodeProps(node)), ppr = pprScores.get(id) ?? 0;
+      const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: SCHEMA_ID.CLAIM, epistemic: "derived",
+        content: fact.content, time: fact.time!, mass: Math.max(0, Math.min(1, ppr || fact.mass)), utility: 0,
+        relevance: Math.max(0, ppr), score: Math.max(0, ppr || fact.mass), sources: [z.uuidv7().parse(sourceId)],
+        provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
+          contrasts: [], warnings: [] }, channels: derivedNodes.has(id) ? ["bm25"] : [] });
+      factItems.set(id, item); return item;
+    };
+    for (const [id, node] of derivedNodes) {
+      const item = await factItem(node); if (!item) continue;
+      const peers = await tx.run<{ other: ElementNode }>(`MATCH (f:Fact {id:$id})-[:CONTRASTS]-(other:Fact {generation:$generation})
+        WHERE other.time_utc <= $T RETURN DISTINCT other ORDER BY other.id LIMIT 4`, { id, generation, T });
+      for (const row of peers.records) {
+        const peer = await factItem(row.get("other"));
+        if (peer) item.provenance.contrasts.push(peer.id);
+      }
+      ranked.push(item);
+    }
+    return factItems;
+  }
+
   async recall(input: z.input<typeof RpcRecallParams>, context: InstallationContext): Promise<RpcRecallResult> {
     requireInstallation(context);
     const request = RpcRecallParams.parse(input), budget = admittedBudget(request.budget, this.tokenizers, this.recallDefaultBytes);
@@ -1832,114 +2119,21 @@ export class Store {
       const denies = [...policy.denies.values()].filter(deny => !policy.revoked.has(deny.policy_id));
       // AND semantics stay identical to feedback authority, including policies
       // that specify both source and Episode ID.
-      const parameters = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: [...EPISODE_SCHEMAS] };
-      const allowed = `e.schema IN $schemas AND e.time_utc <= $T
-        AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
-        AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL }`;
-      const lists: Record<string, { id: string }[]> = {}, nodes = new Map<string, ElementNode>(), derivedNodes = new Map<string, ElementNode>();
-      let pprUsed = false, pprScores = new Map<string, number>();
-      const channel = async (name: string, query: string, params: Record<string, unknown>) => {
-        const rows = await tx.run<{ e: ElementNode }>(query, { ...parameters, ...params });
-        lists[name] = rows.records.map(row => { const e = row.get("e"); const id = String(e.properties["id"]); nodes.set(id, e); return { id }; });
-      };
-      if (request.limit > 0 && budget.limit > 0) {
-        await channel("identity", `MATCH (e:Element:Episode {id:$id}) WHERE ${allowed} RETURN e LIMIT 1`, { id: request.query });
-        const q = luceneQuery(request.query);
-        if (q) await channel("bm25", `CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
-          WITH node AS e,score WHERE e:Episode AND ${allowed} RETURN e ORDER BY score DESC,e.id ASC LIMIT 64`, { q });
-        if (request.session) await channel("session", `MATCH (e:Episode {session_key:$session}) WHERE ${allowed}
-          RETURN e ORDER BY e.time_utc DESC,e.ingest_seq DESC,e.id ASC LIMIT 32`, { session: tupleHash([request.session.source, request.session.session]) });
-        if (queryVector && profileId) await channel("vector", `CALL db.index.vector.queryNodes($index,256,$vector) YIELD node,score
-          MATCH (e:Element:Episode {id:node.episode_id}) WHERE node.profile_id=$profile AND node.input_revision=e.revision_key AND node.input_digest=e.digest AND ${allowed}
-          RETURN e ORDER BY score DESC,e.id ASC LIMIT 64`, { index: `vec_episode_${profileId}`, vector: queryVector, profile: profileId });
-      }
-      const cacheRows = await tx.run<{ id: string; s: number | null; last: number | null; utility: number | null }>(
-        `UNWIND $ids AS id OPTIONAL MATCH (c:HitCache {episode_id:id})
-         RETURN id,c.s AS s,c.t_last_hit AS last,c.utility AS utility`, { ids: [...nodes.keys()] });
-      const caches = new Map(cacheRows.records.map(row => [row.get("id"), row]));
-      const ranked: RpcRecallItem[] = [];
-      for (const [id, node] of nodes) {
-        const props = nodeProps(node), e = toElement(props), cache = caches.get(id)!;
-        const mass = e.mass * retention(Math.max(0, now - (cache.get("last") ?? Number(props["ingested_at"]))) / 86400000, cache.get("s") ?? initialStability(e.mass));
-        const relevance = normalizedRrf(lists, id), utility = cache.get("utility") ?? 0;
-        const item = { id, kind: "Episode", schema: e.schema, epistemic: "observed", content: e.content, time: e.time,
-          mass, utility, relevance, score: relevance * Math.sqrt(Math.max(mass, 0.02)) * (1 + 0.25 * utility), sources: [id],
-          provenance: { derived_from: [{ id, kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false, contrasts: [], warnings: [] },
-          channels: Object.keys(lists).filter(name => lists[name]!.some(candidate => candidate.id === id)) };
-        ranked.push(RpcRecallResult.shape.results.element.parse(item));
-      }
-      if (selection.generation_id && budget.limit > 0) {
-        const q = luceneQuery(request.query);
-        if (q) {
-          const derivedRows = await tx.run(`CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
-            WITH node AS f,score WHERE f:Fact AND f.generation=$generation AND f.time_utc <= $T
-            RETURN f,score ORDER BY score DESC,f.id ASC LIMIT 64`, { q, generation: selection.generation_id, T: new Date(T).toISOString() });
-          const bm25 = lists["bm25"] ?? (lists["bm25"] = []);
-          for (const row of derivedRows.records) {
-            const fact = row.get("f") as ElementNode, id = String(fact.properties["id"]);
-            derivedNodes.set(id, fact); bm25.push({ id });
-          }
-        }
-      }
-      if (selection.generation_id && (Object.values(lists).some(list => list.length > 0) || derivedNodes.size > 0)) {
-        const seeds = [...new Set(Object.values(lists).flat().map(hit => hit.id).concat([...derivedNodes.keys()]))];
-        const graph = await tx.run(`MATCH (a:ConductingArc)
-          WHERE a.generation=$generation AND (a.source_id IN $seeds OR a.peer_id IN $seeds)
-          RETURN a.source_id AS source,a.peer_id AS peer,a.role AS role,a.link_id AS id LIMIT 1024`, { generation: selection.generation_id, seeds });
-        const arcs = graph.records.map(record => ({ from: record.get("source"), to: record.get("peer"), role: record.get("role"), id: record.get("id") }));
-        const graphNodes = [...new Set(seeds.concat(arcs.flatMap(arc => [arc.from, arc.to])))];
-        if (graphNodes.length) {
-          const solved = solvePpr({ nodes: graphNodes, arcs, seeds: new Map(seeds.map(id => [id, 1])) });
-          const sorted = [...graphNodes].sort(); pprScores = new Map(sorted.map((id, index) => [id, solved.values[index]!]));
-          pprUsed = true;
-        }
-      }
+      const scope: RecallScope = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: [...EPISODE_SCHEMAS] };
+      const serving = request.limit > 0 && budget.limit > 0;
+      const { lists, nodes } = serving ? await episodeChannelsTx(tx, scope, request, queryVector, profileId) : { lists: {}, nodes: new Map<string, ElementNode>() };
+      const ranked = await rankedEpisodesTx(tx, nodes, lists, now);
+      const derivedNodes = selection.generation_id && budget.limit > 0 ? await derivedCandidatesTx(tx, request.query, selection.generation_id, scope.T, lists) : new Map<string, ElementNode>();
+      const pprScores = selection.generation_id ? await pprScoresTx(tx, selection.generation_id, lists, derivedNodes) : null;
       // Derived serving is strictly generation-selected and policy-authorized.
       // Every source Episode is rechecked for primaries AND their mandatory peers.
-      const factItems = new Map<string, RpcRecallItem>();
-      if (selection.generation_id && budget.limit > 0) {
-        const factItem = async (node: ElementNode): Promise<RpcRecallItem | null> => {
-          const id = String(node.properties["id"]), cached = factItems.get(id);
-          if (cached) return cached;
-          const sourceRows = await tx.run(`MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) RETURN e.id AS source LIMIT 2`, { id });
-          const sourceId = sourceRows.records[0]?.get("source");
-          if (typeof sourceId !== "string") return null;
-          try { await this.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
-          catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") return null; throw error; }
-          const fact = toElement(nodeProps(node)), ppr = pprScores.get(id) ?? 0;
-          const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: SCHEMA_ID.CLAIM, epistemic: "derived",
-            content: fact.content, time: fact.time!, mass: Math.max(0, Math.min(1, ppr || fact.mass)), utility: 0,
-            relevance: Math.max(0, ppr), score: Math.max(0, ppr || fact.mass), sources: [z.uuidv7().parse(sourceId)],
-            provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
-              contrasts: [], warnings: [] }, channels: derivedNodes.has(id) ? ["bm25"] : [] });
-          factItems.set(id, item); return item;
-        };
-        for (const [id, node] of derivedNodes) {
-          const item = await factItem(node); if (!item) continue;
-          const peers = await tx.run<{ other: ElementNode }>(`MATCH (f:Fact {id:$id})-[:CONTRASTS]-(other:Fact {generation:$generation})
-            WHERE other.time_utc <= $T RETURN DISTINCT other ORDER BY other.id LIMIT 4`, { id, generation: selection.generation_id, T: parameters.T });
-          for (const row of peers.records) {
-            const peer = await factItem(row.get("other"));
-            if (peer) item.provenance.contrasts.push(peer.id);
-          }
-          ranked.push(item);
-        }
-      }
+      const factItems = selection.generation_id && budget.limit > 0
+        ? await this.factItemsTx(tx, policy, selection.generation_id, scope.T, derivedNodes, pprScores ?? new Map(), ranked) : new Map<string, RpcRecallItem>();
       // Originals are retained in `nodes`; Facts are served from `derivedNodes`.
       ranked.sort((a, b) => b.score - a.score || b.relevance - a.relevance || b.mass - a.mass || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const bundles: RecallBundle[] = [];
       for (const primary of ranked) {
-        const supersedes = await tx.run<{ e: ElementNode }>(`MATCH (:Element:Episode {id:$id})-[:INVALIDATES]->(e:Element:Episode)
-          RETURN DISTINCT e ORDER BY e.id ASC LIMIT 9`, { id: primary.id });
-        for (const row of supersedes.records.slice(0, 8)) {
-          const old = toElement(nodeProps(row.get("e")));
-          const denied = denies.some(deny => (deny.selector.episode_id === undefined || deny.selector.episode_id === old.id)
-            && (deny.selector.source === undefined || deny.selector.source === old.origin.source));
-          if (denied) primary.provenance.supersedes_redacted = true;
-          else primary.provenance.supersedes.push({ id: old.id, content: old.content });
-        }
-        if (primary.provenance.supersedes_redacted) primary.provenance.warnings.push({ code: "supersedes_withheld", content: "Prior revision content is withheld by current policy." });
-        if (supersedes.records.length > 8) primary.provenance.warnings.push({ code: "supersedes_incomplete", content: "Prior revision provenance exceeds the bounded eight-entry view." });
+        await supersedesTx(tx, primary, denies);
         bundles.push({ primary, companions: primary.provenance.contrasts.map(id => factItems.get(id)!) });
       }
       const result = RpcRecallResult.parse(packRecall(bundles, {
@@ -1947,7 +2141,7 @@ export class Store {
         budget, renderer: "canonical-jsonl-v1", diagnostics: { pipeline: ranked.some(item => item.kind === "Fact") ? "derived-hybrid-v1" : "originals-hybrid-v1", now, T,
           policy_revision: policy.policy_revision, channels_used: Object.keys(lists).filter(name => lists[name]!.length > 0) as RpcRecallResult["diagnostics"]["channels_used"],
           vector_reason: vectorReason, embedding_profile_id: profileId, candidate_count: ranked.length, skipped_bundles: 0,
-          ppr_used: pprUsed, identity_mode: "exact_episode_id" },
+          ppr_used: pprScores !== null, identity_mode: "exact_episode_id" },
       }, request.limit, this.tokenizers));
       await this.authorizeEpisodesTx(tx, [...new Set(result.results.flatMap(item => item.sources))], policy);
       await this.issueReceiptTx(tx, IssueReceiptInput.parse({ recall_id: recallId, primary_ids: result.results.map(item => item.id) }), context, policy,
@@ -2105,6 +2299,55 @@ export class Store {
     });
   }
 
+  /** The stored digest against the element as decoded, and for lineage-format Episodes the lineage chain as well. */
+  private async digestIssuesTx(p: ElementProperties, decoded: DecodedElement, format: string | null, elementId: string): Promise<IntegrityIssue[]> {
+    const { el, payloadHash, previousRevisionKey } = decoded, issues: IntegrityIssue[] = [];
+    try {
+      if (p["episode_digest_version"] === 2) {
+        try { await this.withReadTx(tx => this.lineageTx(tx, elementId, String(p["lineage_digest"]))); }
+        catch (error) {
+          if (!(error instanceof EpisodeLineageError) && !(error instanceof z.ZodError) && !(error instanceof SyntaxError)) throw error;
+          issues.push({ elementId, kind: "digest-mismatch" });
+        }
+      }
+      if (elementDigest(el, { payloadHash, previousRevisionKey, format,
+        episodeDigestVersion: p["episode_digest_version"] === 2 ? 2 : null,
+        originRole: p["origin_role"] as string | null, lineageDigest: p["lineage_digest"] as string | null }) !== p["digest"]) {
+        issues.push({ elementId: el.id, kind: "digest-mismatch" });
+      }
+    } catch (error) {
+      if (!(error instanceof StorageContractError)) throw error;
+      if (error.code !== "unsupported_digest_format" && error.code !== "invalid_canonical_json") throw error;
+      issues.push({ elementId: el.id, kind: error.code === "unsupported_digest_format"
+        ? "unsupported-digest-format" : "digest-mismatch" });
+    }
+    return issues;
+  }
+
+  /** The payload a stored element names: recorded in the graph, present as bytes, and hashing to its name. A historical
+   * element's raw integrity must see damaged bytes, not ObjectStore.has()'s serving eligibility result (which also
+   * rejects missing sidecars). */
+  private async payloadIssuesTx(el: MemoryElement, elementId: string, payloadHash: string, format: string | null): Promise<IntegrityIssue[]> {
+    const issues: IntegrityIssue[] = [];
+    if (format === null) {
+      const metadata = await this.run<{ hash: string }>(
+        "MATCH (p:Payload {hash:$hash}) RETURN p.hash AS hash", { hash: payloadHash });
+      if (!metadata.length) issues.push({ elementId, kind: "missing-payload" });
+      try {
+        const payload = await this.objects.get(payloadHash);
+        if (sha256(payload) !== payloadHash) issues.push({ elementId, kind: "payload-hash-mismatch" });
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+        if (metadata.length) issues.push({ elementId, kind: "missing-payload" });
+      }
+      return issues;
+    }
+    const payload = await this.getPayload(payloadHash);
+    if (!payload) issues.push({ elementId: el.id, kind: "missing-payload" });
+    else if (sha256(payload) !== payloadHash) issues.push({ elementId: el.id, kind: "payload-hash-mismatch" });
+    return issues;
+  }
+
   async verify(): Promise<IntegrityIssue[]> {
     const issues: IntegrityIssue[] = [];
     const rows = await this.run<{ e: ElementNode }>(
@@ -2114,81 +2357,19 @@ export class Store {
       const p = nodeProps(row["e"]);
       const elementId = String(p["id"]);
       const format = p["digest_format"] ?? null;
-      if ((format !== null && format !== CANONICAL_DIGEST && format !== "episode-rfc8785-v2")
-        || (p["episode_digest_version"] != null && p["episode_digest_version"] !== 2)
-        || (format === "episode-rfc8785-v2") !== (p["episode_digest_version"] === 2)) {
-        issues.push({ elementId, kind: "unsupported-digest-format" });
-        continue;
-      }
+      if (!supportedDigestFormat(format, p["episode_digest_version"])) { issues.push({ elementId, kind: "unsupported-digest-format" }); continue; }
       // Choose the existing stored format before validation, never as a fallback
       // from failed modern admission. No defaults enter the historical digest.
-      let el: MemoryElement;
-      let payloadHash: string | null;
-      let previousRevisionKey: string | null;
-      try {
-        payloadHash = StoredHash.parse(p["payload_hash"] ?? null);
-        previousRevisionKey = StoredHash.parse(p["previous_revision_key"] ?? null);
-        el = format === null ? decodeHistoricalElement(p) : toElement(p);
-      } catch (error) {
-        if (!(error instanceof z.ZodError) && !(error instanceof SyntaxError)) throw error;
-        issues.push({ elementId, kind: "malformed-element" });
-        continue;
-      }
+      const decoded = decodeStoredElement(p, format);
+      if (!decoded) { issues.push({ elementId, kind: "malformed-element" }); continue; }
       if (format === null) {
-        const reasons = historicalEligibility(el);
+        const reasons = historicalEligibility(decoded.el);
         if (reasons.length) issues.push({ elementId, kind: "semantic-ineligibility", reasons });
       }
-      try {
-        if (p["episode_digest_version"] === 2) {
-          try { await this.withReadTx(tx => this.lineageTx(tx, elementId, String(p["lineage_digest"]))); }
-          catch (error) {
-            if (!(error instanceof EpisodeLineageError) && !(error instanceof z.ZodError) && !(error instanceof SyntaxError)) throw error;
-            issues.push({ elementId, kind: "digest-mismatch" });
-          }
-        }
-        if (elementDigest(el, { payloadHash, previousRevisionKey, format,
-          episodeDigestVersion: p["episode_digest_version"] === 2 ? 2 : null,
-          originRole: p["origin_role"] as string | null, lineageDigest: p["lineage_digest"] as string | null }) !== p["digest"]) {
-          issues.push({ elementId: el.id, kind: "digest-mismatch" });
-        }
-      } catch (error) {
-        if (!(error instanceof StorageContractError)) throw error;
-        if (error.code !== "unsupported_digest_format" && error.code !== "invalid_canonical_json") throw error;
-        issues.push({ elementId: el.id, kind: error.code === "unsupported_digest_format"
-          ? "unsupported-digest-format" : "digest-mismatch" });
-      }
-      if (payloadHash) {
-        if (format === null) {
-          // Raw integrity must see damaged bytes, not ObjectStore.has()'s
-          // serving eligibility result (which also rejects missing sidecars).
-          const metadata = await this.run<{ hash: string }>(
-            "MATCH (p:Payload {hash:$hash}) RETURN p.hash AS hash", { hash: payloadHash });
-          if (!metadata.length) issues.push({ elementId, kind: "missing-payload" });
-          try {
-            const payload = await this.objects.get(payloadHash);
-            if (sha256(payload) !== payloadHash) issues.push({ elementId, kind: "payload-hash-mismatch" });
-          } catch (error) {
-            if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-            if (metadata.length) issues.push({ elementId, kind: "missing-payload" });
-          }
-        } else {
-          const payload = await this.getPayload(payloadHash);
-          if (!payload) {
-            issues.push({ elementId: el.id, kind: "missing-payload" });
-          } else if (sha256(payload) !== payloadHash) {
-            issues.push({ elementId: el.id, kind: "payload-hash-mismatch" });
-          }
-        }
-      }
+      issues.push(...await this.digestIssuesTx(p, decoded, format, elementId));
+      if (decoded.payloadHash) issues.push(...await this.payloadIssuesTx(decoded.el, elementId, decoded.payloadHash, format));
     }
-    for (const row of topologyExpectations(await this.run<TopologyRow>(TOPOLOGY_QUERY))) {
-      if (row.version !== 1) {
-        issues.push({ elementId: row.id, kind: "unsupported-topology-format" });
-      } else if (row.actual.filter((edge) => edge !== null).length !== row.parents.length || row.parents.some((parent) =>
-        !row.actual.some((edge) => edge !== null && edge.from === parent && edge.key === tupleHash([row.sessionKey, parent, row.id])))) {
-        issues.push({ elementId: row.id, kind: "topology-mismatch" });
-      }
-    }
+    issues.push(...topologyIssues(topologyExpectations(await this.run<TopologyRow>(TOPOLOGY_QUERY))));
     return issues;
   }
 
@@ -2395,101 +2576,73 @@ export class Store {
    * binds to a fixed digest, and no Fact of the source is written while a verdict
    * is still owed. Verdicts are applied mechanically: CONTRASTS and INVALIDATES
    * new->candidate (never onto an invalidator), a duplicate suppresses the write. */
-  private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
-    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
-  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" | "omitted" }> {
-    const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
-    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return { semantic_writes: false };
-    const relationJudge = this.relationJudge ? "complete" as const : "disabled" as const;
-    const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
-    if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
-    const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
-    if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
-    // Only model-reported confidence admits a claim to semantic writes. Audit-only
-    // output (no confidence) stays an auditable decision and never becomes a Fact.
-    const admitted = pipeline.decisions.flatMap(decision => {
-      if (decision.disposition !== "retain" && decision.disposition !== "correct") return [];
-      const extracted = claimOutput.claims[decision.claim_index];
-      if (!extracted) throw new ExtractionAuditError("extraction_audit_conflict");
-      const confidence = decision.confidence ?? extracted.confidence;
-      return confidence === undefined ? [] : [{ decision, extracted, confidence }];
-    });
-    // Per-source custody is written exactly once; readiness requires every covered
-    // source to carry custody even when the judge admitted nothing or every claim was refused.
-    const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
-    const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
-    if (priorCustody.records[0]) {
-      const result = JSON.parse(priorCustody.records[0].get("result")) as { created?: boolean; omitted?: string };
-      return { semantic_writes: result.created === true, relation_judge: result.omitted === "relation_judge_exhausted" ? "omitted" : relationJudge };
+  private premiseTx(tx: ManagedTransaction, occurrence: string, validated: ValidatedSemanticClaim, pass: MaterializationPass) {
+    return this.factRelationVerdictTx(tx, { occurrence, pipeline_id: pass.pipelineId, source: pass.source, generation: pass.judge.generation_id, validated });
+  }
+
+  /** One admitted claim resolved against the source: entity mentions (existing, new with an id allocated once per key, or
+   * unresolved), the claim's time, and the semantic-claim validation verdict. */
+  private async prepareClaimTx(tx: ManagedTransaction, { decision, extracted, confidence }: AdmittedClaim, pass: MaterializationPass) {
+    const { judge, source, language, allocatedEntities } = pass;
+    const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id, judge.id, decision.claim_index]);
+    const resolutions: SemanticResolution["entity_resolutions"] = [], references: { mention: string; entity_id: string | null }[] = [];
+    for (const entity of extracted.entities ?? []) {
+      if (references.some(reference => reference.mention === entity.mention)) continue;
+      const key = extractionBodyDigest({ generation: judge.generation_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind });
+      const existing = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id AS id LIMIT 1`, { generation: judge.generation_id, key });
+      const known = existing.records[0]?.get("id");
+      if (typeof known === "string") { resolutions.push({ status: "existing", mention: entity.mention, entity_id: known }); references.push({ mention: entity.mention, entity_id: known }); }
+      else if (!source.content.includes(entity.normalized_name)) { resolutions.push({ status: "unresolved", mention: entity.mention }); references.push({ mention: entity.mention, entity_id: null }); }
+      else {
+        const entity_id = allocatedEntities.get(key) ?? uuidv7();
+        allocatedEntities.set(key, entity_id);
+        resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id });
+      }
     }
-    const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
-    if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
-      throw new ExtractionAuditError("extraction_audit_stale");
-    const reported = claimOutput.language.toLowerCase();
-    const language = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(reported) ? reported : "und";
-    const profile = pipeline.judge.model;
-    // Entities first seen in this pass keep one allocated id per entity_key, so two
-    // claims of one source share a single new Entity whichever of them is written first.
-    const allocatedEntities = new Map<string, string>();
-    const prepare = async ({ decision, extracted, confidence }: (typeof admitted)[number]) => {
-      const occurrence = extractionBodyDigest([judge.generation_id, judge.source_id, judge.id, decision.claim_index]);
-      const resolutions: SemanticResolution["entity_resolutions"] = [], references: { mention: string; entity_id: string | null }[] = [];
-      for (const entity of extracted.entities ?? []) {
-        if (references.some(reference => reference.mention === entity.mention)) continue;
-        const key = extractionBodyDigest({ generation: judge.generation_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind });
-        const existing = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id AS id LIMIT 1`, { generation: judge.generation_id, key });
-        const known = existing.records[0]?.get("id");
-        if (typeof known === "string") { resolutions.push({ status: "existing", mention: entity.mention, entity_id: known }); references.push({ mention: entity.mention, entity_id: known }); }
-        else if (!source.content.includes(entity.normalized_name)) { resolutions.push({ status: "unresolved", mention: entity.mention }); references.push({ mention: entity.mention, entity_id: null }); }
-        else {
-          const entity_id = allocatedEntities.get(key) ?? uuidv7();
-          allocatedEntities.set(key, entity_id);
-          resolutions.push({ status: "new", mention: entity.mention, entity_id, normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: key }); references.push({ mention: entity.mention, entity_id });
-        }
-      }
-      const time = extracted.time ? semanticClaimTime(extracted.time) : { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited" as const, resolution: "inherited" as const, anchor_time_utc: source.time.time_utc };
-      const semantic = { content: extracted.text, content_language: language, sub_kind: extracted.sub_kind ?? "fact", modality: extracted.speech_act ?? "asserted",
-        confidence, time, entities: references, subject_keys: null, predicate_text: [...extracted.text.normalize("NFC")].slice(0, 256).join(""),
-        scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] }, scope_complete: false,
-        evidence: { kind: "source_locus" as const, span: { start: decision.evidence.start, end: decision.evidence.end } } };
-      const digest = extractionBodyDigest(semantic);
-      const resolution = SemanticResolution.parse({ entity_resolutions: resolutions, attribution_speakers: [], allow_no_single_locus: false, content_language: language });
-      try {
-        const validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
-          episode: { ...source, content_language: language }, entity_resolutions: resolutions, attribution_speakers: [] });
-        return { occurrence, digest, resolution, validated, refused: null };
-      } catch (error) {
-        if (!(error instanceof SemanticClaimValidationError)) throw error;
-        return { occurrence, digest, resolution, validated: null, refused: error.code };
-      }
-    };
-    const premise = (claim: { occurrence: string; validated: ValidatedSemanticClaim }) =>
-      this.factRelationVerdictTx(tx, { occurrence: claim.occurrence, pipeline_id: pipeline.claim.id, source, generation: judge.generation_id, validated: claim.validated });
-    // Phase 1 (relation judge on): bind every validated claim's premise; write nothing while a verdict is owed.
-    if (this.relationJudge) {
-      let pending = false;
-      for (const candidate of admitted) {
-        const claim = await prepare(candidate);
-        if (claim.validated && await premise({ occurrence: claim.occurrence, validated: claim.validated }) === "pending") pending = true;
-      }
-      if (pending) return { semantic_writes: false, relation_judge: "pending" };
+    const time = extracted.time ? semanticClaimTime(extracted.time) : { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited" as const, resolution: "inherited" as const, anchor_time_utc: source.time.time_utc };
+    const semantic = { content: extracted.text, content_language: language, sub_kind: extracted.sub_kind ?? "fact", modality: extracted.speech_act ?? "asserted",
+      confidence, time, entities: references, subject_keys: null, predicate_text: [...extracted.text.normalize("NFC")].slice(0, 256).join(""),
+      scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] }, scope_complete: false,
+      evidence: { kind: "source_locus" as const, span: { start: decision.evidence.start, end: decision.evidence.end } } };
+    const digest = extractionBodyDigest(semantic);
+    const resolution = SemanticResolution.parse({ entity_resolutions: resolutions, attribution_speakers: [], allow_no_single_locus: false, content_language: language });
+    try {
+      const validated = validateSemanticClaim(semantic, { generation: judge.generation_id, fact_language_policy: "source", allow_no_single_locus: false,
+        episode: { ...source, content_language: language }, entity_resolutions: resolutions, attribution_speakers: [] });
+      return { occurrence, digest, resolution, validated, refused: null };
+    } catch (error) {
+      if (!(error instanceof SemanticClaimValidationError)) throw error;
+      return { occurrence, digest, resolution, validated: null, refused: error.code };
     }
-    // Phase 2: one transaction writes every operation of the source, so a retry either
-    // sees custody or repeats all of it. Claims are re-resolved in order, so an Entity
-    // created by an earlier claim of this source is reused rather than duplicated.
+  }
+
+  /** Phase 1 (relation judge on): bind every validated claim's premise; true while any verdict is still owed. */
+  private async bindVerdictsTx(tx: ManagedTransaction, admitted: AdmittedClaim[], pass: MaterializationPass): Promise<boolean> {
+    let pending = false;
+    for (const candidate of admitted) {
+      const claim = await this.prepareClaimTx(tx, candidate, pass);
+      if (claim.validated && await this.premiseTx(tx, claim.occurrence, claim.validated, pass) === "pending") pending = true;
+    }
+    return pending;
+  }
+
+  /** Phase 2: every operation of the source in this transaction, so a retry either sees custody or repeats all of it.
+   * Claims are re-resolved in order, so an Entity created by an earlier claim of this source is reused rather than duplicated. */
+  private async writeAdmittedClaimsTx(tx: ManagedTransaction, admitted: AdmittedClaim[], pass: MaterializationPass, policy: PolicyState) {
+    const { judge, source, profile } = pass;
     const factIds: string[] = [], refused: string[] = [], duplicates: string[] = [];
     const contentFree = (fact: string, digest: string, result: object) =>
       tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
         { id: uuidv7(), digest, result: canonicalExtractionBody(result), key: fact, source: source.id, generation: judge.generation_id, profile, fact, link: fact });
     for (const candidate of admitted) {
-      const { occurrence, digest, resolution, validated, refused: refusal } = await prepare(candidate);
+      const { occurrence, digest, resolution, validated, refused: refusal } = await this.prepareClaimTx(tx, candidate, pass);
       if (!validated) {
         // A refused claim is retained as a content-free operation so the pipeline stays idempotent and auditable.
         await contentFree(`refused:${occurrence}`, digest, { created: false, refused: refusal });
         refused.push(refusal);
         continue;
       }
-      const judgements = this.relationJudge ? await premise({ occurrence, validated }) : null;
+      const judgements = this.relationJudge ? await this.premiseTx(tx, occurrence, validated, pass) : null;
       if (judgements === "pending") throw new ExtractionAuditError("extraction_audit_conflict");
       const judged = judgements ? await this.decideFactRelationsTx(tx, judge.generation_id, judgements) : null;
       if (judged?.duplicate_of) {
@@ -2504,11 +2657,38 @@ export class Store {
         await this.mergeLinkTx(tx, MemoryLink.parse({ id: link.id, from: allocated.fact_id, to: link.to, role: link.role, content: link.content, weight: link.weight }));
       factIds.push(allocated.fact_id);
     }
-    const created = factIds.length > 0;
-    await tx.run(`CREATE (:MaterializationOperation {id:$id,digest:$digest,result:$result,occurrence_key:$key,source_episode_id:$source,generation:$generation,semantic_profile_id:$profile,fact_id:$fact,link_id:$link})`,
-      { id: uuidv7(), digest: extractionBodyDigest({ generation: judge.generation_id, source: source.id, judge: judge.id, facts: factIds, refused, duplicates }),
-        result: canonicalExtractionBody({ created, facts: factIds.length, refused, ...(duplicates.length ? { duplicates } : {}) }), key: custody, source: source.id, generation: judge.generation_id, profile,
-        fact: created ? `custody:${source.id}` : `suppressed:${source.id}`, link: created ? `custody:${source.id}` : `suppressed:${source.id}` });
+    return { factIds, refused, duplicates };
+  }
+
+  private async materializeExtractionPipelineTx(tx: ManagedTransaction, pipeline: {
+    claim: ModelTask; claim_attempt: ExtractionAttempt | null; judge: ModelTask | null; judge_attempt: ExtractionAttempt | null; decisions: ExtractionDisposition[];
+  }, policy: PolicyState): Promise<{ semantic_writes: boolean; relation_judge?: "disabled" | "pending" | "complete" | "omitted" }> {
+    const judge = pipeline.judge_attempt, claim = pipeline.claim_attempt;
+    if (!judge || judge.state !== "succeeded" || !judge.output || !claim || claim.state !== "succeeded" || !claim.output || !pipeline.judge) return { semantic_writes: false };
+    const relationJudge = this.relationJudge ? "complete" as const : "disabled" as const;
+    const claimOutput = ExtractionModelOutput.parse(JSON.parse(claim.output.canonical_body));
+    if (claimOutput.task !== "claim") throw new ExtractionAuditError("extraction_audit_conflict");
+    const judgeOutput = ExtractionModelOutput.parse(JSON.parse(judge.output.canonical_body));
+    if (judgeOutput.task !== "judge_claims") throw new ExtractionAuditError("extraction_audit_conflict");
+    const admitted = admittedClaims(pipeline.decisions, claimOutput);
+    // Per-source custody is written exactly once; readiness requires every covered
+    // source to carry custody even when the judge admitted nothing or every claim was refused.
+    const custody = extractionBodyDigest([judge.generation_id, judge.source_id]);
+    const priorCustody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.result AS result`, { key: custody });
+    if (priorCustody.records[0]) {
+      const result = JSON.parse(priorCustody.records[0].get("result")) as { created?: boolean; omitted?: string };
+      return { semantic_writes: result.created === true, relation_judge: result.omitted === "relation_judge_exhausted" ? "omitted" : relationJudge };
+    }
+    const source = await this.semanticEpisodeTx(tx, judge.source_id, policy);
+    if (judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest || judge.source_ingest_seq !== source.ingest_seq)
+      throw new ExtractionAuditError("extraction_audit_stale");
+    const reported = claimOutput.language.toLowerCase();
+    const language = /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(reported) ? reported : "und";
+    const profile = pipeline.judge.model;
+    const pass: MaterializationPass = { judge, pipelineId: pipeline.claim.id, source, language, profile, allocatedEntities: new Map() };
+    if (this.relationJudge && await this.bindVerdictsTx(tx, admitted, pass)) return { semantic_writes: false, relation_judge: "pending" };
+    const { factIds, refused, duplicates } = await this.writeAdmittedClaimsTx(tx, admitted, pass, policy);
+    const created = await custodyRecordTx(tx, custody, pass, { factIds, refused, duplicates });
     return { semantic_writes: created, relation_judge: relationJudge };
   }
 
@@ -2741,20 +2921,50 @@ export class Store {
     return attempt;
   }
 
+  /** A replayed completion: the stored attempt for an identical request, re-authorized when it carries output. */
+  private async replayedAttemptTx(tx: ManagedTransaction, request: CompleteExtractionAttempt, digest: string, policy: PolicyState): Promise<ExtractionAttempt | null> {
+    const oldRows = await tx.run<{ body: string; digest: string }>(`MATCH (a:ExtractionAttempt {id:$id}) RETURN a.body AS body,a.request_digest AS digest`, { id: request.id });
+    const old = oldRows.records[0];
+    if (!old) return null;
+    if (old.get("digest") !== digest) throw new Error("attempt_conflict");
+    const attempt = ExtractionAttempt.parse(JSON.parse(old.get("body")));
+    if (attempt.output) await this.authorizeEpisodesTx(tx, [attempt.source_id], policy);
+    return attempt;
+  }
+
+  /** A judge attempt is checked against its recorded premises and the claim context it judged: stale premises or a
+   * decision set that does not match finish the attempt as failed, a matching one records each disposition. Null when
+   * the attempt may finish as submitted. */
+  private async judgeAttemptTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState, request: CompleteExtractionAttempt, digest: string): Promise<ExtractionAttempt | null> {
+    const premise = await this.extractionRecordTx(tx,'ExtractionJudgeInput',task.attempt_id!,ExtractionJudgeInput);
+    if (premise.policy_revision !== policy.policy_revision || premise.source_head_revision !== await this.extractionHeadTx(tx,task.source_id)) {
+      return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'premises_changed',disposition:null,output:null,spans:[]},digest);
+    }
+    const parent = await this.extractionClaimContextTx(tx,premise.pipeline_id);
+    if (canonicalExtractionBody(parent) !== canonicalExtractionBody(premise.claim_context) || premise.task_id !== task.id || premise.attempt_id !== task.attempt_id) throw new ExtractionAuditError('extraction_audit_conflict');
+    if (!request.output) return null;
+    const body = ExtractionModelOutput.parse(JSON.parse(request.output.canonical_body));
+    // The attempt names the check the judge failed (#218): ABI task, parent digest, or the decision set's shape.
+    const refuse = (detail: ExtractionFailureDetail) => this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',detail,disposition:null,output:null,spans:[]},digest);
+    if (body.task !== 'judge_claims') return refuse('normalize');
+    if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
+    if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
+    for (const d of body.decisions) {
+      const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
+      await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,
+        {id:task.attempt_id,index:neo4j.int(d.claim_index),body:canonicalExtractionBody(decision)});
+    }
+    return null;
+  }
+
   /** Exact completion replay returns the stored immutable outcome. Neither the
    * submitted output nor caller-selected policy context is ever an authority. */
   async recordExtractionAttempt(input: CompleteExtractionAttempt, context: InstallationContext): Promise<ExtractionAttempt> {
     requireInstallation(context);
     const request = CompleteExtractionAttempt.parse(input), digest = extractionBodyDigest(request);
     return this.extractionTx(context, async (tx, policy) => {
-      const oldRows = await tx.run<{ body: string; digest: string }>(`MATCH (a:ExtractionAttempt {id:$id}) RETURN a.body AS body,a.request_digest AS digest`, { id: request.id });
-      const old = oldRows.records[0];
-      if (old) {
-        if (old.get("digest") !== digest) throw new Error("attempt_conflict");
-        const attempt = ExtractionAttempt.parse(JSON.parse(old.get("body")));
-        if (attempt.output) await this.authorizeEpisodesTx(tx, [attempt.source_id], policy);
-        return attempt;
-      }
+      const replayed = await this.replayedAttemptTx(tx, request, digest, policy);
+      if (replayed) return replayed;
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
       this.checkExtractionLease(task, request.lease_epoch);
@@ -2766,47 +2976,33 @@ export class Store {
         if (!(error instanceof ReceiptError) || error.code !== "policy_denied") throw error;
         return this.finishExtractionTx(tx, task, policy, { state: "cancelled", reason: "policy_denied", output: null, disposition: null, spans: [] }, digest);
       }
-      if (request.output) {
-        const validated = validateModelOutput(JSON.parse(request.output.canonical_body), task.kind);
-        if (canonicalExtractionBody(validated.output) !== canonicalExtractionBody(request.output) || validated.disposition !== request.disposition
-          || canonicalExtractionBody(request.spans) !== canonicalExtractionBody(validated.spans)) throw new Error("output_mismatch");
-        validateSourceSpans(source.content, request.spans);
-      }
+      checkAttemptOutput(request, task, source);
       if (task.kind === 'judge_claims') {
-        const premise = await this.extractionRecordTx(tx,'ExtractionJudgeInput',task.attempt_id!,ExtractionJudgeInput);
-        if (premise.policy_revision !== policy.policy_revision || premise.source_head_revision !== await this.extractionHeadTx(tx,task.source_id)) {
-          return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'premises_changed',disposition:null,output:null,spans:[]},digest);
-        }
-        const parent = await this.extractionClaimContextTx(tx,premise.pipeline_id);
-        if (canonicalExtractionBody(parent) !== canonicalExtractionBody(premise.claim_context) || premise.task_id !== task.id || premise.attempt_id !== task.attempt_id) throw new ExtractionAuditError('extraction_audit_conflict');
-        if (request.output) {
-          const body = ExtractionModelOutput.parse(JSON.parse(request.output.canonical_body));
-          // The attempt names the check the judge failed (#218): ABI task, parent digest, or the decision set's shape.
-          const refuse = (detail: ExtractionFailureDetail) => this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'provider_mismatch',detail,disposition:null,output:null,spans:[]},digest);
-          if (body.task !== 'judge_claims') return refuse('normalize');
-          if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
-          if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
-          for (const d of body.decisions) {
-            const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
-            await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,
-              {id:task.attempt_id,index:neo4j.int(d.claim_index),body:canonicalExtractionBody(decision)});
-          }
-        }
+        const judged = await this.judgeAttemptTx(tx, task, policy, request, digest);
+        if (judged) return judged;
       }
       return this.finishExtractionTx(tx, task, policy, request, digest);
     });
   }
 
-  async cancelModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
+  /** A CAS-guarded ModelTask transition: the task is loaded inside an extraction transaction, its version checked, and its state gated. */
+  private modelTaskTransition(input: ModelTaskCAS, context: InstallationContext, from: readonly ModelTask["state"][],
+    body: (tx: ManagedTransaction, policy: PolicyState, task: ModelTask, request: ModelTaskCAS) => Promise<ModelTask>): Promise<ModelTask> {
     requireInstallation(context);
     const request = ModelTaskCAS.parse(input);
     return this.extractionTx(context, async (tx, policy) => {
       const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
       this.checkExtractionCAS(task, request.expected_version);
+      if (!from.includes(task.state)) throw new Error("invalid_transition");
+      return body(tx, policy, task, request);
+    });
+  }
+
+  async cancelModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
+    return this.modelTaskTransition(input, context, ["queued", "leased", "expired", "worker_lost"], async (tx, policy, task, request) => {
       // Open work is cancelled in place. An expired or lost lease is unresolved work, not an outcome (extractionPipelineOmission);
       // cancelling it is how a caller whose retry budget is spent turns it into a durable, coverable omission. The cancel is a
       // fresh content-free attempt record, so the settled lease attempt stays immutable and the attempt count is unchanged.
-      if (!["queued", "leased", "expired", "worker_lost"].includes(task.state)) throw new Error("invalid_transition");
       const open = task.state === "queued" || task.state === "leased" ? task : { ...task, attempt_id: null, lease: null, attempts: task.attempts - 1 };
       await this.finishExtractionTx(tx, open, policy, { state: "cancelled", reason: "cancelled", output: null, disposition: null, spans: [] }, extractionBodyDigest({ action: "cancel", ...request }));
       return this.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
@@ -2836,12 +3032,7 @@ export class Store {
   }
 
   async retryModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
-    requireInstallation(context);
-    const request = ModelTaskCAS.parse(input);
-    return this.extractionTx(context, async (tx, policy) => {
-      const task = await this.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
-      this.checkExtractionCAS(task, request.expected_version);
-      if (!["failed", "expired", "worker_lost"].includes(task.state)) throw new Error("invalid_transition");
+    return this.modelTaskTransition(input, context, ["failed", "expired", "worker_lost"], async (tx, policy, task) => {
       await this.writableExtractionGenerationTx(tx, task.generation_id);
       await this.authorizeEpisodesTx(tx, [task.source_id], policy);
       await this.validateExtractionSourceTx(tx, task);
@@ -2871,6 +3062,21 @@ export class Store {
    * content-free omissions. Retry is then forbidden for that sealed work.
    * The shared generation cursor is the minimum of the two partition cursors;
    * these are audit coverage partitions, not embedding/recall readiness gates. */
+  /** A covered source's contribution to the omission digest: a pipeline's omission or its sealed decisions, a plain
+   * attempt's terminal failure or refusal; a retained successful attempt leaves the digest as it was. */
+  private async coverageOmissionTx(tx: ManagedTransaction, task: ModelTask, attempt: ExtractionAttempt, prior: string): Promise<string> {
+    if (task.pipeline) {
+      const pipeline = await this.readExtractionPipelineTx(tx,task.id);
+      const omission = this.extractionPipelineOmission(pipeline);
+      if (omission) return extractionBodyDigest({ prior, ...omission });
+      if (pipeline.state !== 'known' || pipeline.claim.state !== 'succeeded' || pipeline.judge?.state !== 'succeeded') throw new ExtractionAuditError('extraction_audit_incomplete');
+      // These rows seal audit work only, never materialization/embedding readiness.
+      return extractionBodyDigest({prior,pipeline_id:task.id,judge_attempt_id:pipeline.judge_attempt!.id,decisions:pipeline.decisions.map(d=>d.disposition)});
+    }
+    if (attempt.state !== "succeeded" || !["retain", "correct"].includes(attempt.disposition ?? "")) return extractionBodyDigest({ prior, id: attempt.id, seq: attempt.source_ingest_seq, state: attempt.state, reason: attempt.reason, disposition: attempt.disposition });
+    return prior;
+  }
+
   async recordExtractionCoverage(input: AdvanceExtractionCoverage, context: InstallationContext): Promise<Coverage> {
     requireInstallation(context);
     const request = AdvanceExtractionCoverage.parse(input);
@@ -2880,9 +3086,7 @@ export class Store {
       const rows = await tx.run<{ body: string }>(`MATCH (c:ExtractionCoverage {key:$key}) RETURN c.body AS body`, { key });
       const prior = rows.records[0] ? Coverage.parse(JSON.parse(rows.records[0].get("body"))) : null;
       const covered = prior?.covered_ingest_seq ?? 0;
-      if (covered !== request.expected_covered_ingest_seq) throw new Error("coverage_conflict");
-      if (request.covered_ingest_seq < covered) throw new Error("coverage_regression");
-      if (request.covered_ingest_seq - covered > 256) throw new Error("coverage_batch_too_large");
+      checkCoverageAdvance(request, covered);
       const meta = await tx.run<{ seq: number }>(`MATCH (m:Meta {key:'meta'}) RETURN m.ingest_seq AS seq`);
       const required = receiptTime.parse(meta.records[0]?.get("seq"));
       if (request.covered_ingest_seq > required) throw new Error("coverage_exceeds_required");
@@ -2895,23 +3099,8 @@ export class Store {
       if (prefix.records.length !== request.covered_ingest_seq - covered) throw new Error("coverage_hole");
       let omissionDigest = prior?.omission_digest ?? extractionBodyDigest([]);
       for (const [index, row] of prefix.records.entries()) {
-        if (row.get("seq") !== covered + index + 1 || !row.get("task")) throw new Error("coverage_hole");
-        const task = ModelTask.parse(JSON.parse(row.get("task")!));
-        if (task.pipeline && (task.state === "queued" || task.state === "leased" || !row.get("attempt"))) throw new ExtractionAuditError("extraction_audit_incomplete");
-        if (!row.get("attempt")) throw new Error("coverage_hole");
-        const attempt = ExtractionAttempt.parse(JSON.parse(row.get("attempt")!));
-        if (task.state === "queued" || task.state === "leased" || attempt.state !== task.state || attempt.id !== task.attempt_id
-          || attempt.task_id !== task.id || attempt.source_id !== row.get("source") || attempt.source_ingest_seq !== row.get("seq") || attempt.generation_id !== generation.id) throw new Error("coverage_hole");
-        if (task.pipeline) {
-          const pipeline = await this.readExtractionPipelineTx(tx,task.id);
-          const omission = this.extractionPipelineOmission(pipeline);
-          if (omission) omissionDigest = extractionBodyDigest({ prior: omissionDigest, ...omission });
-          else {
-            if (pipeline.state !== 'known' || pipeline.claim.state !== 'succeeded' || pipeline.judge?.state !== 'succeeded') throw new ExtractionAuditError('extraction_audit_incomplete');
-            // These rows seal audit work only, never materialization/embedding readiness.
-            omissionDigest = extractionBodyDigest({prior:omissionDigest,pipeline_id:task.id,judge_attempt_id:pipeline.judge_attempt!.id,decisions:pipeline.decisions.map(d=>d.disposition)});
-          }
-        } else if (attempt.state !== "succeeded" || !["retain", "correct"].includes(attempt.disposition ?? "")) omissionDigest = extractionBodyDigest({ prior: omissionDigest, id: attempt.id, seq: attempt.source_ingest_seq, state: attempt.state, reason: attempt.reason, disposition: attempt.disposition });
+        const { task, attempt } = coveredRow(row, covered + index + 1, generation.id);
+        omissionDigest = await this.coverageOmissionTx(tx, task, attempt, omissionDigest);
       }
       const now = Math.max(generation.updated_at, prior?.updated_at ?? 0, receiptTime.parse(this.clock()));
       const value = Coverage.parse({ generation_id: generation.id, partition: request.partition, required_ingest_seq: required, covered_ingest_seq: request.covered_ingest_seq, omission_digest: omissionDigest, updated_at: now });
@@ -2962,6 +3151,74 @@ export class Store {
     });
   }
 
+  /** The target's coverage must be complete at the live ingest sequence: both partitions, the generation cursor, the
+   * persisted cursor and the source watermark, with no model task still queued or leased. Returns the live sequence. */
+  private async coverageCompleteTx(tx: ManagedTransaction, target: Generation): Promise<number> {
+    const values = await this.extractionCoverageTx(tx, target.id);
+    const meta = await tx.run(`MATCH (m:Meta {key:'meta'}) MATCH (g:ExtractionGeneration {id:$id})
+      RETURN m.ingest_seq AS seq,g.source_high_watermark AS watermark,g.covered_ingest_seq AS covered`, { id: target.id });
+    const row = meta.records[0]!, live = receiptTime.parse(row.get("seq"));
+    const watermark = receiptTime.safeParse(row.get("watermark"));
+    if (!watermark.success) throw new GenerationReadinessError("generation_watermark_unavailable");
+    const pending = await tx.run(`MATCH (t:ModelTask {generation_id:$id}) WHERE t.state IN ['queued','leased'] RETURN t.id LIMIT 1`, { id: target.id });
+    if (pending.records.length) throw new GenerationReadinessError("generation_work_in_flight");
+    if (target.covered_ingest_seq !== live || row.get("covered") !== live || watermark.data > live
+      || values.some(value => value.covered_ingest_seq !== live || value.required_ingest_seq !== live)) throw new GenerationReadinessError("coverage_incomplete");
+    return live;
+  }
+
+  /** Conducting-arc coverage of the extraction stream must be complete and the retained snapshot clean. */
+  private async conductingReadyTx(tx: ManagedTransaction, generation: string): Promise<void> {
+    const conducting = await tx.run(`MATCH (m:Meta {key:'meta'})
+      MATCH (c:ConductingArcCoverage {stream:'extraction',generation:$id})
+      RETURN m.conducting_arc_ready AS ready,c.state AS state`, { id: generation });
+    if (conducting.records[0]?.get("ready") !== true || conducting.records[0]?.get("state") !== "COMPLETE") throw new GraphAccessError("degree_probe_unavailable");
+    const retained = await this.conductingSnapshotTx(tx, 10000);
+    if (retained.report.truncated || retained.report.issues.length) throw new GraphAccessError("degree_probe_unavailable");
+  }
+
+  /** Every covered source carries materialization custody or an explicitly sealed omission, within the bounded custody view. */
+  private async derivedCustodyBadTx(tx: ManagedTransaction, generation: string, sources: CoveredSource[], maxDerived: number): Promise<boolean> {
+    const operationRows = await tx.run(`MATCH (o:MaterializationOperation {generation:$generation})
+      RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT $limit`, { generation, limit: neo4j.int(maxDerived + 1) });
+    let missing = false;
+    for (const source of sources) if (source.get("operations") === 0) {
+      // Both coverage partitions above pin this terminal attempt. Retrying it
+      // is forbidden after sealing, so no fabricated materialization is needed.
+      const task = source.get("task");
+      if (!task || !this.extractionPipelineOmission(await this.readExtractionPipelineTx(tx, task))) missing = true;
+    }
+    const overflow = sources.length > 256 || operationRows.records.length > maxDerived;
+    const malformed = operationRows.records.some(row => typeof row.get("source") !== "string" || typeof row.get("fact") !== "string" || typeof row.get("link") !== "string");
+    return missing || overflow || malformed;
+  }
+
+  /** Serving readiness is derived only from persisted, generation-scoped
+   * materialization custody. Audit success without an accepted proposal and
+   * consumption remains insufficient. Every source in the covered prefix
+   * must have materialization custody or an explicitly sealed omission, every
+   * derived link and entity witness must be in order, and the selected
+   * embedding profile must cover every source. Returns the unmet prerequisites. */
+  private async activationCausesTx(tx: ManagedTransaction, target: Generation, policy: PolicyState, live: number): Promise<string[]> {
+    const sources = await tx.run<{ id: string; operations: number; task: string | null }>(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
+      OPTIONAL MATCH (o:MaterializationOperation {generation:$generation,source_episode_id:e.id})
+      OPTIONAL MATCH (t:ModelTask {work_key:$generation+':'+e.id})
+      RETURN e.id AS id,count(o) AS operations,t.id AS task LIMIT 257`, { seq: live, generation: target.id });
+    // The source partition is bounded at 256, but each source can retain up to
+    // 64 claims. Derived custody rows use their own bounded overflow sentinel.
+    const maxDerived = 256 * 64;
+    const custodyBad = await this.derivedCustodyBadTx(tx, target.id, sources.records, maxDerived);
+    const linkBad = await derivedLinksBadTx(tx, target.id, maxDerived);
+    const witnessBad = await entityWitnessesBadTx(tx, target.id, policy.policy_revision, maxDerived);
+    const embeddingCoverageBad = this.embeddingProvider ? await embeddingCoverageBadTx(tx, embeddingProfileId(this.embeddingProvider.profile), sources.records) : false;
+    return [
+      ...(embeddingCoverageBad ? ["selected_model_embedding_coverage"] : []),
+      ...(custodyBad ? ["derived_authority_and_links"] : []),
+      ...(witnessBad ? ["entity_witness_policy_coverage"] : []),
+      ...(linkBad ? ["invalidation_mapping_equivalence"] : []),
+    ];
+  }
+
   /** Audit coverage is necessary, never sufficient for derived activation.
    * No caller-supplied readiness flags can stand in for missing serving proofs. */
   async cutoverExtractionGeneration(input: SelectExtractionGeneration, context: InstallationContext): Promise<Generation> {
@@ -2971,83 +3228,17 @@ export class Store {
       await this.checkExtractionSelectionTx(tx, request);
       const target = await this.extractionRecordTx(tx, "ExtractionGeneration", request.generation_id, Generation);
       if (target.state !== "catching_up" && target.state !== "active") throw new Error("generation_not_caught_up");
-      const values = await this.extractionCoverageTx(tx, target.id);
-      const meta = await tx.run(`MATCH (m:Meta {key:'meta'}) MATCH (g:ExtractionGeneration {id:$id})
-        RETURN m.ingest_seq AS seq,g.source_high_watermark AS watermark,g.covered_ingest_seq AS covered`, { id: target.id });
-      const row = meta.records[0]!, live = receiptTime.parse(row.get("seq"));
-      const watermark = receiptTime.safeParse(row.get("watermark"));
-      if (!watermark.success) throw new GenerationReadinessError("generation_watermark_unavailable");
-      const pending = await tx.run(`MATCH (t:ModelTask {generation_id:$id}) WHERE t.state IN ['queued','leased'] RETURN t.id LIMIT 1`, { id: target.id });
-      if (pending.records.length) throw new GenerationReadinessError("generation_work_in_flight");
-      if (target.covered_ingest_seq !== live || row.get("covered") !== live || watermark.data > live
-        || values.some(value => value.covered_ingest_seq !== live || value.required_ingest_seq !== live)) throw new GenerationReadinessError("coverage_incomplete");
-      const conducting = await tx.run(`MATCH (m:Meta {key:'meta'})
-        MATCH (c:ConductingArcCoverage {stream:'extraction',generation:$id})
-        RETURN m.conducting_arc_ready AS ready,c.state AS state`, { id: target.id });
-      if (conducting.records[0]?.get("ready") !== true || conducting.records[0]?.get("state") !== "COMPLETE") throw new GraphAccessError("degree_probe_unavailable");
-      const retained = await this.conductingSnapshotTx(tx, 10000);
-      if (retained.report.truncated || retained.report.issues.length) throw new GraphAccessError("degree_probe_unavailable");
-      // Check the existing access-index prerequisites; this does not certify
-      // nonexistent generation-scoped derived indexes or an ordered query plan.
-      const indexes = await tx.run(`SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state`, {
-        names: ["conducting_arc_source_link", "conducting_arc_coverage", "extraction_coverage_key", "extraction_generation_id", "meta_key", "fact_generation_id", "entity_generation_key"],
-      });
-      if (indexes.records.length !== 7 || indexes.records.some(index => index.get("state") !== "ONLINE")) throw new GraphAccessError("ordered_probe_unavailable");
-      // Serving readiness is derived only from persisted, generation-scoped
-      // materialization custody. Audit success without an accepted proposal and
-      // consumption remains insufficient. Every source in the covered prefix
-      // must have materialization custody or an explicitly sealed omission.
-      const sources = await tx.run(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
-        OPTIONAL MATCH (o:MaterializationOperation {generation:$generation,source_episode_id:e.id})
-        OPTIONAL MATCH (t:ModelTask {work_key:$generation+':'+e.id})
-        RETURN e.id AS id,count(o) AS operations,t.id AS task LIMIT 257`, { seq: live, generation: target.id });
-      // The source partition is bounded at 256, but each source can retain up to
-      // 64 claims. Derived custody rows use their own bounded overflow sentinel.
-      const maxDerived = 256 * 64;
-      const operationRows = await tx.run(`MATCH (o:MaterializationOperation {generation:$generation})
-        RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
-      let missing = false;
-      for (const source of sources.records) if (source.get("operations") === 0) {
-        // Both coverage partitions above pin this terminal attempt. Retrying it
-        // is forbidden after sealing, so no fabricated materialization is needed.
-        const task = source.get("task");
-        if (!task || !this.extractionPipelineOmission(await this.readExtractionPipelineTx(tx, task))) missing = true;
-      }
-      const overflow = sources.records.length > 256 || operationRows.records.length > maxDerived;
-      const malformed = operationRows.records.some(row => typeof row.get("source") !== "string" || typeof row.get("fact") !== "string" || typeof row.get("link") !== "string");
-      const links = await tx.run(`MATCH (f:Element:Fact)-[l:DERIVED_FROM]->(e:Element:Episode)
-        WHERE l.generation=$generation RETURN f.id AS fact,e.id AS source,l.id AS link,l.generation AS generation LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
-      const linkBad = links.records.length > maxDerived || links.records.some(row => row.get("generation") !== target.id || !row.get("fact") || !row.get("source") || !row.get("link"));
-      // Several Facts may mention one Entity; the witness requirement is per distinct entity.
-      const entities = await tx.run(`MATCH (f:Element:Fact {generation:$generation}) UNWIND coalesce(f.entity_ids,[]) AS entity
-        WITH DISTINCT entity OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
-        RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation: target.id, policy: neo4j.int(policy.policy_revision), limit: neo4j.int(maxDerived + 1) });
-      const witnessBad = entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
-      const indexesReady = indexes.records.length === 7 && indexes.records.every(index => index.get("state") === "ONLINE");
-      let embeddingCoverageBad = false;
-      if (this.embeddingProvider) {
-        const profileId = embeddingProfileId(this.embeddingProvider.profile);
-        const configured = await tx.run(`MATCH (p:EmbeddingProfile) RETURN p.id AS id`);
-        const vectors = await tx.run(`MATCH (v:EmbeddingVector {profile_id:$profile}) RETURN v.episode_id AS episode`, { profile: profileId });
-        const vectorEpisodes = new Set(vectors.records.map(record => record.get("episode")));
-        embeddingCoverageBad = configured.records.length !== 1 || configured.records[0]?.get("id") !== profileId
-          || sources.records.some(source => !vectorEpisodes.has(source.get("id")));
-      }
-      if (missing || overflow || malformed || linkBad || witnessBad || !indexesReady || embeddingCoverageBad) {
-        throw new GenerationReadinessError("activation_prerequisite_unavailable", [
-          ...(embeddingCoverageBad ? ["selected_model_embedding_coverage"] : []),
-          ...(!indexesReady ? ["generation_scoped_indexes"] : []),
-          ...(missing || overflow || malformed ? ["derived_authority_and_links"] : []),
-          ...(witnessBad ? ["entity_witness_policy_coverage"] : []),
-          ...(linkBad ? ["invalidation_mapping_equivalence"] : []),
-        ]);
-      }
+      const live = await this.coverageCompleteTx(tx, target);
+      await this.conductingReadyTx(tx, target.id);
+      await checkAccessIndexesTx(tx);
+      const causes = await this.activationCausesTx(tx, target, policy, live);
+      if (causes.length) throw new GenerationReadinessError("activation_prerequisite_unavailable", causes);
       const activated = Generation.parse({ ...target, state: "active", updated_at: Math.max(target.updated_at, this.clock()) });
       await tx.run(`MATCH (g:ExtractionGeneration {id:$id}), (s:Meta {key:'extraction_selector'})
         SET g.state='active',g.body=$body,s.generation_id=$id,s.selector_version=s.selector_version+1`, { id: target.id, body: canonicalExtractionBody(activated) });
       await tx.run(`MERGE (r:DerivedServingReadiness {generation:$generation})
         SET r.state='COMPLETE',r.profile_id=$profile,r.policy_revision=$policy,r.covered_ingest_seq=$seq,r.link_revision=$revision`, { generation: target.id,
-          profile: this.embeddingProvider ? embeddingProfileId(this.embeddingProvider.profile) : "embeddings-disabled-v1", policy: policy.policy_revision, seq: live, revision: row.get("covered") });
+          profile: this.embeddingProvider ? embeddingProfileId(this.embeddingProvider.profile) : "embeddings-disabled-v1", policy: policy.policy_revision, seq: live, revision: live });
       return activated;
     });
   }

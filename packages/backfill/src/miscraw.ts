@@ -1,3 +1,4 @@
+import { asRecord, byEpisodeTime, optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
@@ -57,15 +58,7 @@ interface MiscTurn {
   properties: Record<string, string>;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 /**
  * A transcript line the runtime wrote mid-crash is the one line that must not
@@ -379,54 +372,65 @@ export type MiscRawContext =
   | { source: "gemini-antigravity"; session: string }
   | { source: "opencode"; occurredAt: number };
 
+type Lane = (record: Record<string, unknown>, index: number, invalid: () => []) => MiscRawEpisode[];
+function asideLane(context: Extract<MiscRawContext, { source: "aside" }>, strict: boolean): Lane {
+  return (record, index, invalid) => {
+    const role = optionalText(record["role"]);
+    if (!role) return invalid();
+    if (!ASIDE_ROLES.has(role)) return [];
+    const content = record["content"], timestamp = record["timestamp"];
+    if (strict && typeof content !== "string" && !Array.isArray(content)) return invalid();
+    const text = asideText(content);
+    if (typeof timestamp !== "number" || !Number.isFinite(new Date(timestamp).getTime())) return invalid();
+    if (text === undefined) return [];
+    return [toEpisode({ source: context.source, session: context.session, actor: role, record: `${context.session}:${index}`, occurredAt: timestamp, text, properties: { kind: "message", ...context.properties } })];
+  };
+}
+function antigravityLane(context: Extract<MiscRawContext, { source: "gemini-antigravity" }>, strict: boolean): Lane {
+  return (record, index, invalid) => {
+    const type = optionalText(record["type"]);
+    if (!type) return invalid();
+    const actor = Object.hasOwn(ANTIGRAVITY_STEPS, type) ? ANTIGRAVITY_STEPS[type] : undefined;
+    if (!actor) return [];
+    const content = record["content"], step = record["step_index"], createdAt = optionalText(record["created_at"]);
+    if (typeof content !== "string" || typeof step !== "number" || !createdAt || (strict && (!Number.isSafeInteger(step) || step < 0))) return invalid();
+    const occurredAt = Date.parse(createdAt);
+    if (!Number.isFinite(occurredAt)) return invalid();
+    const text = antigravityText(type, content);
+    if (text === undefined) return [];
+    return [toEpisode({ source: context.source, session: context.session, actor, record: `${context.session}:${step}`, occurredAt, text, properties: { kind: type } })];
+  };
+}
+function opencodeLane(context: Extract<MiscRawContext, { source: "opencode" }>, strict: boolean): Lane {
+  return (record, index, invalid) => {
+  const input = record["input"];
+  if (typeof input !== "string") return invalid();
+  if (input.trim() === "") return [];
+  // Pasted text is elided from input; only text attachments restore it.
+  const parts = [input], attached = record["parts"];
+  if (strict && attached !== undefined && !Array.isArray(attached)) return invalid();
+  if (Array.isArray(attached)) for (const item of attached) {
+    const part = asRecord(item);
+    if (part?.["type"] !== "text") continue;
+    const text = optionalText(part["text"]);
+    if (text !== undefined && text.trim() !== "") parts.push(text);
+  }
+  const mode = optionalText(record["mode"]);
+  return [toEpisode({ source: context.source, session: "prompt-history", actor: "user", record: `prompt-history:${index}`, occurredAt: context.occurredAt, text: parts.join("\n"), properties: { kind: "prompt", ...(mode === undefined ? {} : { mode }) } })];
+  };
+}
 /** Shared record parser. Nonblank physical ordinals include excluded records.
  * Strict mode belongs to sealed runtime snapshots, not tolerant legacy imports. */
 export function createMiscRawParser(context: MiscRawContext, strict = false): (line: string) => MiscRawEpisode[] {
   let index = -1;
   const invalid = (): [] => { if (strict) throw new Error("miscraw_invalid_record"); return []; };
+  const lane: Lane = context.source === "aside" ? asideLane(context, strict) : context.source === "gemini-antigravity" ? antigravityLane(context, strict) : opencodeLane(context, strict);
   return line => {
     if (line.trim() === "") return [];
     index++;
     const record = parseLine(line);
     if (!record) return invalid();
-    if (context.source === "aside") {
-      const role = optionalText(record["role"]);
-      if (!role) return invalid();
-      if (!ASIDE_ROLES.has(role)) return [];
-      const content = record["content"], timestamp = record["timestamp"];
-      if (strict && typeof content !== "string" && !Array.isArray(content)) return invalid();
-      const text = asideText(content);
-      if (typeof timestamp !== "number" || !Number.isFinite(new Date(timestamp).getTime())) return invalid();
-      if (text === undefined) return [];
-      return [toEpisode({ source: context.source, session: context.session, actor: role, record: `${context.session}:${index}`, occurredAt: timestamp, text, properties: { kind: "message", ...context.properties } })];
-    }
-    if (context.source === "gemini-antigravity") {
-      const type = optionalText(record["type"]);
-      if (!type) return invalid();
-      const actor = Object.hasOwn(ANTIGRAVITY_STEPS, type) ? ANTIGRAVITY_STEPS[type] : undefined;
-      if (!actor) return [];
-      const content = record["content"], step = record["step_index"], createdAt = optionalText(record["created_at"]);
-      if (typeof content !== "string" || typeof step !== "number" || !createdAt || (strict && (!Number.isSafeInteger(step) || step < 0))) return invalid();
-      const occurredAt = Date.parse(createdAt);
-      if (!Number.isFinite(occurredAt)) return invalid();
-      const text = antigravityText(type, content);
-      if (text === undefined) return [];
-      return [toEpisode({ source: context.source, session: context.session, actor, record: `${context.session}:${step}`, occurredAt, text, properties: { kind: type } })];
-    }
-    const input = record["input"];
-    if (typeof input !== "string") return invalid();
-    if (input.trim() === "") return [];
-    // Pasted text is elided from input; only text attachments restore it.
-    const parts = [input], attached = record["parts"];
-    if (strict && attached !== undefined && !Array.isArray(attached)) return invalid();
-    if (Array.isArray(attached)) for (const item of attached) {
-      const part = asRecord(item);
-      if (part?.["type"] !== "text") continue;
-      const text = optionalText(part["text"]);
-      if (text !== undefined && text.trim() !== "") parts.push(text);
-    }
-    const mode = optionalText(record["mode"]);
-    return [toEpisode({ source: context.source, session: "prompt-history", actor: "user", record: `prompt-history:${index}`, occurredAt: context.occurredAt, text: parts.join("\n"), properties: { kind: "prompt", ...(mode === undefined ? {} : { mode }) } })];
+    return lane(record, index, invalid);
   };
 }
 
@@ -458,11 +462,5 @@ export async function collectMiscRaw(root: string): Promise<MiscRawEpisode[]> {
     turns.push(...(await collect(storeRoot)));
   }
   return turns
-    .sort((a, b) => {
-      const at = a.input.time?.value ?? "";
-      const bt = b.input.time?.value ?? "";
-      return at === bt
-        ? a.input.origin.record.localeCompare(b.input.origin.record)
-        : at.localeCompare(bt);
-    });
+    .sort(byEpisodeTime);
 }

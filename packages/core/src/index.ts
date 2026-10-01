@@ -1,4 +1,5 @@
 export { Store, GenerationReadinessError } from "./store.ts";
+export type { AuthoritySnapshot } from "./store.ts";
 export { EmbeddingConfig, EmbeddingProfile, HttpEmbeddingProvider, embeddingProfileId, validateVector } from "./embedding.ts";
 export type { EmbeddingProvider } from "./embedding.ts";
 export { OpenAiEmbeddingProvider } from "./openai-embedding-provider.ts";

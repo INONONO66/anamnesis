@@ -1,3 +1,4 @@
+import { byEpisodeTime, optionalText } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
@@ -76,9 +77,6 @@ interface AcceptedRecord {
   occurredAt: number;
 }
 
-function optionalText(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
 
 function optionalFlag(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
@@ -234,6 +232,33 @@ function compaction(
   return { record, text: summary, role: "unknown", kind: "compaction", occurredAt };
 }
 
+/** Sidechain, API-error and error-message records are never accepted (sidechain records only under a sidechain origin). */
+function skipped(value: ClaudeRecord, sidechain: SidechainOrigin | undefined): boolean {
+  return (
+    (sidechain === undefined &&
+      (value.isSidechain === true || value.agentId !== undefined)) ||
+    value.isApiErrorMessage === true ||
+    value.message?.isError === true
+  );
+}
+/** A message whose every content block is accepted text and whose keys are exactly the plain agent-message shape is ingested as one record. */
+function wholeMessage(value: ClaudeRecord, nested: boolean, blocks: readonly ReturnType<typeof parseBlock>[], accepted: readonly number[]): boolean {
+  return (
+    accepted.length === blocks.length &&
+    hasOnlyKeys(value.keys, [
+      "type",
+      "uuid",
+      "eventId",
+      "timestamp",
+      "sessionId",
+      "cwd",
+      nested ? "message" : "content",
+    ]) &&
+    (!nested ||
+      hasOnlyKeys(value.message?.keys ?? [], ["role", "model", "content"])) &&
+    blocks.every((block) => hasOnlyKeys(block?.keys ?? [], ["type", "text"]))
+  );
+}
 /**
  * The export kept prose and dropped plumbing: `text` blocks become records,
  * while `thinking`, `tool_use` and `tool_result` blocks do not. Reproducing
@@ -254,14 +279,7 @@ function acceptedRecords(
   lineIndex: number,
   sidechain: SidechainOrigin | undefined,
 ): readonly AcceptedRecord[] {
-  if (
-    (sidechain === undefined &&
-      (value.isSidechain === true || value.agentId !== undefined)) ||
-    value.isApiErrorMessage === true ||
-    value.message?.isError === true
-  ) {
-    return [];
-  }
+  if (skipped(value, sidechain)) return [];
   const occurredAt = eventTime(value.timestamp);
   if (occurredAt === undefined) return [];
   const compacted = compaction(value, bytes, lineIndex, occurredAt);
@@ -292,21 +310,7 @@ function acceptedRecords(
    * on the whole message, not on the block, which is why the shape is decided
    * before any block is turned into a record.
    */
-  const whole =
-    accepted.length === content.length &&
-    hasOnlyKeys(value.keys, [
-      "type",
-      "uuid",
-      "eventId",
-      "timestamp",
-      "sessionId",
-      "cwd",
-      nested ? "message" : "content",
-    ]) &&
-    (!nested ||
-      hasOnlyKeys(value.message?.keys ?? [], ["role", "model", "content"])) &&
-    blocks.every((block) => hasOnlyKeys(block?.keys ?? [], ["type", "text"]));
-  if (whole) {
+  if (wholeMessage(value, nested, blocks, accepted)) {
     const record = recordId(value, bytes, lineIndex);
     if (record === undefined) return [];
     const text = accepted
@@ -587,11 +591,5 @@ export async function collectClaudeRaw(
   for (const transcript of await transcriptFiles(root)) {
     episodes.push(...(await collectFile(transcript)));
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }

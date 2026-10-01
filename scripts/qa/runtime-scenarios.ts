@@ -51,9 +51,7 @@ const CASE_TEST_PATHS = new Map<string, string[]>([
     "scripts/qa/g003-byte-budget.test.ts",
   ]],
   ["derived", ["scripts/qa/g2-derived-e2e.test.ts", "scripts/qa/g4-recall-companions.test.ts"]],
-  ["dynamics-replay", [
-    "scripts/qa/g003-dynamics-replay.test.ts",
-  ]],
+  ["dynamics-replay", ["scripts/qa/g003-policy-authority.test.ts"]],
   // Audit subset only: this selector does not certify semantic dispositions.
   ["extraction-dispositions", ["scripts/qa/g004-derived-pipeline.test.ts"]],
   ["generation-model-cutover", ["scripts/qa/g004-extraction-lifecycle.test.ts"]],

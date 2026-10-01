@@ -129,6 +129,96 @@ async function uploadPayload(client: RpcClient, record: SourceRecord): Promise<v
   if (object.hash !== hash || object.size !== bytes.length || object.media_type !== payload.media_type) throw pendingFailure("payload_mismatch");
 }
 
+interface State { pending: Pending | null; checkpoint: Checkpoint }
+/** The persisted pending record and checkpoint, created fresh when absent, with their cross-invariants checked. */
+async function openState(checkpointPath: string, pendingPath: string, sourceHash: string, incarnation: string): Promise<State> {
+  let pending: Pending | null;
+  try { pending = parsePending(JSON.parse(await readFile(pendingPath, "utf8"))); }
+  catch (error) { if (!hasCode(error, "ENOENT")) throw error; pending = null; }
+  let checkpoint: Checkpoint;
+  try { checkpoint = parseCheckpoint(JSON.parse(await readFile(checkpointPath, "utf8"))); }
+  catch (error) {
+    if (!hasCode(error, "ENOENT")) throw error;
+    if (pending) throw new Error("source_checkpoint_missing", { cause: error });
+    checkpoint = { version: 1, source_hash: sourceHash, data_incarnation: incarnation, next: 0, last: null };
+    await atomicJson(checkpointPath, checkpoint);
+  }
+  if (checkpoint.source_hash !== sourceHash) throw new Error("source_changed");
+  if (checkpoint.data_incarnation !== incarnation) throw new Error("incarnation_mismatch");
+  if ((checkpoint.next === 0) !== (checkpoint.last === null)) throw new Error("source_checkpoint_invalid");
+  if (pending && (pending.source_hash !== sourceHash ||
+    (pending.index !== checkpoint.next && pending.index !== checkpoint.next - 1) ||
+    !sameIdentity(pending.identity, deliveryIdentity(pending.params, checkpoint.data_incarnation)))) throw pendingFailure("invalid");
+  return { pending, checkpoint };
+}
+const pendingBody = (pending: Pending): string => canonical({ params: pending.params, ...(pending.payload === undefined ? {} : { payload: pending.payload }), ...(pending.context === undefined ? {} : { context: pending.context }) });
+
+/** One snapshot delivery: the pending record and checkpoint on disk, advanced one record at a time under the lease. */
+class Delivery {
+  pending: Pending | null; checkpoint: Checkpoint;
+  constructor(private readonly paths: { checkpoint: string; pending: string }, private readonly lease: Awaited<ReturnType<typeof acquireInstallation>>,
+    private readonly client: RpcClient, private readonly snapshot: SourceSnapshot, state: State) {
+    this.pending = state.pending; this.checkpoint = state.checkpoint;
+  }
+  private async retire(): Promise<void> {
+    await this.lease.assertOwned();
+    await rm(this.paths.pending);
+    await syncDirectory(dirname(this.paths.checkpoint));
+    this.pending = null;
+  }
+  private async reconcile(work: Pending, index: number): Promise<RpcIngestStatusResult | null> {
+    const result = await this.client.request("ingest.status", work.identity);
+    if (!daemonDisowns(result, work.identity)) return result;
+    await this.retire();
+    logEvent("info", "pending_retired", { reason: "daemon_unknown", index, identity: work.identity });
+    return null;
+  }
+  /** The record just before the resume point must be the committed checkpoint tail. */
+  private async verifyBoundary(next: number, identity: RpcIngestStatusParams): Promise<void> {
+    if (!this.checkpoint.last || !sameIdentity(this.checkpoint.last, identity)) throw new Error("source_checkpoint_invalid");
+    const result = await this.client.request("ingest.status", this.checkpoint.last);
+    if (!sameIdentity(result, this.checkpoint.last)) throw new Error("source_checkpoint_invalid");
+    if (result.state !== "committed") throw new Error(`source_checkpoint_${result.state}`);
+    if (this.pending && this.pending.index === next) await this.retire();
+  }
+  private async deliver(record: SourceRecord, next: number, identity: RpcIngestStatusParams): Promise<void> {
+    await this.snapshot.assertUnchanged();
+    const resolved = this.pending ? await this.reconcile(this.pending, next) : null;
+    if (!this.pending) {
+      this.pending = { version: 1, source_hash: this.snapshot.sourceHash, index: next, ...record, identity };
+      await this.lease.assertOwned();
+      await atomicJson(this.paths.pending, this.pending);
+    }
+    const pending = this.pending;
+    if (!resolved && pending.payload) await uploadPayload(this.client, pending);
+    const result = resolved ?? await this.client.request("remember", pending.params);
+    if (!sameIdentity(result, pending.identity)) throw pendingFailure("identity_mismatch");
+    if (result.state !== "committed") throw pendingFailure(result.state);
+    if (resolved) logEvent("info", "source_reconciled", { index: next, state: result.state, identity: pending.identity });
+    await this.snapshot.assertUnchanged();
+    this.checkpoint = { ...this.checkpoint, next: next + 1, last: pending.identity };
+    await this.lease.assertOwned();
+    await atomicJson(this.paths.checkpoint, this.checkpoint);
+    await this.retire();
+    logEvent("info", "source_checkpoint", { next: this.checkpoint.next, state: result.state });
+  }
+  async run(): Promise<void> {
+    const resumeNext = this.checkpoint.next;
+    let count = 0;
+    for await (const record of this.snapshot.records) {
+      const next = count++;
+      const identity = deliveryIdentity(record.params, this.checkpoint.data_incarnation);
+      if (this.pending && this.pending.index === next && pendingBody(this.pending) !== canonical(record)) throw pendingFailure("invalid");
+      if (next === resumeNext - 1) await this.verifyBoundary(next, identity);
+      if (next < resumeNext) continue;
+      await this.deliver(record, next, identity);
+    }
+    if (count < resumeNext) throw new Error("source_checkpoint_invalid");
+    if (this.pending) throw pendingFailure("invalid");
+    await this.snapshot.assertUnchanged();
+    logEvent("info", "source_complete", { next: this.checkpoint.next, source_hash: this.snapshot.sourceHash });
+  }
+}
 /** Durable pending (including normalized defaults/object body) -> confirmed
  * COMMIT -> durable checkpoint -> retire. Replay is bounded by the adapter and
  * validates the immutable anchor before reconciliation, never blind resends:
@@ -140,76 +230,8 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
   const lease = await acquireInstallation(resolve(checkpointPath) + ".lease");
   try {
     const snapshot = await prepare();
-    const { sourceHash } = snapshot;
     const status = await client.request("status", {});
-    let pending: Pending | null;
-    try { pending = parsePending(JSON.parse(await readFile(pendingPath, "utf8"))); }
-    catch (error) { if (!hasCode(error, "ENOENT")) throw error; pending = null; }
-    let checkpoint: Checkpoint;
-    try { checkpoint = parseCheckpoint(JSON.parse(await readFile(checkpointPath, "utf8"))); }
-    catch (error) {
-      if (!hasCode(error, "ENOENT")) throw error;
-      if (pending) throw new Error("source_checkpoint_missing", { cause: error });
-      checkpoint = { version: 1, source_hash: sourceHash, data_incarnation: status.data_incarnation, next: 0, last: null };
-      await atomicJson(checkpointPath, checkpoint);
-    }
-    if (checkpoint.source_hash !== sourceHash) throw new Error("source_changed");
-    if (checkpoint.data_incarnation !== status.data_incarnation) throw new Error("incarnation_mismatch");
-    if ((checkpoint.next === 0) !== (checkpoint.last === null)) throw new Error("source_checkpoint_invalid");
-    if (pending && (pending.source_hash !== sourceHash ||
-      (pending.index !== checkpoint.next && pending.index !== checkpoint.next - 1) ||
-      !sameIdentity(pending.identity, deliveryIdentity(pending.params, checkpoint.data_incarnation)))) throw pendingFailure("invalid");
-    const retire = async () => {
-      await lease.assertOwned();
-      await rm(pendingPath);
-      await syncDirectory(dirname(checkpointPath));
-      pending = null;
-    };
-    // Resolve a pending identity through ingest.status. A disowned identity is
-    // retired here and null is returned so the caller sends it as a first send.
-    const reconcile = async (work: Pending, index: number): Promise<RpcIngestStatusResult | null> => {
-      const result = await client.request("ingest.status", work.identity);
-      if (!daemonDisowns(result, work.identity)) return result;
-      await retire();
-      logEvent("info", "pending_retired", { reason: "daemon_unknown", index, identity: work.identity });
-      return null;
-    };
-    const resumeNext = checkpoint.next;
-    let count = 0;
-    for await (const record of snapshot.records) {
-      const next = count++;
-      const identity = deliveryIdentity(record.params, checkpoint.data_incarnation);
-      if (pending && pending.index === next && canonical({ params: pending.params, ...(pending.payload === undefined ? {} : { payload: pending.payload }), ...(pending.context === undefined ? {} : { context: pending.context }) }) !== canonical(record)) throw pendingFailure("invalid");
-      if (next === resumeNext - 1) {
-        if (!checkpoint.last || !sameIdentity(checkpoint.last, identity)) throw new Error("source_checkpoint_invalid");
-        const result = await client.request("ingest.status", checkpoint.last);
-        if (!sameIdentity(result, checkpoint.last)) throw new Error("source_checkpoint_invalid");
-        if (result.state !== "committed") throw new Error(`source_checkpoint_${result.state}`);
-        if (pending && pending.index === next) await retire();
-      }
-      if (next < resumeNext) continue;
-      await snapshot.assertUnchanged();
-      const resolved = pending ? await reconcile(pending, next) : null;
-      if (!pending) {
-        pending = { version: 1, source_hash: sourceHash, index: next, ...record, identity };
-        await lease.assertOwned();
-        await atomicJson(pendingPath, pending);
-      }
-      if (!resolved && pending.payload) await uploadPayload(client, pending);
-      const result = resolved ?? await client.request("remember", pending.params);
-      if (!sameIdentity(result, pending.identity)) throw pendingFailure("identity_mismatch");
-      if (result.state !== "committed") throw pendingFailure(result.state);
-      if (resolved) logEvent("info", "source_reconciled", { index: next, state: result.state, identity: pending.identity });
-      await snapshot.assertUnchanged();
-      checkpoint = { ...checkpoint, next: next + 1, last: pending.identity };
-      await lease.assertOwned();
-      await atomicJson(checkpointPath, checkpoint);
-      await retire();
-      logEvent("info", "source_checkpoint", { next: checkpoint.next, state: result.state });
-    }
-    if (count < resumeNext) throw new Error("source_checkpoint_invalid");
-    if (pending) throw pendingFailure("invalid");
-    await snapshot.assertUnchanged();
-    logEvent("info", "source_complete", { next: checkpoint.next, source_hash: sourceHash });
+    const state = await openState(checkpointPath, pendingPath, snapshot.sourceHash, status.data_incarnation);
+    await new Delivery({ checkpoint: checkpointPath, pending: pendingPath }, lease, client, snapshot, state).run();
   } finally { await lease.release(); }
 }

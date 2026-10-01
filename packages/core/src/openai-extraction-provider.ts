@@ -84,6 +84,47 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     this.fetch = options.fetch ?? globalThis.fetch;
   }
 
+  /** POST the request; any transport, non-2xx or unreadable body is provider_unavailable, a non-JSON body is an envelope mismatch. */
+  private async send(headers: Record<string, string>, body: string, signal: AbortSignal): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await this.fetch(this.endpoint, { method: "POST", headers, signal, redirect: "error", body });
+    } catch {
+      throw new OpenAiChatExtractionError("provider_unavailable");
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new OpenAiChatExtractionError("provider_unavailable");
+    }
+    let raw: string;
+    try { raw = await response.text(); }
+    catch { throw new OpenAiChatExtractionError("provider_unavailable"); }
+    let parsedBody: unknown;
+    try { parsedBody = JSON.parse(raw); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "envelope"); }
+    if (errorEnvelope.safeParse(parsedBody).success) {
+      const error = errorEnvelope.parse(parsedBody);
+      if (error.error.code === "upstream_quota_exhausted") throw new OpenAiChatExtractionError("provider_unavailable");
+    }
+    return parsedBody;
+  }
+  private anthropicReply(parsedBody: unknown): { content: string; incarnation: string } {
+    const parsed = anthropicEnvelope.safeParse(parsedBody);
+    if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
+    if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
+    const content = parsed.data.content[0]!.text.trim();
+    // Some Messages models append an explanation after their fenced JSON.
+    // Only unwrap a leading, complete fence; the JSON object stays strict.
+    const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```(?:\s+[\s\S]*)?$/i.exec(content);
+    return { content: fenced ? fenced[1]! : content, incarnation: parsed.data.model };
+  }
+  private chatReply(parsedBody: unknown): { content: string; incarnation: string } {
+    const parsed = responseEnvelope.safeParse(parsedBody);
+    if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
+    if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
+    return { content: parsed.data.choices[0]!.message.content, incarnation: `${parsed.data.model}:${parsed.data.system_fingerprint ?? "nofp"}` };
+  }
+
   async extract(input: ExtractionProviderInput): Promise<unknown> {
     const signal = AbortSignal.timeout(this.timeoutMs);
     const headers: Record<string, string> = {
@@ -113,46 +154,8 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
       temperature: 0,
     });
 
-    let response: Response;
-    try {
-      response = await this.fetch(this.endpoint, { method: "POST", headers, signal, redirect: "error", body });
-    } catch {
-      throw new OpenAiChatExtractionError("provider_unavailable");
-    }
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new OpenAiChatExtractionError("provider_unavailable");
-    }
-
-    let raw: string;
-    try { raw = await response.text(); }
-    catch { throw new OpenAiChatExtractionError("provider_unavailable"); }
-    let parsedBody: unknown;
-    try { parsedBody = JSON.parse(raw); }
-    catch { throw new OpenAiChatExtractionError("provider_mismatch", "envelope"); }
-    if (errorEnvelope.safeParse(parsedBody).success) {
-      const error = errorEnvelope.parse(parsedBody);
-      if (error.error.code === "upstream_quota_exhausted") throw new OpenAiChatExtractionError("provider_unavailable");
-    }
-    let content: string;
-    let incarnation: string;
-    if (this.dialect === "anthropic_messages") {
-      const parsed = anthropicEnvelope.safeParse(parsedBody);
-      if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
-      if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
-      content = parsed.data.content[0]!.text.trim();
-      // Some Messages models append an explanation after their fenced JSON.
-      // Only unwrap a leading, complete fence; the JSON object stays strict.
-      const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```(?:\s+[\s\S]*)?$/i.exec(content);
-      if (fenced) content = fenced[1]!;
-      incarnation = parsed.data.model;
-    } else {
-      const parsed = responseEnvelope.safeParse(parsedBody);
-      if (!parsed.success) throw new OpenAiChatExtractionError("provider_mismatch", "envelope");
-      if (!reportedModelMatches(this.model, parsed.data.model)) throw new OpenAiChatExtractionError("provider_mismatch", "model");
-      content = parsed.data.choices[0]!.message.content;
-      incarnation = `${parsed.data.model}:${parsed.data.system_fingerprint ?? "nofp"}`;
-    }
+    const parsedBody = await this.send(headers, body, signal);
+    const { content, incarnation } = this.dialect === "anthropic_messages" ? this.anthropicReply(parsedBody) : this.chatReply(parsedBody);
     let output: unknown;
     try { output = JSON.parse(content); }
     catch { throw new OpenAiChatExtractionError("provider_mismatch", "json"); }

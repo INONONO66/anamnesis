@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { once } from "node:events";
@@ -131,7 +131,12 @@ test("real Node/UDS policy set/revoke, receipt feedback, expiry, changed policy,
   let clock = Date.now();
   // Privileged server-side issuance only. No public recall/issue RPC is claimed.
   const engine = new Engine({ ...options, objectsRoot: root + "/objects", clock: () => clock });
-  const child = spawn("node", ["dist/anamnesis-daemon.mjs"], { env: { ...process.env, ANAMNESIS_NEO4J_URI: uri, ANAMNESIS_NEO4J_PASSWORD: password, ANAMNESIS_RUNTIME_ROOT: root, ANAMNESIS_RUNTIME_TOKEN: "fixture-installation-token" }, stdio: ["ignore", "pipe", "pipe"] });
+  // The daemon under test is bundled from the current sources; the checkout's dist/ is stale or absent.
+  const built = await Bun.build({ entrypoints: ["app/anamnesis/main.ts"], target: "node", outdir: root + "/dist", naming: "[name].mjs" });
+  if (!built.success) throw new AggregateError(built.logs, "daemon bundle build failed");
+  // config.ts resolves the extraction prompts beside the bundle, as build:runtime ships them.
+  await cp("app/anamnesis/prompts", root + "/dist/prompts", { recursive: true });
+  const child = spawn("node", [root + "/dist/main.mjs"], { env: { ...process.env, ANAMNESIS_NEO4J_URI: uri, ANAMNESIS_NEO4J_PASSWORD: password, ANAMNESIS_RUNTIME_ROOT: root, ANAMNESIS_RUNTIME_TOKEN: "fixture-installation-token" }, stdio: ["ignore", "pipe", "pipe"] });
   const exited = once(child, "exit");
   const lines = createInterface({ input: child.stdout });
   child.stderr.on("data", bytes => console.error(bytes.toString()));

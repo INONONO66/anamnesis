@@ -5,6 +5,7 @@ import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { Engine } from "./engine.ts";
+import { modelTaskRetryDelayMs } from "./backoff.ts";
 import { ExtractionScheduler } from "./extraction-scheduler.ts";
 import { ExtractionProviderError, type ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
@@ -55,13 +56,23 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
   const remember = (content: string) => engine.remember({ content, time: { value: "2026-09-10T00:00:00Z", precision: "day" as const },
     origin: { source: root, session: root, actor: "user", record: String(++record) }, source_revision: "v1", expected_previous_revision_key: null },
     { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context });
-  /** Turns until the lane is idle with the cursor at `target`, awaiting the real in-flight promises between turns. */
+  /** Moves the shared clock past every failed task's retry backoff (the persisted schedule, not the lane's timer). */
+  const elapseBackoff = async () => {
+    const failed = (await query("MATCH (t:ModelTask) RETURN t.body AS body")).map(row => JSON.parse(String(row.body)) as { state: string; attempts: number; updated_at: number })
+      .filter(task => task.state === "failed");
+    if (failed.length === 0) return;
+    const due = Math.max(...failed.map(task => task.updated_at + modelTaskRetryDelayMs(task.attempts)));
+    offset = Math.max(offset, due - Date.now() + 1);
+  };
+  /** Turns until the lane is idle with the cursor at `target`, awaiting the real in-flight promises between turns; a failed
+   * attempt's retry backoff elapses between turns. */
   const settle = async (target: number, budget = 12) => {
     let status = scheduler.status();
     for (let turns = 0; turns < budget; turns++) {
       await Promise.allSettled([...(scheduler as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()]);
       await scheduler.turn();
       await Promise.allSettled([...(scheduler as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()]);
+      await elapseBackoff();
       status = scheduler.status();
       if (status.state !== "starting" && status.covered_ingest_seq === target && status.in_flight === 0) break;
     }

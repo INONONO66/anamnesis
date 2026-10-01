@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ClaimSubKind, EPISODE_SCHEMAS, SCHEMA_ID } from "./element.ts";
+import { EchoLineage } from "./episode-lineage.ts";
 import { canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 const id = z.uuidv7();
@@ -94,21 +95,9 @@ export const SemanticClaimBatch = z.strictObject({ claims: z.array(SemanticClaim
 
 const role = z.enum(["user", "assistant", "tool", "document", "operator"]);
 const speaker = z.strictObject({ origin_source: utf8(256), origin_actor: utf8(256) });
-const lineage = z.strictObject({
-  episode_id: id, lineage_mode: z.enum(["direct", "receipts"]),
-  parent_recall_ids: ordered(id, 4), context_digests: z.array(hash).max(4),
-  root_episode_ids: ordered(id, 16), echo_depth: count.max(8), complete: z.boolean(),
-}).superRefine((v, ctx) => {
-  if (v.parent_recall_ids.length !== v.context_digests.length
-    || (v.lineage_mode === "direct" && (v.parent_recall_ids.length !== 0 || v.echo_depth !== 0 || !v.complete
-      || v.root_episode_ids.length !== 1 || v.root_episode_ids[0] !== v.episode_id))
-    || (v.lineage_mode === "receipts" && (v.parent_recall_ids.length === 0 || v.echo_depth === 0))
-    || (v.complete && v.root_episode_ids.length === 0))
-    ctx.addIssue({ code: "custom", message: "invalid retained lineage" });
-});
 const provenance = z.discriminatedUnion("episode_digest_version", [
   z.strictObject({ episode_digest_version: z.literal(1), origin_role: role.nullable(), lineage: z.null(), lineage_digest: z.null() }),
-  z.strictObject({ episode_digest_version: z.literal(2), origin_role: role, lineage, lineage_digest: hash }),
+  z.strictObject({ episode_digest_version: z.literal(2), origin_role: role, lineage: EchoLineage, lineage_digest: hash }),
 ]);
 /** Application-only trust input: load from immutable retained Episode/lineage
  * and bounded L3 results. Never deserialize this from a model or public RPC.
@@ -134,33 +123,41 @@ export class SemanticClaimValidationError extends Error {
 }
 function fail(code: SemanticClaimValidationError["code"]): never { throw new SemanticClaimValidationError(code); }
 
-/** Pure W2 + static W1 prerequisite. This is intentionally not materialization
- * permission: review, policy/head/candidate revalidation and write fencing remain
- * separate. Known-echo classification is reserved for L4 exact-delivery review. */
-export function validateSemanticClaim(input: unknown, retainedContext: unknown) {
+type Claim = ReturnType<typeof SemanticClaim.parse>;
+type Context = ReturnType<typeof SemanticSourceContext.parse>;
+type Source = Context["episode"];
+type Ancestry = Extract<Source["provenance"], { episode_digest_version: 2 }>;
+type Locus = { start: number; end: number; text: string };
+
+function parseContract(input: unknown, retainedContext: unknown): { claim: Claim; context: Context } {
   // Validate the JSON domain before Zod can strip undefined values or invoke accessors.
   try { canonicalExtractionBody(input); canonicalExtractionBody(retainedContext); }
   catch { fail("invalid_contract"); }
   const parsedClaim = SemanticClaim.safeParse(input);
   const parsedSource = SemanticSourceContext.safeParse(retainedContext);
   if (!parsedClaim.success || !parsedSource.success) fail("invalid_contract");
-  const claim = parsedClaim.data;
-  const context = parsedSource.data;
-  const source = context.episode;
+  return { claim: parsedClaim.data, context: parsedSource.data };
+}
+/** The version-2 provenance, narrowed so callers keep non-null role and lineage digest. */
+function checkLineage(source: Source): Ancestry {
   if (sha256(source.content) !== source.content_digest) fail("source_digest_mismatch");
   const origin = source.provenance;
   if (origin.episode_digest_version === 1) fail("echo_lineage_unavailable");
   const ancestry = origin.lineage;
-  if (ancestry.episode_id !== source.id || extractionBodyDigest(ancestry) !== origin.lineage_digest)
-    fail("lineage_mismatch");
+  if (ancestry.episode_id !== source.id || extractionBodyDigest(ancestry) !== origin.lineage_digest) fail("lineage_mismatch");
   if (!ancestry.complete) fail("echo_lineage_unavailable");
   if (ancestry.lineage_mode === "receipts" && ancestry.root_episode_ids.includes(source.id)) fail("lineage_mismatch");
+  return origin;
+}
+function checkTime(claim: Claim, source: Source): void {
   if (claim.content_language !== source.content_language) fail("language_policy_mismatch");
-  if (claim.time.resolution !== "explicit" && claim.time.anchor_time_utc !== source.time.time_utc)
-    fail("time_resolution_mismatch");
+  if (claim.time.resolution !== "explicit" && claim.time.anchor_time_utc !== source.time.time_utc) fail("time_resolution_mismatch");
   if (claim.time.resolution === "inherited" && (claim.time.time_utc !== source.time.time_utc || claim.time.time_value !== source.time.time_value))
     fail("time_resolution_mismatch");
-
+}
+/** Every mention resolves through the retained resolutions and every key the claim scopes over is a resolved entity. */
+function resolveEntityIds(claim: Claim, context: Context): string[] {
+  const source = context.episode;
   const resolutions = new Map(context.entity_resolutions.map(e => [e.mention, e]));
   if (resolutions.size !== context.entity_resolutions.length) fail("entity_resolution_mismatch");
   for (const ref of claim.entities) {
@@ -174,32 +171,47 @@ export function validateSemanticClaim(input: unknown, retainedContext: unknown) 
   const entityIds = [...new Set(claim.entities.flatMap(e => e.entity_id === null ? [] : [e.entity_id]))].sort(bytesCompare);
   for (const key of [...claim.subject_keys ?? [], ...claim.scope.object_keys, ...claim.scope.location_keys])
     if (!entityIds.includes(key)) fail("entity_resolution_mismatch");
+  return entityIds;
+}
+function checkAttribution(claim: Claim, context: Context): void {
   const attributionKeys = context.attribution_speakers.map(s => extractionBodyDigest(s));
   if (new Set(attributionKeys).size !== attributionKeys.length
     || claim.scope.attribution_speaker_keys.some(k => !attributionKeys.includes(k))) fail("entity_resolution_mismatch");
-
-  let locus: { start: number; end: number; text: string } | null = null;
+}
+function locateEvidence(claim: Claim, context: Context): Locus | null {
   if (claim.evidence.kind === "no_single_locus") {
     if (!context.allow_no_single_locus) fail("no_single_locus_disallowed");
-  } else {
-    const bytes = Buffer.from(source.content, "utf8");
-    let selected = claim.evidence.span;
-    const quote = claim.evidence.quote;
-    if (!selected && quote !== undefined) {
-      const needle = Buffer.from(quote, "utf8");
-      const start = bytes.indexOf(needle);
-      if (start < 0 || bytes.indexOf(needle, start + 1) !== -1) fail("evidence_mismatch");
-      selected = { start, end: start + needle.length };
-    }
-    if (!selected || selected.end > bytes.length) fail("evidence_mismatch");
-    const slice = bytes.subarray(selected.start, selected.end);
-    // Fatal decoding rejects split UTF-8 code points; preserve a literal BOM too.
-    let text: string;
-    try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(slice); }
-    catch { fail("evidence_mismatch"); }
-    if (quote !== undefined && text !== quote) fail("evidence_mismatch");
-    locus = { ...selected, text };
+    return null;
   }
+  const bytes = Buffer.from(context.episode.content, "utf8");
+  let selected = claim.evidence.span;
+  const quote = claim.evidence.quote;
+  if (!selected && quote !== undefined) {
+    const needle = Buffer.from(quote, "utf8");
+    const start = bytes.indexOf(needle);
+    if (start < 0 || bytes.indexOf(needle, start + 1) !== -1) fail("evidence_mismatch");
+    selected = { start, end: start + needle.length };
+  }
+  if (!selected || selected.end > bytes.length) fail("evidence_mismatch");
+  const slice = bytes.subarray(selected.start, selected.end);
+  // Fatal decoding rejects split UTF-8 code points; preserve a literal BOM too.
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(slice); }
+  catch { fail("evidence_mismatch"); }
+  if (quote !== undefined && text !== quote) fail("evidence_mismatch");
+  return { ...selected, text };
+}
+
+/** Pure W2 + static W1 prerequisite. This is intentionally not materialization
+ * permission: review, policy/head/candidate revalidation and write fencing remain
+ * separate. Known-echo classification is reserved for L4 exact-delivery review. */
+export function validateSemanticClaim(input: unknown, retainedContext: unknown) {
+  const { claim, context } = parseContract(input, retainedContext);
+  const source = context.episode, origin = checkLineage(source), ancestry = origin.lineage;
+  checkTime(claim, source);
+  const entityIds = resolveEntityIds(claim, context);
+  checkAttribution(claim, context);
+  const locus = locateEvidence(claim, context);
   const speakerKey = source.speaker === null ? null : extractionBodyDigest(source.speaker);
   const time = { time_utc: claim.time.time_utc, time_precision: claim.time.time_precision };
   const properties = { speaker_key: speakerKey, subject_keys: claim.subject_keys,

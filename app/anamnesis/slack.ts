@@ -5,12 +5,12 @@ import { basename, join, relative, resolve } from "node:path";
 import { RPC_LIMITS, RpcRememberParams } from "@anamnesis/protocol";
 import { isSlackSlop, parseSlackMessage, slackEpisode } from "@anamnesis/backfill";
 import { fingerprint, sha, textLines } from "./source-files.ts";
-import { ingestSnapshot, sourceRevisionKey, type SourceRecord } from "./source.ts";
+import { ingestSnapshot, type SourceRecord } from "./source.ts";
 import { RpcClient } from "./client.ts";
+import { Revisions } from "./raw-lane.ts";
 
 const MAX_FILES = 2048;
 const MAX_ENTRIES = 8192;
-const MAX_REVISIONS = 100_000;
 const MAX_INDEX_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
 const unicode = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
@@ -20,10 +20,10 @@ async function fileInfo(path: string) {
   return info;
 }
 interface Tree { files: string[]; fingerprints: Map<string, string>; }
-async function sourceFiles(root: string, checkpoint: string): Promise<Tree> {
-  if (!(await fileInfo(root)).isDirectory()) throw new Error("source_not_directory");
-  const files = ["index.jsonl"], fingerprints = new Map<string, string>();
-  let entries = 0, bytes = 0;
+/** index.jsonl first, then every channels/ and threads/ export in code-unit order; the two directories are fingerprinted. */
+async function listExportFiles(root: string, fingerprints: Map<string, string>): Promise<string[]> {
+  const files = ["index.jsonl"];
+  let entries = 0;
   for (const dir of ["channels", "threads"]) {
     const path = join(root, dir), info = await fileInfo(path);
     if (!info.isDirectory()) throw new Error(`source_not_directory: ${dir}`);
@@ -38,6 +38,13 @@ async function sourceFiles(root: string, checkpoint: string): Promise<Tree> {
     }
     files.push(...names.sort().map(name => join(dir, name)));
   }
+  return files;
+}
+async function sourceFiles(root: string, checkpoint: string): Promise<Tree> {
+  if (!(await fileInfo(root)).isDirectory()) throw new Error("source_not_directory");
+  const fingerprints = new Map<string, string>();
+  const files = await listExportFiles(root, fingerprints);
+  let bytes = 0;
   for (const name of files) {
     const path = join(root, name);
     if ([checkpoint, checkpoint + ".pending.json"].some(cp => resolve(cp) === path)) throw new Error("source_checkpoint_path_conflict");
@@ -56,6 +63,29 @@ async function sourceFiles(root: string, checkpoint: string): Promise<Tree> {
 function channelId(path: string): string {
   const name = basename(path, ".jsonl");
   return path.startsWith("channels/") ? name : name.split("-")[0]!;
+}
+
+/** Revision admission; a rejected re-parse (occurrence suffix or predecessor key) is an invalid record, chain errors pass through. */
+function admitSlack(revisions: Revisions, base: RpcRememberParams, at: string): { params: RpcRememberParams; native: string } {
+  try { return revisions.admit(base, false, at); }
+  catch (cause) { if (!(cause instanceof Error && cause.name === "ZodError")) throw cause; throw new Error(`source_invalid_record: ${at}`, { cause }); }
+}
+/** One export line as remember params, with the oversized body kept aside; null for slop and empty turns. Throws on malformed input. */
+function slackRecord(text: string, channel: string, channelName: string): { base: RpcRememberParams; body: Buffer | undefined } | null {
+  const parsed = parseSlackMessage(text);
+  if (isSlackSlop(parsed)) return null;
+  const { input } = slackEpisode(parsed, channel, channelName);
+  if (!input.content) return null;
+  if (!unicode.test(input.content)) throw new Error("malformed Unicode");
+  let content = input.content, body: Buffer | undefined;
+  if (Buffer.byteLength(content) > RPC_LIMITS.content_bytes) {
+    body = Buffer.from(content);
+    let end = RPC_LIMITS.content_bytes;
+    while ((body[end]! & 0xc0) === 0x80) end--;
+    content = body.subarray(0, end).toString("utf8");
+  }
+  const base = RpcRememberParams.parse({ episode: { schema: input.schema, time: input.time, content, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...(body ? { payload_hash: sha(body) } : {}) });
+  return { base, body };
 }
 
 /** Producer-sealed export only. Physical file/line order defines observed
@@ -88,43 +118,17 @@ export async function ingestSlack(root: string, checkpoint: string, client: RpcC
     }
     manifest.push({ file: "index.jsonl", sha256: indexHash.digest("hex") });
     async function* records(validating = false): AsyncGenerator<SourceRecord> {
-      const heads = new Map<string, { native: string; revision: string; key: string; previous: string | null; signature: string }>();
-      const seen = new Set<string>();
-      let ordinal = 0;
+      const revisions = new Revisions();
       for (const name of initial.files.slice(1)) {
         const channel = channelId(name), hash = createHash("sha256");
         for await (const { text, line } of textLines(root, name, initial.fingerprints.get(name)!, hash, { ignoreBOM: true })) {
           if (!text.trim()) continue;
-          let base: RpcRememberParams, body: Buffer | undefined;
-          try {
-            const parsed = parseSlackMessage(text);
-            if (isSlackSlop(parsed)) continue;
-            const { input } = slackEpisode(parsed, channel, names.get(channel) ?? channel);
-            if (!input.content) continue;
-            if (!unicode.test(input.content)) throw new Error("malformed Unicode");
-            let content = input.content;
-            if (Buffer.byteLength(content) > RPC_LIMITS.content_bytes) {
-              body = Buffer.from(content);
-              let end = RPC_LIMITS.content_bytes;
-              while ((body[end]! & 0xc0) === 0x80) end--;
-              content = body.subarray(0, end).toString("utf8");
-            }
-            base = RpcRememberParams.parse({ episode: { schema: input.schema, time: input.time, content, origin: input.origin, properties: input.properties }, source_revision: input.source_revision, expected_previous_revision_key: null, ...(body ? { payload_hash: sha(body) } : {}) });
-          } catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
-          ordinal++;
-          const native = base.source_revision, origin = sha(JSON.stringify(base.episode.origin));
-          const signature = sha(JSON.stringify(base)), head = heads.get(origin), duplicate = head?.native === native;
-          if (duplicate && head.signature !== signature) throw new Error(`source_revision_conflict: ${name}:${line}`);
-          const seenKey = sha(JSON.stringify([origin, native]));
-          const revision = duplicate ? head.revision : seen.has(seenKey) ? `${native}:occurrence:${ordinal}` : native;
-          let params: RpcRememberParams;
-          try { params = RpcRememberParams.parse({ ...base, source_revision: revision, expected_previous_revision_key: duplicate ? head.previous : head?.key ?? null }); }
+          let admitted: { base: RpcRememberParams; body: Buffer | undefined } | null;
+          try { admitted = slackRecord(text, channel, names.get(channel) ?? channel); }
           catch (cause) { throw new Error(`source_invalid_record: ${name}:${line}`, { cause }); }
-          if (!duplicate) {
-            if (seen.size >= MAX_REVISIONS || heads.size >= MAX_REVISIONS) throw new Error("source_revision_limit");
-            seen.add(seenKey);
-            heads.set(origin, { native, revision, key: sourceRevisionKey(params), previous: params.expected_previous_revision_key, signature });
-          }
+          if (!admitted) continue;
+          const { base, body } = admitted;
+          const { params, native } = admitSlack(revisions, base, `${name}:${line}`);
           yield { params, context: { file: name, line, native_source_revision: native }, ...(body ? { payload: { bytes_b64: body.toString("base64"), media_type: "text/plain" } } : {}) };
         }
         const digest = hash.digest("hex");

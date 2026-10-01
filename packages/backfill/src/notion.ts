@@ -1,3 +1,4 @@
+import { byEpisodeTime } from "./pi-session.ts";
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -69,11 +70,5 @@ export async function collectNotion(root: string): Promise<NotionEpisode[]> {
     const info = await stat(path);
     episodes.push(notionEpisode(root, path, raw, info.mtime));
   }
-  return episodes.sort((a, b) => {
-    const at = a.input.time?.value ?? "";
-    const bt = b.input.time?.value ?? "";
-    return at === bt
-      ? a.input.origin.record.localeCompare(b.input.origin.record)
-      : at.localeCompare(bt);
-  });
+  return episodes.sort(byEpisodeTime);
 }

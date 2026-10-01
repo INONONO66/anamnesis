@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { retention, initialStability, adopt, replay } from "./retention.ts";
 import { attributeOutcome, utility, normalizedRrf } from "./ranking.ts";
 import { countBudget, validateBudget } from "./budget.ts";
-import { solvePpr } from "./ppr.ts";
+import { exportFixedCsr, solveFixedCsr, solvePpr } from "./ppr.ts";
 import type { PprInput } from "./ppr.ts";
 
 describe("retention", () => {
@@ -45,6 +45,29 @@ describe("budget", () => {
 });
 
 describe("PPR", () => {
+  test("fixed CSR export is caller-order independent and solves like the arc form", () => {
+    const arcs = [{ from: "b", to: "a", role: "Y", id: "2" }, { from: "a", to: "b", role: "X", id: "1" }, { from: "a", to: "c", role: "X", id: "3" }];
+    const csr = exportFixedCsr({ nodes: ["c", "a", "b"], arcs });
+    expect(csr).toEqual({ nodes: ["a", "b", "c"], offsets: [0, 2, 3, 3], targets: [1, 2, 0], roles: ["X", "X", "Y"] });
+    expect(exportFixedCsr({ nodes: ["a", "b", "c"], arcs: [...arcs].reverse() })).toEqual(csr);
+    const seeds = new Map([["a", 1]]), roleWeights = { X: 1, Y: 2 };
+    const direct = solvePpr({ nodes: ["a", "b", "c"], arcs, seeds, roleWeights });
+    const viaCsr = solveFixedCsr(csr, seeds, { roleWeights });
+    expect(viaCsr.iterations).toBe(direct.iterations);
+    for (const [i, value] of direct.values.entries()) expect(viaCsr.values[i]).toBeCloseTo(value, 12);
+  });
+  test("fixed CSR rejects malformed graphs and snapshots", () => {
+    expect(() => exportFixedCsr({ nodes: ["a", "a"], arcs: [] })).toThrow(RangeError);
+    for (const arc of [{ from: "a", to: "z", role: "X", id: "1" }, { from: "z", to: "a", role: "X", id: "1" }, { from: "a", to: "a", role: "", id: "1" },
+      { from: "a", to: "a", role: "X", id: "" }, { from: "a", to: "a", role: "X", id: "1", weight: 1 }]) {
+      expect(() => exportFixedCsr({ nodes: ["a"], arcs: [arc] })).toThrow(RangeError);
+    }
+    const csr = exportFixedCsr({ nodes: ["a", "b"], arcs: [{ from: "a", to: "b", role: "X", id: "1" }] });
+    for (const broken of [{ offsets: [0, 1] }, { offsets: [1, 1, 1] }, { offsets: [0, 2, 1] }, { offsets: [0, 0.5, 1] }, { offsets: [0, 0, 0] }, { targets: [2] }, { targets: [-1] },
+      { roles: [""] }, { roles: ["X", "Y"] }]) {
+      expect(() => solveFixedCsr({ ...csr, ...broken }, new Map([["a", 1]]))).toThrow(RangeError);
+    }
+  });
   test("dangling singleton and normalized parallel rows", () => {
     const one = solvePpr({ nodes: ["a"], arcs: [], seeds: new Map([["a", 2]]) });
     expect(one.values[0]).toBe(1); expect(one.mass).toBeCloseTo(1);

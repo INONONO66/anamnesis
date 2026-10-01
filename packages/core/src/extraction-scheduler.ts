@@ -111,7 +111,15 @@ export class ExtractionScheduler {
       RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,t.body AS task ORDER BY seq LIMIT ${COVERAGE_STEP}`,
       { from: generation.covered_ingest_seq, generation: generation.id });
     this.live = rows[0]?.live ?? generation.covered_ingest_seq;
-    // Contiguous terminal prefix beyond the cursor; behind it, start whatever is neither settled nor in flight.
+    const { prefix, open } = this.scanWindow(generation, rows);
+    if (prefix > generation.covered_ingest_seq) await this.advanceCoverage(generation, rows, prefix);
+    if (generation.state === "catching_up" && generation.covered_ingest_seq === this.live && this.inFlight.size === 0 && !await this.tryCutover(generation)) return "more";
+    if (this.inFlight.size) return "waiting";
+    // A full window that sealed completely may hide more terminal work behind it.
+    return open && rows.length === COVERAGE_STEP && generation.covered_ingest_seq < this.live ? "more" : "idle";
+  }
+  /** Contiguous terminal prefix beyond the cursor; behind it, start whatever is neither settled nor in flight. */
+  private scanWindow(generation: Generation, rows: ScanRow[]): { prefix: number; open: boolean } {
     let prefix = generation.covered_ingest_seq, open = true;
     for (const row of rows) {
       if (row.id === null || row.seq === null) break;
@@ -121,26 +129,25 @@ export class ExtractionScheduler {
       if (this.inFlight.has(key) || this.outcomes.has(key) || this.inFlight.size >= this.maxInFlight) continue;
       this.start(generation, key, row.id, row.task);
     }
-    if (prefix > generation.covered_ingest_seq) {
-      await this.cover(generation, prefix);
-      for (const row of rows) if (row.seq !== null && row.seq <= prefix) this.outcomes.delete(`${generation.id}:${row.id}`);
-      generation.covered_ingest_seq = prefix;
+    return { prefix, open };
+  }
+  private async advanceCoverage(generation: Generation, rows: ScanRow[], prefix: number): Promise<void> {
+    await this.cover(generation, prefix);
+    for (const row of rows) if (row.seq !== null && row.seq <= prefix) this.outcomes.delete(`${generation.id}:${row.id}`);
+    generation.covered_ingest_seq = prefix;
+  }
+  /** False when an Episode committed between the scan and the cutover; the next turn covers it first. */
+  private async tryCutover(generation: Generation): Promise<boolean> {
+    await this.cover(generation, generation.covered_ingest_seq); // Both partitions must exist, even when nothing was ever covered.
+    const selection = await this.engine.readExtractionSelection(this.context);
+    try {
+      this.generation = await this.engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id,
+        expected_selector_version: selection.selector_version }, this.context);
+      return true;
+    } catch (error) {
+      if (!(error instanceof GenerationReadinessError && error.code === "coverage_incomplete")) throw error;
+      return false;
     }
-    if (generation.state === "catching_up" && generation.covered_ingest_seq === this.live && this.inFlight.size === 0) {
-      await this.cover(generation, generation.covered_ingest_seq); // Both partitions must exist, even when nothing was ever covered.
-      const selection = await this.engine.readExtractionSelection(this.context);
-      try {
-        this.generation = await this.engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id,
-          expected_selector_version: selection.selector_version }, this.context);
-      } catch (error) {
-        // An Episode committed between the scan and the cutover; the next turn covers it first.
-        if (!(error instanceof GenerationReadinessError && error.code === "coverage_incomplete")) throw error;
-        return "more";
-      }
-    }
-    if (this.inFlight.size) return "waiting";
-    // A full window that sealed completely may hide more terminal work behind it.
-    return open && rows.length === COVERAGE_STEP && generation.covered_ingest_seq < this.live ? "more" : "idle";
   }
 
   /** The active generation, else the one catching up, else a fresh catching_up generation for this provider. */
