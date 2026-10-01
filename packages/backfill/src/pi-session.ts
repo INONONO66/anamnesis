@@ -26,6 +26,10 @@ export interface RawSessionEpisode {
 export function optionalText(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
 }
+/** A string that parses as a time; a torn or non-string time is skipped like an invalid database row, not thrown from toEpisode. */
+function optionalTime(value: unknown): string | undefined {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : undefined;
+}
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -54,8 +58,9 @@ export function parseEvent(line: string): RawEvent | undefined {
   if (!isRecord(raw)) return undefined;
   const type = optionalText(raw["type"]);
   const id = optionalText(raw["id"]);
-  const timestamp = optionalText(raw["timestamp"]);
-  if (type === undefined || id === undefined || timestamp === undefined) return undefined;
+  const timestamp = optionalTime(raw["timestamp"]);
+  // A missing type falls through the two type checks below.
+  if (id === undefined || timestamp === undefined) return undefined;
   if (type === "compaction") {
     const summary = optionalText(raw["summary"]);
     return summary === undefined || summary.trim() === "" ? undefined : { type, id, timestamp, text: summary };

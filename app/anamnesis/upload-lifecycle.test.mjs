@@ -5,6 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+// The pure suite runs this under bun, which executes ./objects.ts directly; plain Node needs UPLOAD_BUNDLE_ROOT pointing at a built upload-module.mjs.
 const { Uploads } = await import(process.env.UPLOAD_BUNDLE_ROOT ? pathToFileURL(resolve(process.env.UPLOAD_BUNDLE_ROOT, 'upload-module.mjs')).href : new URL('./objects.ts', import.meta.url).href);
 const HOUR = 3_600_000, MiB = 1024 * 1024;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');

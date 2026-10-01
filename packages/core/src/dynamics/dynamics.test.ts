@@ -63,7 +63,7 @@ describe("PPR", () => {
       expect(() => exportFixedCsr({ nodes: ["a"], arcs: [arc] })).toThrow(RangeError);
     }
     const csr = exportFixedCsr({ nodes: ["a", "b"], arcs: [{ from: "a", to: "b", role: "X", id: "1" }] });
-    for (const broken of [{ offsets: [0, 1] }, { offsets: [1, 1, 1] }, { offsets: [0, 2, 1] }, { offsets: [0, 0.5, 1] }, { targets: [2] }, { targets: [-1] },
+    for (const broken of [{ offsets: [0, 1] }, { offsets: [1, 1, 1] }, { offsets: [0, 2, 1] }, { offsets: [0, 0.5, 1] }, { offsets: [0, 0, 0] }, { targets: [2] }, { targets: [-1] },
       { roles: [""] }, { roles: ["X", "Y"] }]) {
       expect(() => solveFixedCsr({ ...csr, ...broken }, new Map([["a", 1]]))).toThrow(RangeError);
     }

@@ -25,8 +25,8 @@ test("timing log numbers events, hashes string ids and rotates into one older se
   assert.equal((await fs.stat(path)).mode & 0o777, 0o600);
   for (let i = 0; i < 4; i++) sink({ layer: "daemon", event: "tick", operation: "x".repeat(300) });
   const kept = [...await events(path + ".1"), ...await events(path)].map(event => event.eventSequence);
-  assert.ok(kept.length < 6 && kept.length >= 2, "rotation dropped the oldest segment");
-  assert.deepEqual(kept, Array.from({ length: kept.length }, (_, i) => 7 - kept.length + i));
+  // Each tick line is ~434 bytes against the 1024 budget: 4 and 5 share the rotated segment, 6 opened the current one.
+  assert.deepEqual(kept, [4, 5, 6]);
   assert.throws(() => sink({ layer: "daemon", event: "huge", operation: "y".repeat(1024) }), /exceeds segment budget/);
 }));
 

@@ -334,6 +334,14 @@ test("installation lease: a dead owner is taken over, a live owner and a foreign
     await assert.rejects(acquireInstallation(root), /invalid owner lease/);
     await assert.rejects(fs.lstat(recovery), { code: "ENOENT" });
 
+    // The recovery directory is the takeover lock: while another takeover holds it, a dead owner's lease stays put.
+    await fs.writeFile(ownerPath, JSON.stringify({ pid: 2147483647, nonce: "stale" }));
+    await fs.mkdir(recovery, { mode: 0o700 });
+    await assert.rejects(acquireInstallation(root), { code: "EEXIST" });
+    assert.deepEqual(JSON.parse(await fs.readFile(ownerPath, "utf8")), { pid: 2147483647, nonce: "stale" });
+    await fs.rm(recovery, { recursive: true });
+    await (await acquireInstallation(root)).release();
+
     const link = join(root, "link");
     await fs.symlink(root, link);
     await assert.rejects(acquireInstallation(link), /directory owned by the current user/);

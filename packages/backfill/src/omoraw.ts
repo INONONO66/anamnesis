@@ -4,8 +4,6 @@ import { createInterface } from "node:readline";
 import { Database } from "bun:sqlite";
 import { CONVERSATION_ROLES, SESSION_HEADER, byEpisodeTime, createSessionParser, isRecord, messageText, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
 
-/** Beyond this the transcript turn lives in the object store, not the node. */
-
 /**
  * The snapshot holds two homes side by side — the agent's own `~/.omo` store
  * and the per-project `.omo` directories checked out under `~/Develop` — so

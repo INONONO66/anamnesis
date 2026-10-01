@@ -4,8 +4,6 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { byEpisodeTime, createSessionParser, isRecord, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
 
-/** Beyond this the transcript turn lives in the object store, not the node. */
-
 /**
  * The raw store keeps one session per file under a per-workspace directory,
  * and subagent transcripts nest one level deeper beside their parent's tool

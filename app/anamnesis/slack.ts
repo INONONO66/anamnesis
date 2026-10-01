@@ -65,12 +65,12 @@ function channelId(path: string): string {
   return path.startsWith("channels/") ? name : name.split("-")[0]!;
 }
 
-/** One export line as remember params, with the oversized body kept aside; null for slop and empty turns. Throws on malformed input. */
 /** Revision admission; a rejected re-parse (occurrence suffix or predecessor key) is an invalid record, chain errors pass through. */
 function admitSlack(revisions: Revisions, base: RpcRememberParams, at: string): { params: RpcRememberParams; native: string } {
   try { return revisions.admit(base, false, at); }
   catch (cause) { if (!(cause instanceof Error && cause.name === "ZodError")) throw cause; throw new Error(`source_invalid_record: ${at}`, { cause }); }
 }
+/** One export line as remember params, with the oversized body kept aside; null for slop and empty turns. Throws on malformed input. */
 function slackRecord(text: string, channel: string, channelName: string): { base: RpcRememberParams; body: Buffer | undefined } | null {
   const parsed = parseSlackMessage(text);
   if (isSlackSlop(parsed)) return null;

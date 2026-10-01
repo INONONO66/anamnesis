@@ -13,9 +13,13 @@ export const EpisodeLineageInput = z.strictObject({
 });
 export type EpisodeLineageInput = z.infer<typeof EpisodeLineageInput>;
 const sortedIds = (max: number) => ids(max).refine(v => v.every((id, i) => i === 0 || v[i - 1]! < id), "IDs must be sorted");
-interface LineageShape { episode_id: string; lineage_mode: "direct" | "receipts"; parent_recall_ids: string[]; context_digests: string[]; root_episode_ids: string[]; echo_depth: number; complete: boolean }
+const lineageShape = z.strictObject({
+  episode_id: z.uuidv7(), lineage_mode: z.enum(["direct", "receipts"]),
+  parent_recall_ids: sortedIds(4), context_digests: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(4),
+  root_episode_ids: sortedIds(16), echo_depth: z.number().int().min(0).max(8), complete: z.boolean(),
+});
 /** Direct lineage has no parents and roots at itself; receipts lineage has parents and depth; a complete lineage names its roots. */
-export function lineageInvariants(v: LineageShape, ctx: z.RefinementCtx): void {
+function lineageInvariants(v: z.infer<typeof lineageShape>, ctx: z.RefinementCtx): void {
   if (v.parent_recall_ids.length !== v.context_digests.length
     || (v.lineage_mode === "direct" && (v.parent_recall_ids.length !== 0 || v.echo_depth !== 0 || !v.complete
       || v.root_episode_ids.length !== 1 || v.root_episode_ids[0] !== v.episode_id))
@@ -23,11 +27,7 @@ export function lineageInvariants(v: LineageShape, ctx: z.RefinementCtx): void {
     || (v.complete && v.root_episode_ids.length === 0))
     ctx.addIssue({ code: "custom", message: "invalid retained lineage" });
 }
-export const EchoLineage = z.strictObject({
-  episode_id: z.uuidv7(), lineage_mode: z.enum(["direct", "receipts"]),
-  parent_recall_ids: sortedIds(4), context_digests: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(4),
-  root_episode_ids: sortedIds(16), echo_depth: z.number().int().min(0).max(8), complete: z.boolean(),
-}).superRefine(lineageInvariants);
+export const EchoLineage = lineageShape.superRefine(lineageInvariants);
 export type EchoLineage = z.infer<typeof EchoLineage>;
 /** Snapshots are server materialized. Empty roots mean unknown, never direct. */
 export const RecallLineageSelection = z.array(z.strictObject({

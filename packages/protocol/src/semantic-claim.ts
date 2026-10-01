@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ClaimSubKind, EPISODE_SCHEMAS, SCHEMA_ID } from "./element.ts";
-import { lineageInvariants } from "./episode-lineage.ts";
+import { EchoLineage } from "./episode-lineage.ts";
 import { canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 const id = z.uuidv7();
@@ -95,14 +95,9 @@ export const SemanticClaimBatch = z.strictObject({ claims: z.array(SemanticClaim
 
 const role = z.enum(["user", "assistant", "tool", "document", "operator"]);
 const speaker = z.strictObject({ origin_source: utf8(256), origin_actor: utf8(256) });
-const lineage = z.strictObject({
-  episode_id: id, lineage_mode: z.enum(["direct", "receipts"]),
-  parent_recall_ids: ordered(id, 4), context_digests: z.array(hash).max(4),
-  root_episode_ids: ordered(id, 16), echo_depth: count.max(8), complete: z.boolean(),
-}).superRefine(lineageInvariants);
 const provenance = z.discriminatedUnion("episode_digest_version", [
   z.strictObject({ episode_digest_version: z.literal(1), origin_role: role.nullable(), lineage: z.null(), lineage_digest: z.null() }),
-  z.strictObject({ episode_digest_version: z.literal(2), origin_role: role, lineage, lineage_digest: hash }),
+  z.strictObject({ episode_digest_version: z.literal(2), origin_role: role, lineage: EchoLineage, lineage_digest: hash }),
 ]);
 /** Application-only trust input: load from immutable retained Episode/lineage
  * and bounded L3 results. Never deserialize this from a model or public RPC.
@@ -131,6 +126,7 @@ function fail(code: SemanticClaimValidationError["code"]): never { throw new Sem
 type Claim = ReturnType<typeof SemanticClaim.parse>;
 type Context = ReturnType<typeof SemanticSourceContext.parse>;
 type Source = Context["episode"];
+type Ancestry = Extract<Source["provenance"], { episode_digest_version: 2 }>;
 type Locus = { start: number; end: number; text: string };
 
 function parseContract(input: unknown, retainedContext: unknown): { claim: Claim; context: Context } {
@@ -142,7 +138,8 @@ function parseContract(input: unknown, retainedContext: unknown): { claim: Claim
   if (!parsedClaim.success || !parsedSource.success) fail("invalid_contract");
   return { claim: parsedClaim.data, context: parsedSource.data };
 }
-function checkLineage(source: Source): NonNullable<Source["provenance"]["lineage"]> {
+/** The version-2 provenance, narrowed so callers keep non-null role and lineage digest. */
+function checkLineage(source: Source): Ancestry {
   if (sha256(source.content) !== source.content_digest) fail("source_digest_mismatch");
   const origin = source.provenance;
   if (origin.episode_digest_version === 1) fail("echo_lineage_unavailable");
@@ -150,7 +147,7 @@ function checkLineage(source: Source): NonNullable<Source["provenance"]["lineage
   if (ancestry.episode_id !== source.id || extractionBodyDigest(ancestry) !== origin.lineage_digest) fail("lineage_mismatch");
   if (!ancestry.complete) fail("echo_lineage_unavailable");
   if (ancestry.lineage_mode === "receipts" && ancestry.root_episode_ids.includes(source.id)) fail("lineage_mismatch");
-  return ancestry;
+  return origin;
 }
 function checkTime(claim: Claim, source: Source): void {
   if (claim.content_language !== source.content_language) fail("language_policy_mismatch");
@@ -210,8 +207,7 @@ function locateEvidence(claim: Claim, context: Context): Locus | null {
  * separate. Known-echo classification is reserved for L4 exact-delivery review. */
 export function validateSemanticClaim(input: unknown, retainedContext: unknown) {
   const { claim, context } = parseContract(input, retainedContext);
-  const source = context.episode, origin = source.provenance;
-  const ancestry = checkLineage(source);
+  const source = context.episode, origin = checkLineage(source), ancestry = origin.lineage;
   checkTime(claim, source);
   const entityIds = resolveEntityIds(claim, context);
   checkAttribution(claim, context);

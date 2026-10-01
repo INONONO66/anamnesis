@@ -232,20 +232,6 @@ function compaction(
   return { record, text: summary, role: "unknown", kind: "compaction", occurredAt };
 }
 
-/**
- * The export kept prose and dropped plumbing: `text` blocks become records,
- * while `thinking`, `tool_use` and `tool_result` blocks do not. Reproducing
- * that inclusion set is what keeps the overlap a no-op — widening it here
- * would write records the export never had and call them duplicates.
- *
- * The sidechain flags are read as a path question rather than a record one.
- * Every one of the 121,047 delegated records in the raw tree sits under a
- * `subagents/` directory, and no main transcript carries either flag, so a
- * flagged record inside a main transcript is a record the export dropped and
- * this adapter keeps dropping — admitting it there would rewrite output the
- * export already ingested, which is the one thing widening the set must not
- * do.
- */
 /** Sidechain, API-error and error-message records are never accepted (sidechain records only under a sidechain origin). */
 function skipped(value: ClaudeRecord, sidechain: SidechainOrigin | undefined): boolean {
   return (
@@ -273,6 +259,20 @@ function wholeMessage(value: ClaudeRecord, nested: boolean, blocks: readonly Ret
     blocks.every((block) => hasOnlyKeys(block?.keys ?? [], ["type", "text"]))
   );
 }
+/**
+ * The export kept prose and dropped plumbing: `text` blocks become records,
+ * while `thinking`, `tool_use` and `tool_result` blocks do not. Reproducing
+ * that inclusion set is what keeps the overlap a no-op — widening it here
+ * would write records the export never had and call them duplicates.
+ *
+ * The sidechain flags are read as a path question rather than a record one.
+ * Every one of the 121,047 delegated records in the raw tree sits under a
+ * `subagents/` directory, and no main transcript carries either flag, so a
+ * flagged record inside a main transcript is a record the export dropped and
+ * this adapter keeps dropping — admitting it there would rewrite output the
+ * export already ingested, which is the one thing widening the set must not
+ * do.
+ */
 function acceptedRecords(
   value: ClaudeRecord,
   bytes: Uint8Array,

@@ -13,6 +13,8 @@ import { sourceFiles } from "./sources.ts";
 const PURE_LIST = "scripts/qa/pure-tests.txt";
 const UNTESTED_LIST = "scripts/gate/mutation-untested.txt";
 const WORKERS = 8;
+/** A pure test that hangs under --coverage would otherwise stall the gate before any mutant runs. */
+const COVERAGE_DEADLINE_MS = 600_000;
 
 type Status = "Killed" | "Survived" | "NoCoverage" | "CompileError" | "RuntimeError" | "Timeout" | "Ignored" | "Pending";
 interface Mutant { status: Status; mutatorName: string; replacement?: string; location: { start: { line: number; column: number } } }
@@ -26,24 +28,28 @@ interface Tally { mutants: number; killed: number; timeouts: string[]; survived:
 const tally = (): Tally => ({ mutants: 0, killed: 0, timeouts: [], survived: [], errors: [], mutantFree: [] });
 
 /** A killed gate must take its children with it: an orphaned Stryker master keeps eight workers busy for
- * hours. Each child is killed by its own handler; the non-zero exit then fails the run and cleanup proceeds. */
-async function run(cmd: string[], env: Record<string, string>): Promise<{ code: number; out: string }> {
+ * hours. Each child is killed by its own handler; the non-zero exit then fails the run and cleanup proceeds.
+ * A deadline SIGKILLs the child the same way (Stryker bounds its own test runs with timeoutMS). */
+async function run(cmd: string[], env: Record<string, string>, deadlineMs?: number): Promise<{ code: number; out: string; timedOut: boolean }> {
   const child = Bun.spawn(cmd, { env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   const forward = (signal: NodeJS.Signals) => () => child.kill(signal);
   const onTerm = forward("SIGTERM"), onInt = forward("SIGINT");
   process.once("SIGTERM", onTerm).once("SIGINT", onInt);
+  let timedOut = false;
+  const deadline = deadlineMs === undefined ? undefined : setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, deadlineMs);
   try {
     const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-    return { code: await child.exited, out: out + err };
+    return { code: await child.exited, out: out + err, timedOut };
   } finally {
+    clearTimeout(deadline);
     process.off("SIGTERM", onTerm).off("SIGINT", onInt);
   }
 }
 
 /** Lines each shipped source executes under one test: lcov DA records with a non-zero count. */
 async function executedLines(test: string, dir: string, shipped: Set<string>): Promise<Map<string, Executed>> {
-  const result = await run(["bun", "test", "--coverage", "--coverage-reporter=lcov", `--coverage-dir=${dir}`, test], {});
-  if (result.code !== 0) throw new Error(`${test} fails before any mutation:\n${result.out}`);
+  const result = await run(["bun", "test", "--coverage", "--coverage-reporter=lcov", `--coverage-dir=${dir}`, test], {}, COVERAGE_DEADLINE_MS);
+  if (result.code !== 0) throw new Error(`${test} ${result.timedOut ? "exceeded the coverage deadline" : "fails before any mutation"} (exit ${result.code}):\n${result.out}`);
   const files = new Map<string, Executed>();
   let current: Executed | undefined;
   for (const line of (await readFile(join(dir, "lcov.info"), "utf8")).split("\n")) {
@@ -136,6 +142,8 @@ async function mutate(group: Group, report: string): Promise<Tally> {
     else counts.survived.push(where);
   }
   if (counts.mutants === 0) throw new Error(`stryker generated no mutants for ${[...group.sources.keys()].join(" ")} (exit ${result.code}):\n${result.out.slice(-4000)}`);
+  // The break threshold makes a survivor exit non-zero; a non-zero exit the report does not explain is a runner failure.
+  if (result.code !== 0 && counts.survived.length === 0) throw new Error(`stryker exited ${result.code} with no survivor in ${report}:\n${result.out.slice(-4000)}`);
   return counts;
 }
 

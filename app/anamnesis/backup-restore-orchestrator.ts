@@ -32,9 +32,6 @@ const fresh = async (p: string) => { try { await lstat(p); throw new AuthorityOr
 const HASH = /^[0-9a-f]{64}$/;
 const OBJECT_LIMIT = 10_000, OBJECT_BYTES = 256 * 1024 ** 2, TOTAL_OBJECT_BYTES = 128 * 1024 ** 3;
 
-/** Enumerates and copies committed ObjectStore pairs without buffering payloads.
- * The source is fenced by owner/device/inode/stat checks; every destination is
- * exclusive and published only after a streamed hash and fsync. */
 /** One object prefix directory: owned, unshared, and every sidecar paired with its object; returns its stat and sorted names. */
 async function admitPrefix(dir: string): Promise<{ ds: BigIntStats; names: string[] }> {
   const ds = await lstat(dir, { bigint: true });
@@ -64,6 +61,9 @@ async function copyObject(object: Awaited<ReturnType<typeof admitObject>>, prefi
   await writeFile(`${target}.json`, JSON.stringify({ hash: name, size: Number(before.size), mediaType: mediaType }), { flag: "wx", mode: 0o600 }); await fsync(`${target}.json`); await fsync(targetDir);
   return { hash: name, size: Number(before.size), media_type: mediaType };
 }
+/** Enumerates and copies committed ObjectStore pairs without buffering payloads.
+ * The source is fenced by owner/device/inode/stat checks; every destination is
+ * exclusive and published only after a streamed hash and fsync. */
 async function snapshotObjectStore(sourceRoot: string, destinationRoot: string): Promise<ArchiveManifest["objects"]> {
   const source = resolve(sourceRoot), destination = resolve(destinationRoot);
   const root = await ownedDir(source), destinationParent = await ownedDir(dirname(destination));
