@@ -60,3 +60,4 @@ packages/backfill/src/clauderaw-parser.test.ts
 packages/backfill/src/gjcraw.test.ts
 packages/backfill/src/miscraw-parser.test.ts
 packages/backfill/src/notion-parser.test.ts
+packages/core/src/store/helpers-pure.test.ts
