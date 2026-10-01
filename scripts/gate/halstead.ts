@@ -2,24 +2,23 @@
 // operands) over the tokens of the function's own scope; a nested function is measured on its own, as eslint measures
 // complexity. Identifiers, literals, this, true, false and null are operands; every other keyword or punctuation token is
 // an operator, closing brackets excluded. Comments are not tokens.
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import ts from "typescript";
+import { sourceFiles } from "./sources.ts";
 const LIMIT = 80;
-const roots = ["app/anamnesis", "packages/protocol/src", "packages/core/src", "packages/backfill/src"];
-const files: string[] = [];
-const walk = (dir: string): void => { for (const name of readdirSync(dir)) { const path = join(dir, name); if (statSync(path).isDirectory()) walk(path); else if (path.endsWith(".ts") && !/\.(test|fixture)\.ts$/.test(path)) files.push(path); } };
-roots.forEach(walk);
-files.sort();
+const files = sourceFiles();
 const operandKinds = new Set([ts.SyntaxKind.Identifier, ts.SyntaxKind.PrivateIdentifier, ts.SyntaxKind.NumericLiteral, ts.SyntaxKind.BigIntLiteral,
   ts.SyntaxKind.StringLiteral, ts.SyntaxKind.RegularExpressionLiteral, ts.SyntaxKind.NoSubstitutionTemplateLiteral, ts.SyntaxKind.TemplateHead,
   ts.SyntaxKind.TemplateMiddle, ts.SyntaxKind.TemplateTail, ts.SyntaxKind.ThisKeyword, ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword]);
 const closing = new Set([ts.SyntaxKind.CloseParenToken, ts.SyntaxKind.CloseBracketToken, ts.SyntaxKind.CloseBraceToken]);
+// Spelled out because ts.isFunctionLikeDeclaration is internal to the compiler API (absent from its public typings).
+const isFunction = (node: ts.Node): node is ts.FunctionLikeDeclaration => ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+  || ts.isArrowFunction(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node);
 interface Vocabulary { operators: Set<string>; operands: Map<string, number> }
 function collect(node: ts.Node, source: ts.SourceFile, into: Vocabulary): void {
   for (const child of node.getChildren(source)) {
     if (child.kind >= ts.SyntaxKind.FirstJSDocNode && child.kind <= ts.SyntaxKind.LastJSDocNode) continue;
-    if (ts.isFunctionLikeDeclaration(child) && child.body) continue;
+    if (isFunction(child) && child.body) continue;
     if (child.getChildCount(source) > 0 || child.kind === ts.SyntaxKind.SyntaxList) { collect(child, source, into); continue; }
     if (closing.has(child.kind)) continue;
     const text = child.getText(source);
@@ -36,7 +35,7 @@ const scores: Array<{ where: string; score: number }> = [];
 for (const file of files) {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
   const visit = (node: ts.Node): void => {
-    if (ts.isFunctionLikeDeclaration(node) && node.body) {
+    if (isFunction(node) && node.body) {
       const name = ts.isConstructorDeclaration(node) ? "constructor" : node.name?.getText(source) ?? "(anonymous)";
       scores.push({ where: `${file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} ${name}`, score: difficulty(node, source) });
     }

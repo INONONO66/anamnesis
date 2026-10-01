@@ -24,7 +24,7 @@
     "gate:cycles": "madge --circular --extensions ts app/anamnesis/main.ts app/anamnesis/ops.ts packages/core/src/index.ts packages/protocol/src/index.ts packages/backfill/src/index.ts",
     "gate:types": "bun scripts/gate/any-unknown.ts",
     "gate:halstead": "bun scripts/gate/halstead.ts",
-    "gate:mutation": "stryker run",
+    "gate:mutation": "bun scripts/gate/mutation.ts",
     "gate:coverage": "bun test --coverage --coverage-reporter=text $(cat scripts/qa/pure-tests.txt)"
   },
   "devDependencies": {
