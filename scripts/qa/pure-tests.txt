@@ -61,3 +61,4 @@ packages/backfill/src/gjcraw.test.ts
 packages/backfill/src/miscraw-parser.test.ts
 packages/backfill/src/notion-parser.test.ts
 packages/core/src/store/helpers-pure.test.ts
+packages/backfill/src/raw-sessions-fs.test.ts

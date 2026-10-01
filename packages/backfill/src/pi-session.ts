@@ -1,14 +1,16 @@
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import type { RememberInput } from "@anamnesis/core";
 import { maskSecrets } from "./secrets.ts";
 
 /** Shared reader for the pi-style session JSONL that both the gjc and omo raw stores write:
  * a `session` header line, then `message` and `compaction` events keyed by id and timestamp. */
 const CONTENT_LIMIT = 4000;
-export const SESSION_HEADER = "session";
+const SESSION_HEADER = "session";
 
-export interface RawEvent {
+interface RawEvent {
   type: string;
   id: string;
   timestamp: string;
@@ -53,7 +55,7 @@ export function messageText(content: unknown): string | undefined {
 }
 /** `user` and `assistant` are the conversation roles; toolResult, custom and harness records are plumbing. */
 export const CONVERSATION_ROLES = new Set(["user", "assistant"]);
-export function parseEvent(line: string): RawEvent | undefined {
+function parseEvent(line: string): RawEvent | undefined {
   const raw: unknown = JSON.parse(line);
   if (!isRecord(raw)) return undefined;
   const type = optionalText(raw["type"]);
@@ -122,4 +124,26 @@ export function createSessionParser<E>(build: (event: SessionEvent) => E): (line
     const event = parseEvent(line);
     return event === undefined ? [] : [build({ ...event, session })];
   };
+}
+/** One session file read through the line parser. A blank or torn line is skipped rather than aborting the
+ * file, so one damaged record costs one turn and not the whole session; the stream is closed either way. */
+export async function readSessionFile(path: string): Promise<SessionEvent[]> {
+  const parse = createSessionParser((event: SessionEvent) => event);
+  const events: SessionEvent[] = [];
+  const stream = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (line.trim() === "") continue;
+      try {
+        events.push(...parse(line));
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+      }
+    }
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return events;
 }
