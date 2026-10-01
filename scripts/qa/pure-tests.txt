@@ -52,3 +52,4 @@ app/anamnesis/recovery-probe.test.ts
 packages/core/src/schema-migrations.test.ts
 app/anamnesis/client-deadline.test.ts
 app/anamnesis/runtime-authority.test.ts
+app/anamnesis/owned-neo4j-adapter.test.ts
