@@ -138,7 +138,7 @@ export class EpisodeJournal {
           } else {
             let abort!: () => void;
             const cancelled = new Promise<never>((_, reject) => {
-              abort = () => reject(opts.signal!.reason ?? new Error("Replay aborted"));
+              abort = () => reject(opts.signal!.reason);
               opts.signal!.addEventListener("abort", abort, { once: true });
               if (opts.signal!.aborted) abort();
             });
