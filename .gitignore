@@ -10,3 +10,5 @@ tsconfig.tsbuildinfo
 
 # Local QA evidence can contain real transcript excerpts and downloaded plugins.
 .omo/evidence/
+# Coverage reports produced by gate:crap and ad-hoc union measurements.
+.omo/coverage/
