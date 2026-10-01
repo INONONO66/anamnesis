@@ -51,3 +51,4 @@ packages/core/src/legacy-format.test.ts
 app/anamnesis/recovery-probe.test.ts
 packages/core/src/schema-migrations.test.ts
 app/anamnesis/client-deadline.test.ts
+app/anamnesis/runtime-authority.test.ts
