@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, DEFAULT_RELATION_PROMPT_FILE, loadListenConfig, loadProviderConfig } from "./config.ts";
+import { acquireInstallation, atomicJson, DEFAULT_EXTRACTION_PROMPT_FILE, DEFAULT_RELATION_PROMPT_FILE, loadListenConfig, loadProviderConfig, runtimeRoot, socketPath } from "./config.ts";
 
 test("provider defaults leave endpoints opt-in and load the bundled prompts", async () => {
   const config = await loadProviderConfig({});
@@ -283,3 +283,62 @@ for (const scenario of cases) {
     }
   });
 }
+
+test("runtime root defaults under the home directory and resolves ANAMNESIS_RUNTIME_ROOT", () => {
+  const configured = process.env["ANAMNESIS_RUNTIME_ROOT"];
+  try {
+    delete process.env["ANAMNESIS_RUNTIME_ROOT"];
+    assert.equal(runtimeRoot(), join(homedir(), ".anamnesis"));
+    process.env["ANAMNESIS_RUNTIME_ROOT"] = "relative/root";
+    assert.equal(runtimeRoot(), resolve("relative/root"));
+  } finally {
+    if (configured === undefined) delete process.env["ANAMNESIS_RUNTIME_ROOT"]; else process.env["ANAMNESIS_RUNTIME_ROOT"] = configured;
+  }
+});
+
+test("socket path stays under the portable Unix limit", () => {
+  assert.equal(socketPath("/tmp/ana"), "/tmp/ana/anamnesis.sock");
+  assert.throws(() => socketPath("/" + "x".repeat(100)), /portable Unix socket path limit/);
+});
+
+test("installation lease: a dead owner is taken over, a live owner and a foreign token are refused, and failure releases", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "ana-install-"));
+  const configured = process.env["ANAMNESIS_RUNTIME_TOKEN"];
+  delete process.env["ANAMNESIS_RUNTIME_TOKEN"];
+  try {
+    const lease = join(root, "owner"), ownerPath = join(lease, "owner.json"), recovery = join(root, "owner-recovery");
+    await fs.mkdir(lease, { mode: 0o700 });
+    await fs.writeFile(ownerPath, JSON.stringify({ pid: 2147483647, nonce: "stale" }));
+    const installation = await acquireInstallation(root);
+    assert.deepEqual(JSON.parse(await fs.readFile(ownerPath, "utf8")), { pid: process.pid, nonce: installation.epoch });
+    await assert.rejects(fs.lstat(recovery), { code: "ENOENT" });
+    await assert.rejects(acquireInstallation(root), /owned by live pid/);
+    await assert.rejects(fs.lstat(recovery), { code: "ENOENT" });
+    await installation.assertOwned();
+    await installation.release();
+    await assert.rejects(installation.assertOwned(), { code: "ENOENT" });
+    assert.match(installation.token, /^[A-Za-z0-9_-]{43}$/);
+    const again = await acquireInstallation(root);
+    assert.equal(again.token, installation.token);
+    assert.equal(again.incarnation, installation.incarnation);
+    assert.notEqual(again.epoch, installation.epoch);
+    await again.release();
+
+    process.env["ANAMNESIS_RUNTIME_TOKEN"] = "not-the-persisted-token";
+    await assert.rejects(acquireInstallation(root), /differs from the persisted installation token/);
+    await assert.rejects(fs.lstat(lease), { code: "ENOENT" });
+    delete process.env["ANAMNESIS_RUNTIME_TOKEN"];
+
+    await fs.mkdir(lease, { mode: 0o700 });
+    await fs.writeFile(ownerPath, "{}");
+    await assert.rejects(acquireInstallation(root), /invalid owner lease/);
+    await assert.rejects(fs.lstat(recovery), { code: "ENOENT" });
+
+    const link = join(root, "link");
+    await fs.symlink(root, link);
+    await assert.rejects(acquireInstallation(link), /directory owned by the current user/);
+  } finally {
+    if (configured === undefined) delete process.env["ANAMNESIS_RUNTIME_TOKEN"]; else process.env["ANAMNESIS_RUNTIME_TOKEN"] = configured;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
