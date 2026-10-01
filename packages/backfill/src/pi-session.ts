@@ -74,24 +74,40 @@ export function parseEvent(line: string): RawEvent | undefined {
   return text === undefined ? undefined : { type, id, timestamp, role, text };
 }
 
-/** Keyed on the raw event time and raw text so a masking-rule change never opens a false revision. */
-export function toEpisode(event: SessionEvent, source: string, properties: Record<string, string>): RawSessionEpisode {
-  const occurredAt = new Date(event.timestamp).toISOString();
-  const revision = createHash("sha256").update(`${occurredAt}\n${event.text}`, "utf8").digest("hex");
-  const { text, redactions } = maskSecrets(event.text);
+export interface RawOrigin {
+  source: string;
+  session: string;
+  actor: string;
+  record: string;
+}
+/**
+ * One episode shape for every raw adapter. The revision is keyed on the raw
+ * time and raw text, not the masked text or the provider's record id: a
+ * masking-rule change would otherwise open a false revision of every turn a
+ * new rule touches, and providers re-emit one id as the message it names
+ * evolves. Byte-identical across adapters, so a turn ingested from a
+ * normalized export and again from its raw transcript lands on one revision.
+ */
+export function rawEpisode(occurred: string | number, rawText: string, origin: RawOrigin, properties: Record<string, string>): RawSessionEpisode {
+  const occurredAt = new Date(occurred).toISOString();
+  const revision = createHash("sha256").update(`${occurredAt}\n${rawText}`, "utf8").digest("hex");
+  const { text, redactions } = maskSecrets(rawText);
   const oversized = text.length > CONTENT_LIMIT;
   return {
     redactions,
     input: {
       schema: SCHEMA_ID.ORIGINAL_MESSAGE,
       content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
-      origin: { source, session: event.session, actor: event.role ?? "unknown", record: event.id },
+      origin,
       source_revision: revision,
       time: { value: occurredAt, precision: "second" },
       ...(oversized ? { payload: new TextEncoder().encode(text), payload_media_type: "text/plain" } : {}),
       properties,
     },
   };
+}
+export function toEpisode(event: SessionEvent, source: string, properties: Record<string, string>): RawSessionEpisode {
+  return rawEpisode(event.timestamp, event.text, { source, session: event.session, actor: event.role ?? "unknown", record: event.id }, properties);
 }
 /** Line parser that remembers the current session header; lines before a header yield nothing. */
 export function createSessionParser<E>(build: (event: SessionEvent) => E): (line: string) => E[] {

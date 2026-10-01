@@ -1,13 +1,6 @@
-import { byEpisodeTime, optionalText } from "./pi-session.ts";
-import { SCHEMA_ID } from "@anamnesis/protocol";
-import { createHash } from "node:crypto";
+import { byEpisodeTime, optionalText, rawEpisode, type RawSessionEpisode } from "./pi-session.ts";
 import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { RememberInput } from "@anamnesis/core";
-import { maskSecrets } from "./secrets.ts";
-
-/** Beyond this the transcript turn lives in the object store, not the node. */
-const CONTENT_LIMIT = 4000;
 
 /** Only the fields the originals contract consumes are modelled. */
 interface AgentEvent {
@@ -21,10 +14,7 @@ interface AgentEvent {
   text?: string;
 }
 
-export interface AgentLogEpisode {
-  input: RememberInput;
-  redactions: number;
-}
+export type AgentLogEpisode = RawSessionEpisode;
 
 
 function requiredText(value: unknown, field: string, line: string): string {
@@ -79,50 +69,17 @@ function isRecallable(event: AgentEvent): event is RecallableEvent {
 }
 
 function toEpisode(event: RecallableEvent): AgentLogEpisode {
-  const occurredAt = new Date(event.occurred_at).toISOString();
-  /**
-   * Keyed on the raw event, not the masked one: a change to the masking rules
-   * would otherwise rewrite every revision key and open a false revision of
-   * every event whose text a new rule touches.
-   */
-  const revision = createHash("sha256")
-    .update(`${occurredAt}\n${event.text}`, "utf8")
-    .digest("hex");
-  const { text, redactions } = maskSecrets(event.text);
   const properties: Record<string, string> = {};
   if (event.canonical_kind !== undefined) {
     properties["canonical_kind"] = event.canonical_kind;
   }
   if (event.kind !== undefined) properties["kind"] = event.kind;
-  const oversized = text.length > CONTENT_LIMIT;
-  return {
-    redactions,
-    input: {
-      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
-      content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
-      origin: {
-        source: event.provider,
-        session: event.partition_id,
-        actor: event.role ?? "unknown",
-        record: event.upstream_event_id,
-      },
-      /**
-       * Providers re-emit one event id as the message it names evolves, so the
-       * id alone is not a revision: keying the revision on the content instead
-       * lets a re-emission supersede its predecessor through INVALIDATES,
-       * where keying it on the id collides two contents on one revision.
-       */
-      source_revision: revision,
-      time: { value: occurredAt, precision: "second" },
-      ...(oversized
-        ? {
-            payload: new TextEncoder().encode(text),
-            payload_media_type: "text/plain",
-          }
-        : {}),
-      properties,
-    },
-  };
+  return rawEpisode(event.occurred_at, event.text, {
+    source: event.provider,
+    session: event.partition_id,
+    actor: event.role ?? "unknown",
+    record: event.upstream_event_id,
+  }, properties);
 }
 
 /**
