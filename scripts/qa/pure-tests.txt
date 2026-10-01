@@ -54,3 +54,4 @@ app/anamnesis/client-deadline.test.ts
 app/anamnesis/runtime-authority.test.ts
 app/anamnesis/owned-neo4j-adapter.test.ts
 app/anamnesis/backup-restore-orchestrator.test.ts
+packages/core/src/extraction-scheduler-pure.test.ts
