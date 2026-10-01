@@ -1,5 +1,5 @@
 import { describe, expect, test, spyOn } from "bun:test";
-import { Frames, RpcByteBudget, RPC_BYTE_LIMITS, type ByteAccount } from "./wire.ts";
+import { FrameFault, Frames, RpcByteBudget, RPC_BYTE_LIMITS, decodeRequest, encode, errorResponse, type ByteAccount } from "./wire.ts";
 import { RPC_LIMITS } from "../../packages/protocol/src/rpc.ts";
 
 const account = (): ByteAccount => ({ used: { general: 0, control: 0, ingress: 0 } });
@@ -101,5 +101,38 @@ describe("encoded byte reservations", () => {
     expect(budget.used.general).toBe(300);
     expect(() => budget.output(reservation, 100)).toThrow("reserved output");
     budget.release(reservation); budget.release(reservation); expect(budget.used.general).toBe(0);
+  });
+});
+
+describe("decodeRequest", () => {
+  const frame = (value: unknown) => Buffer.from(JSON.stringify(value));
+  test("frame-level refusals echo the request id so a real client can match the reply", () => {
+    const refusals: [unknown, FrameFault["code"], string | number | null][] = [
+      [{ jsonrpc: "2.0", id: 7, method: "commit", params: {} }, "unsupported_method", 7],
+      [{ jsonrpc: "2.0", id: "req-1", method: "hello", params: { version: 2 } }, "unsupported_version", "req-1"],
+      [{ jsonrpc: "2.0", id: 9, method: "status", params: { extra: true } }, "invalid_params", 9],
+      [{ jsonrpc: "2.0", method: "commit", params: {} }, "unsupported_method", null],
+      [{ jsonrpc: "2.0", id: "x".repeat(128), method: "commit", params: {} }, "unsupported_method", "x".repeat(128)],
+      [{ jsonrpc: "2.0", id: "x".repeat(129), method: "commit", params: {} }, "unsupported_method", null],
+      [{ jsonrpc: "2.0", id: { nested: true }, method: "commit", params: {} }, "unsupported_method", null],
+    ];
+    for (const [request, code, id] of refusals) {
+      let caught: unknown;
+      try { decodeRequest(frame(request)); } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(FrameFault);
+      const failure = caught as FrameFault;
+      expect(failure.code).toBe(code);
+      const response = errorResponse(failure.id, failure);
+      expect(response.id).toBe(id);
+      expect(encode(response).length).toBeLessThanOrEqual(RPC_BYTE_LIMITS.error); // fits the error-output allowance even at the longest id
+    }
+  });
+  test("envelope and encoding faults carry no id", () => {
+    for (const bytes of [Buffer.from([0xff, 0xfe]), frame({ jsonrpc: "2.0", id: 1 }), frame("text")]) {
+      let caught: unknown;
+      try { decodeRequest(bytes); } catch (error) { caught = error; }
+      expect(caught).not.toBeInstanceOf(FrameFault);
+      expect(["parse_error", "invalid_request"]).toContain((caught as { code: string }).code);
+    }
   });
 });

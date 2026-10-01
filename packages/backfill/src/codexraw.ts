@@ -1,15 +1,8 @@
-import { asRecord, byEpisodeTime, optionalText } from "./pi-session.ts";
-import { SCHEMA_ID } from "@anamnesis/protocol";
-import { createHash } from "node:crypto";
+import { asRecord, byEpisodeTime, optionalText, rawEpisode, type RawSessionEpisode } from "./pi-session.ts";
 import { createReadStream } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type { RememberInput } from "@anamnesis/core";
-import { maskSecrets } from "./secrets.ts";
-
-/** Beyond this the transcript turn lives in the object store, not the node. */
-const CONTENT_LIMIT = 4000;
 
 /**
  * The normalized export this adapter has to agree with kept exactly two record
@@ -38,10 +31,7 @@ interface CodexTurn {
   role?: string;
 }
 
-export interface CodexRawEpisode {
-  input: RememberInput;
-  redactions: number;
-}
+export type CodexRawEpisode = RawSessionEpisode;
 
 
 
@@ -193,45 +183,18 @@ function toEpisode(
   turn: CodexTurn,
   context: SessionContext,
 ): CodexRawEpisode {
-  const occurredAt = new Date(turn.occurredAt).toISOString();
-  /**
-   * Byte-identical to the agent-log adapter's revision so a turn already
-   * ingested from the normalized export resolves to the same stored revision
-   * and the overlapping 602 sessions re-ingest as a record-level no-op.
-   */
-  const revision = createHash("sha256")
-    .update(`${occurredAt}\n${turn.text}`, "utf8")
-    .digest("hex");
-  const { text, redactions } = maskSecrets(turn.text);
   const properties: Record<string, string> = {
     kind: turn.kind,
     canonical_kind: turn.canonicalKind,
   };
   if (context.cwd !== undefined) properties["cwd"] = context.cwd;
   if (context.model !== undefined) properties["model"] = context.model;
-  const oversized = text.length > CONTENT_LIMIT;
-  return {
-    redactions,
-    input: {
-      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
-      content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
-      origin: {
-        source: "codex",
-        session: context.id,
-        actor: turn.role ?? "unknown",
-        record: turn.eventId,
-      },
-      source_revision: revision,
-      time: { value: occurredAt, precision: "second" },
-      ...(oversized
-        ? {
-            payload: new TextEncoder().encode(text),
-            payload_media_type: "text/plain",
-          }
-        : {}),
-      properties,
-    },
-  };
+  return rawEpisode(turn.occurredAt, turn.text, {
+    source: "codex",
+    session: context.id,
+    actor: turn.role ?? "unknown",
+    record: turn.eventId,
+  }, properties);
 }
 
 /** `rollout-<iso>-<uuid>.jsonl`: the session id is the trailing UUID. */

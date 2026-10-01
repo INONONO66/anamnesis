@@ -10,7 +10,7 @@ import { OpenAiEmbeddingProvider } from "@anamnesis/core";
 import { elementDigest, verifyLineageRetry } from "@anamnesis/core";
 import { EchoLineage, parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
-import type { InstallationContext, CommitReceiptInput, RecallTransportInput } from "@anamnesis/core";
+import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
@@ -24,7 +24,7 @@ import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { manifestTemplate, objectInventory } from "./runtime-authority.ts";
 
-export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
+export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: false, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -695,10 +695,6 @@ export class Runtime {
     const result = await this.engine.requeueQuarantinedEmbeddings(params, context);
     this.wakeEmbedding();
     return result;
-  }
-  async commit(params: CommitReceiptInput, context: InstallationContext) {
-    await this.requireStorage();
-    return this.engine.commitReceipt(params, context);
   }
   async setPolicy(params: RpcPolicySetParams, context: InstallationContext) {
     await this.requireStorage();

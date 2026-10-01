@@ -67,6 +67,12 @@ test("model-scoped vectors and an event-gated policy race preserve server-derive
     await first.revokePolicy({ policy_id: policy.policy_id }, context);
     const allowed = await first.recallHybrid({ query: "", limit: 1 }, context);
     expect(allowed.results[0]!.sources).toEqual([id]);
+    // In-process receipt feedback on a real hybrid-recall receipt: one adoption + outcome, replay idempotent.
+    const replayed = await first.recallHybrid({ query: "", limit: 1 }, context);
+    const adoption = { operation_id: Bun.randomUUIDv7(), recall_id: replayed.recall_id, adopted: [id], reward: 0 };
+    expect((await first.commitReceipt(adoption, context)).applied).toBe(true);
+    expect((await first.commitReceipt(adoption, context)).applied).toBe(false);
+    expect((await driver.executeQuery("MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n", { id: replayed.recall_id })).records[0]!.get("n")).toBe(2);
     await first.setPolicy({ ...policy, policy_id: Bun.randomUUIDv7() }, context);
     const feedback = { operation_id: Bun.randomUUIDv7(), recall_id: allowed.recall_id, adopted: [id], reward: 1 };
     await expect(first.commitReceipt(feedback, context)).rejects.toThrow("policy_denied");

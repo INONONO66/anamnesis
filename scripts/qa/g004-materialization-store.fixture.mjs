@@ -201,7 +201,8 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
   assert.equal(derived.length, 1);
   assert.equal(derived[0].id, first.fact_id);
   assert.equal(serving.diagnostics.pipeline, 'derived-hybrid-v1');
-  assert.equal(serving.diagnostics.ppr_used, false);
+  // Any hit under a selected generation seeds the in-process PPR solve, so derived recall reports it.
+  assert.equal(serving.diagnostics.ppr_used, true);
   assert.equal(serving.diagnostics.identity_mode, 'exact_episode_id');
   const servingReceipt = await engine.store.getReceipt(serving.recall_id);
   assert.ok(servingReceipt?.serving);
@@ -311,7 +312,7 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
   assert.equal((await engine.store.verify()).filter(issue => issue.kind !== 'semantic-ineligibility').length, 0);
   const recall = await engine.recallHybrid({ query: text, limit: 64 }, context);
   assert.ok(recall.results.some(item => item.kind === 'Fact')); assert.ok(recall.results.some(item => item.kind === 'Episode'));
-  assert.equal(recall.diagnostics.ppr_used, false);
+  assert.equal(recall.diagnostics.ppr_used, true); // seeded by the Fact and Episode hits above
   assert.equal((await engine.readExtractionSelection(context)).generation_id, generation.id);
   await engine.close(); engine = undefined;
   // Hand the persisted active generation to the real Node daemon and query over

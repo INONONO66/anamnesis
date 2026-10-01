@@ -19,11 +19,12 @@
     "qa:e2e-daemon": "bun scripts/qa/e2e-daemon.ts",
     "gate": "bun run typecheck && bun run gate:lint && bun run gate:dead && bun run gate:cycles && bun run gate:types && bun run gate:dup && bun run gate:coverage",
     "gate:lint": "eslint .",
-    "gate:dup": "jscpd app packages --threshold 1 --reporters console",
+    "gate:dup": "jscpd app packages --threshold 0 --reporters console",
     "gate:dead": "knip",
     "gate:cycles": "madge --circular --extensions ts app/anamnesis/main.ts app/anamnesis/ops.ts packages/core/src/index.ts packages/protocol/src/index.ts packages/backfill/src/index.ts",
     "gate:types": "bun scripts/gate/any-unknown.ts",
     "gate:halstead": "bun scripts/gate/halstead.ts",
+    "gate:crap": "bun test --coverage --coverage-reporter=lcov --coverage-dir=.omo/coverage/pure $(cat scripts/qa/pure-tests.txt) > /dev/null && bun scripts/gate/crap.ts .omo/coverage/pure/lcov.info",
     "gate:mutation": "bun scripts/gate/mutation.ts",
     "gate:coverage": "bun test --coverage --coverage-reporter=text $(cat scripts/qa/pure-tests.txt)"
   },

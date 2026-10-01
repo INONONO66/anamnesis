@@ -1,15 +1,8 @@
-import { byEpisodeTime, optionalText } from "./pi-session.ts";
-import { SCHEMA_ID } from "@anamnesis/protocol";
-import { createHash } from "node:crypto";
+import { byEpisodeTime, optionalText, rawEpisode, type RawSessionEpisode } from "./pi-session.ts";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import type { RememberInput } from "@anamnesis/core";
-import { maskSecrets } from "./secrets.ts";
-
-/** Beyond this the transcript turn lives in the object store, not the node. */
-const CONTENT_LIMIT = 4000;
 
 /**
  * The normalized export this adapter backfills alongside derived one origin
@@ -63,10 +56,7 @@ interface ClaudeMessage {
   keys: readonly string[];
 }
 
-export interface ClaudeRawEpisode {
-  input: RememberInput;
-  redactions: number;
-}
+export type ClaudeRawEpisode = RawSessionEpisode;
 
 /** A record the transcript accepted, carrying everything an episode needs. */
 interface AcceptedRecord {
@@ -355,16 +345,6 @@ function toEpisode(
   accepted: AcceptedRecord,
   context: SessionContext,
 ): ClaudeRawEpisode {
-  const occurredAt = new Date(accepted.occurredAt).toISOString();
-  /**
-   * Keyed on the raw text, not the masked one, and on the same pair the
-   * agent-log adapter keys on: a record ingested from the export and again
-   * from its raw transcript has to land on one revision, not two.
-   */
-  const revision = createHash("sha256")
-    .update(`${occurredAt}\n${accepted.text}`, "utf8")
-    .digest("hex");
-  const { text, redactions } = maskSecrets(accepted.text);
   /**
    * A main transcript shares its revision token with the normalized export,
    * and the digest guarding that revision covers `properties` (docs/01 §1), so
@@ -392,29 +372,12 @@ function toEpisode(
       properties["parent_session_id"] = context.sidechain.parentSession;
     }
   }
-  const oversized = text.length > CONTENT_LIMIT;
-  return {
-    redactions,
-    input: {
-      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
-      content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
-      origin: {
-        source: "claude-code",
-        session: context.session,
-        actor: accepted.role,
-        record: accepted.record,
-      },
-      source_revision: revision,
-      time: { value: occurredAt, precision: "second" },
-      ...(oversized
-        ? {
-            payload: new TextEncoder().encode(text),
-            payload_media_type: "text/plain",
-          }
-        : {}),
-      properties,
-    },
-  };
+  return rawEpisode(accepted.occurredAt, accepted.text, {
+    source: "claude-code",
+    session: context.session,
+    actor: accepted.role,
+    record: accepted.record,
+  }, properties);
 }
 
 /**

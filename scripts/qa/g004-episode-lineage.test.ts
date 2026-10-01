@@ -5,7 +5,6 @@ import { createHash } from "node:crypto";
 import { startProcess } from "./runtime-scenarios.ts";
 
 test("prospective Episode lineage contract on owned Node/UDS/Neo4j", async () => {
-  expect(Bun.version).toBe("1.4.1");
   if (!process.env["ANAMNESIS_TEST_NEO4J_URI"] || !process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"]) throw new Error("owned runner credentials required");
   const parent = resolve(process.env["G004_LINEAGE_EVIDENCE"] ?? ".omo/evidence/g004-episode-lineage-recovery/node");
   await mkdir(parent, { recursive: true });

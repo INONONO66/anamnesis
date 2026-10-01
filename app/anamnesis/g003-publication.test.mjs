@@ -105,8 +105,8 @@ test('auto exposure is top three INCLUDED primaries, audit-only, zero-safe, dupl
   assert.equal(hits.length,3,'auto response must append top-three included exposure Hits');
   assert.equal(JSON.parse(authority).serving.candidates[0].id,oversized.id,'top candidate skipped by whole-bundle budget');
   const commit = { operation_id:uuid(),recall_id:result.recall_id,adopted:[result.results[0].id],reward:1 };
-  await assert.rejects(p.request('commit',commit),{code:'commit_mode_mismatch'});
-  await assert.rejects(control.request('commit',commit),{code:'commit_mode_mismatch'});
+  await assert.rejects(p.request('commit',commit),{code:'unsupported_method'}); // Deferred RPC: refused for auto and receipt peers alike.
+  await assert.rejects(control.request('commit',commit),{code:'unsupported_method'});
   assert.deepEqual(hits.map(x=>x.p.episode_id).sort(),result.results.slice(0,3).map(x=>x.id).sort());
   for (const {p:hit} of hits) { assert.equal(hit.kind,'exposure'); assert.equal(hit.kappa_eff,0); assert.equal(hit.reward,undefined); const body=JSON.parse(hit.body); assert.equal(body.attribution[0].rank,result.results.find(x=>x.id===hit.episode_id).rank); }
   assert.equal(audits[0].p.state,'local_complete');

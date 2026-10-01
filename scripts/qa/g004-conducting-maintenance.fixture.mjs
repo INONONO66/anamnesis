@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
@@ -116,8 +116,11 @@ test('physical writes, coverage and bounded repair', {timeout:150000}, async () 
     await query('MATCH (a:ConductingArc {source_id:$source,link_id:$link}) SET a.peer_id=$bad',{source:b.id,link:raw.link_id,bad:id(999)});
     // Instrument the exact probe transaction supplied by graphEnvelope, without
     // prewarming in a separate read transaction or changing its strict validator.
-    const originalProbe=engine.store.graphRawProbeTx;
-    engine.store.graphRawProbeTx=async function(tx,source){return originalProbe.call(this,{run:async(text,params)=>{
+    // The probe lives on the conducting module; graphEnvelope dispatches through it, so patching here intercepts the real call.
+    const conducting=engine.store.conducting, originalProbe=conducting.graphRawProbeTx;
+    let probeCalls=0;
+    conducting.graphRawProbeTx=async function(tx,source){return originalProbe.call(this,{run:async(text,params)=>{
+      probeCalls+=1;
       const explain=text.startsWith('EXPLAIN '),result=await tx.run(explain?text:`PROFILE ${text}`,params);
       await save(explain?'production-probe-plan.json':'production-probe-profile.json',{query:text,params,plan:result.summary.plan,profile:result.summary.profile});
       if(!explain){
@@ -134,7 +137,11 @@ test('physical writes, coverage and bounded repair', {timeout:150000}, async () 
       return result;
     }},source);};
     let excluded;
-    try {excluded=await engine.graphEnvelope([b.id],{},context);}finally{engine.store.graphRawProbeTx=originalProbe;}
+    try {excluded=await engine.graphEnvelope([b.id],{},context);}finally{delete conducting.graphRawProbeTx;}
+    // A patch that no longer sits on the dispatch path would let this fixture pass without certifying anything.
+    assert.equal(probeCalls,2,'production probe was intercepted for EXPLAIN and PROFILE');
+    assert.equal(conducting.graphRawProbeTx,originalProbe);
+    for (const name of ['production-probe-plan.json','production-probe-profile.json']) await readFile(join(output,name));
     const afterDetection=await state();await save('online-detection.json',{excluded,afterDetection});
     assert.equal(afterDetection[0].ready,false,'detected stale physical row invalidates the next probe');
     await assert.rejects(engine.graphEnvelope([b.id],{},context),error=>error.code==='degree_probe_unavailable');

@@ -1,15 +1,8 @@
-import { asRecord, byEpisodeTime, optionalText } from "./pi-session.ts";
-import { SCHEMA_ID } from "@anamnesis/protocol";
-import { createHash } from "node:crypto";
+import { asRecord, byEpisodeTime, optionalText, rawEpisode, type RawSessionEpisode } from "./pi-session.ts";
 import { copyFile, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { Database } from "bun:sqlite";
-import type { RememberInput } from "@anamnesis/core";
-import { maskSecrets } from "./secrets.ts";
-
-/** Beyond this the transcript turn lives in the object store, not the node. */
-const CONTENT_LIMIT = 4000;
 
 /**
  * The raw snapshot keeps one directory per agent product under `raw/`, and
@@ -42,10 +35,7 @@ const SKIPPED_STORES: readonly string[] = [
   "zed",
 ];
 
-export interface MiscRawEpisode {
-  input: RememberInput;
-  redactions: number;
-}
+export type MiscRawEpisode = RawSessionEpisode;
 
 /** One accepted turn, resolved against the store that produced it. */
 interface MiscTurn {
@@ -75,40 +65,12 @@ function parseLine(line: string): Record<string, unknown> | undefined {
 }
 
 function toEpisode(turn: MiscTurn): MiscRawEpisode {
-  const occurredAt = new Date(turn.occurredAt).toISOString();
-  /**
-   * Keyed on the raw text and the same pair every other adapter keys on, not
-   * on the masked text: a change to the masking rules would otherwise rewrite
-   * every revision key and open a false revision of each turn a new rule
-   * touches.
-   */
-  const revision = createHash("sha256")
-    .update(`${occurredAt}\n${turn.text}`, "utf8")
-    .digest("hex");
-  const { text, redactions } = maskSecrets(turn.text);
-  const oversized = text.length > CONTENT_LIMIT;
-  return {
-    redactions,
-    input: {
-      schema: SCHEMA_ID.ORIGINAL_MESSAGE,
-      content: oversized ? text.slice(0, CONTENT_LIMIT) : text,
-      origin: {
-        source: turn.source,
-        session: turn.session,
-        actor: turn.actor,
-        record: turn.record,
-      },
-      source_revision: revision,
-      time: { value: occurredAt, precision: "second" },
-      ...(oversized
-        ? {
-            payload: new TextEncoder().encode(text),
-            payload_media_type: "text/plain",
-          }
-        : {}),
-      properties: turn.properties,
-    },
-  };
+  return rawEpisode(turn.occurredAt, turn.text, {
+    source: turn.source,
+    session: turn.session,
+    actor: turn.actor,
+    record: turn.record,
+  }, turn.properties);
 }
 
 /**

@@ -43,7 +43,7 @@ anamnesis/
 
 Harnesses — whatever injects or retrieves text — live in separate repos owned
 by the operator and attach over the UDS RPC contract. `remember`/`recall`,
-`commit`, `policy.set`, `policy.revoke`, `adjudication.review`,
+`commit` (deferred), `policy.set`, `policy.revoke`, `adjudication.review`,
 `adjudication.correct`, `embedding.retry`, `embedding.skip` and
 `embedding.cancel` are API-only; the CLI never wraps them (D39, D43, D50,
 D51). `gen` gains one control action, `gen(action=qualify)`, which appends an

@@ -88,7 +88,7 @@ test('production composite seek bounds, deterministic identities and authorized 
     const session = driver.session();
     try {
       if (process.env.G004_ORDERED_BASELINE === '1') {
-        await assert.rejects(session.executeRead(tx => engine.store.graphRawProbeTx({ run:async (text, params) => {
+        await assert.rejects(session.executeRead(tx => engine.store.conducting.graphRawProbeTx({ run:async (text, params) => {
           if (text.startsWith('EXPLAIN ')) productionQuery = text.slice(8);
           return tx.run(text, params);
         } },id(999))), error => error.code === 'ordered_probe_unavailable');
@@ -109,7 +109,7 @@ test('production composite seek bounds, deterministic identities and authorized 
       // Invoke the production private probe, preserving its real EXPLAIN checker.
       // Only add PROFILE to execution; no copied or simplified query can pass here.
       for (const [source,count] of [[id(999),256],[id(997),0],[id(998),1]]) {
-        const rows = await session.executeRead(tx => engine.store.graphRawProbeTx({ run:async (text, params) => {
+        const rows = await session.executeRead(tx => engine.store.conducting.graphRawProbeTx({ run:async (text, params) => {
           if (text.startsWith('EXPLAIN ')) { productionQuery = text.slice(8); return tx.run(text, params); }
           assert.equal(text,productionQuery);
           const result = await tx.run(`PROFILE ${text}`,params);

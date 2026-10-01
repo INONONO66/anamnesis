@@ -184,8 +184,8 @@ replay evidence, not a full time machine (D47).
 
 | kind | Accessibility effect | Producer | Namespace |
 |---|---|---|---|
-| `recall_hit` | positive adoption coefficient κ = 1 before source sharing | authenticated receipt-mode `commit` | recall UUID |
-| `outcome` | none; separate utility `(reward, weight)` | authenticated receipt-mode `commit` | recall UUID |
+| `recall_hit` | positive adoption coefficient κ = 1 before source sharing | authenticated receipt-mode `commit` (deferred on the wire; in-process `Engine.commitReceipt`) | recall UUID |
+| `outcome` | none; separate utility `(reward, weight)` | authenticated receipt-mode `commit` (same deferral) | recall UUID |
 | `exposure` | none; audit of top-3 delivered primaries | daemon after auto-mode response | recall UUID |
 | `re_mention` | none; occurrence audit | extraction transaction | `extract:<episode_id>` |
 | `promotion` | none; synthesis support audit | dreaming transaction | `dream:<synthesis_fact_id>` |
@@ -356,6 +356,8 @@ sources remain control audit, never invented Episode Hits. No receipt,
 missing feedback or expired feedback is a negative label.
 
 ### Producer 1 — authenticated commit RPC (receipt clients)
+
+> **Deferred surface.** No shipped client sends `commit`, so the daemon does not serve it (listed in `RPC_FUTURE_METHODS`, absent from `RPC_METHODS`; answered `unsupported_method` with the request id echoed). Until it ships, a receipt-mode session produces receipts that receive no feedback at all: no exposure Hits (those are auto-mode only) and no adoption or outcome Hits, so `S`, `t_last_hit` and `U` are untouched by its recalls; `hello.capabilities.commit:false` is the only wire signal of this. The validation and write rules below are implemented and tested in-process as `Engine.commitReceipt`; exposing them over the wire means re-adding the removed bindings (protocol params and envelopes, daemon dispatch, runtime method) once a receipt-mode client exists.
 
 A JSON-RPC example (IDs must identify an actual issued receipt and primary):
 

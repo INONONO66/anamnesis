@@ -25,9 +25,10 @@ export const RPC_LIMITS = {
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
-  "object.commit", "remember", "ingest.status", "commit", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "embedding.recover", "embedding.status", "embedding.requeue",
+  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "embedding.recover", "embedding.status", "embedding.requeue",
 ] as const;
-export const RPC_FUTURE_METHODS = [] as const;
+/** Specified (docs/04 §6 producer 1) but not served: the daemon rejects them as unsupported_method until a client needs them. */
+export const RPC_FUTURE_METHODS = ["commit"] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
 
@@ -192,16 +193,6 @@ const deliveryIdentity = {
 export const RpcIngestStatusParams = z.strictObject(deliveryIdentity);
 export type RpcIngestStatusParams = z.infer<typeof RpcIngestStatusParams>;
 
-/** Feedback contains no derived state; attribution is resolved from the receipt. */
-export const RpcCommitParams = z.strictObject({
-  operation_id: z.uuidv7(), recall_id: z.uuidv7(),
-  adopted: z.array(z.uuidv7()).max(64).optional(),
-  reward: z.number().finite().min(-1).max(1).optional(),
-}).superRefine((value, context) => {
-  if (value.adopted === undefined && value.reward === undefined) context.addIssue({ code: "custom", message: "adopted or reward is required" });
-  if (value.adopted && new Set(value.adopted).size !== value.adopted.length) context.addIssue({ code: "custom", message: "adopted IDs must be distinct" });
-});
-export type RpcCommitParams = z.infer<typeof RpcCommitParams>;
 export const RpcHitCacheParams = z.strictObject({});
 export type RpcHitCacheParams = z.infer<typeof RpcHitCacheParams>;
 
@@ -246,7 +237,6 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("object.commit", z.strictObject({ upload_id: z.uuid() })),
   request("remember", RpcRememberParams),
   request("ingest.status", RpcIngestStatusParams),
-  request("commit", RpcCommitParams),
   request("extraction.audit.create", CreateExtractionPipeline),
   request("extraction.audit.run", RunExtractionPipeline),
   request("extraction.audit.status", ExtractionPipelineStatus),
@@ -432,7 +422,6 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("object.commit", RpcObjectMetadata),
   success("remember", RpcRememberResult),
   success("ingest.status", RpcIngestStatusResult),
-  success("commit", z.strictObject({ operation_id: z.uuidv7(), recall_id: z.uuidv7(), adopted: z.array(z.uuidv7()).max(64), reward: z.number().finite().min(-1).max(1).nullable(), applied: z.boolean() })),
   success("hit-cache.verify", z.strictObject({ state: z.literal("verified"), hits: counter, issues: z.array(z.strictObject({ code: boundedString(128), id: boundedString(128) })).max(1024) })),
   success("hit-cache.rebuild", z.strictObject({ state: z.literal("rebuilt"), hits: counter, created: counter, removed: counter })),
   success("graph.envelope", z.strictObject({ nodes: z.array(z.uuidv7()).max(2000), arcs: z.array(ConductingArcRow).max(20000),
