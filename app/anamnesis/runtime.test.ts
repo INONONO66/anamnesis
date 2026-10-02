@@ -76,7 +76,7 @@ async function withEnv<T>(overrides: Record<string, string | undefined>, run: ()
   try { return await run(); }
   finally { for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
 }
-const dbEnv = (uri: string) => ({ ANAMNESIS_NEO4J_URI: uri, ANAMNESIS_NEO4J_USER: TEST_DB.user, ANAMNESIS_NEO4J_PASSWORD: TEST_DB.password });
+const dbEnv = (uri: string) => ({ ANAMNESIS_NEO4J_URI: uri, ANAMNESIS_NEO4J_USER: TEST_DB.user, ANAMNESIS_NEO4J_PASSWORD: TEST_DB.password, ANAMNESIS_NEO4J_DATABASE: undefined });
 
 interface Booted { runtime: Runtime; lanes: BackgroundLane[] }
 async function boot(installation: Installation, uri = TEST_DB.uri, adapter?: ReturnType<typeof fakeAuthorityAdapter>["adapter"]): Promise<Booted> {
@@ -423,7 +423,7 @@ dbTest("backup and restore need an injected adapter and authenticated custody, t
   await runtime.uploads.store.put(new TextEncoder().encode("archived object"), "text/plain");
   const parent = await freshRoot();
   const destination = join(parent, "archive");
-  const archiveEnv = { ...dbEnv(TEST_DB.uri), ANAMNESIS_NEO4J_DATABASE: undefined };
+  const archiveEnv = dbEnv(TEST_DB.uri);
   expect(await withEnv(archiveEnv, () => runtime.backup(receiptContext, destination, operation))).toEqual({ state: "complete", operation_id: operation });
   expect(await runtime.backupStatus(operation)).toEqual({ state: "complete", operation_id: operation });
   expect(await runtime.backupStatus(uuidv7())).toMatchObject({ state: "unknown", reason: "not_found" });

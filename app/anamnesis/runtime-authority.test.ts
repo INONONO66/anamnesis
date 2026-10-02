@@ -164,8 +164,9 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
       finally { await driver.close(); }
     });
   } finally {
-    await engine.close();
-    if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
-    await rm(root, { recursive: true, force: true });
+    try {
+      await engine.close();
+      if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
+    } finally { await rm(root, { recursive: true, force: true }); }
   }
 }, 240_000);

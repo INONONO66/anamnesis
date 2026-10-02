@@ -21,7 +21,7 @@ test("selected test files replace default package and QA discovery", () => {
 });
 
 test("foundation defaults to packages plus QA tests without launching another harness", () => {
-  expect(parseOptions(base).testPaths).toEqual(["packages", "scripts/qa"]);
+  expect(parseOptions(base).testPaths).toEqual(["packages", "scripts/qa", "app/anamnesis/runtime.test.ts", "app/anamnesis/runtime-authority.test.ts"]);
 });
 
 test("live e2e requires explicit case selection and cannot become a test override", () => {

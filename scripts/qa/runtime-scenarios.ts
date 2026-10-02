@@ -18,7 +18,7 @@ const BLOCKED_CASES = new Map<string, string>();
 // Storage contracts contain real CAS, ordered-edge and legacy-format assertions.
 // Keep whole files: each receives the same isolated DB, cleared before the next.
 const CASE_TEST_PATHS = new Map<string, string[]>([
-  ["foundation", ["packages", "scripts/qa", "app/anamnesis/runtime.test.ts"]],
+  ["foundation", ["packages", "scripts/qa", "app/anamnesis/runtime.test.ts", "app/anamnesis/runtime-authority.test.ts"]],
   ["contract-and-cas", [
     "packages/core/src/remember-input.test.ts",
     "packages/core/src/storage-contract.test.ts",
@@ -353,11 +353,18 @@ export async function main(args = process.argv.slice(2)): Promise<string> {
         return testChild;
       },
       cleanup: async () => {
-        // A test that restarts the owned container receives a fresh ephemeral Bolt port; the next child must get the new one.
+        // A test that restarts the owned container receives a fresh ephemeral Bolt port and may leave Neo4j still booting;
+        // the next child must get the new port and a database that already answers.
         uri = await mappedBoltUri();
         const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 10_000, connectionAcquisitionTimeout: 10_000 });
-        try { await driver.executeQuery("MATCH (n) DETACH DELETE n"); }
-        finally { await driver.close(); }
+        try {
+          const deadline = Date.now() + 120_000;
+          for (;;) {
+            try { await driver.verifyConnectivity(); break; }
+            catch (error) { if (Date.now() >= deadline) throw error; await new Promise((resolve) => setTimeout(resolve, 500)); }
+          }
+          await driver.executeQuery("MATCH (n) DETACH DELETE n");
+        } finally { await driver.close(); }
       },
       record: (results) => {
         childResult = results.at(-1);
