@@ -1,5 +1,5 @@
 import {test,expect} from 'bun:test';
-import {CreateExtractionPipeline,ExtractionPipeline,ExtractionDisposition} from './extraction-audit.ts';
+import {CreateExtractionPipeline,ExtractionAuditError,ExtractionPipeline,ExtractionDisposition} from './extraction-audit.ts';
 import {ExtractionModelOutput,CreateModelTask} from './extraction.ts';
 import {RpcRequest,RpcCapabilities} from './rpc.ts';
 const id='01900000-0000-7000-8000-000000000001';
@@ -29,4 +29,12 @@ test('authenticated dispatcher has distinct audit methods; extraction capability
  expect(RpcCapabilities.shape.extraction.safeParse(false).success).toBe(true);
  expect(RpcCapabilities.shape.extraction.safeParse('enabled').success).toBe(false);
  for(const method of ['extraction.materialize','derived.recall'])expect(RpcRequest.safeParse({jsonrpc:'2.0',id:1,method,params:{}}).success).toBe(false);
+});
+
+test('audit errors expose their code as name-tagged message and field',()=>{
+ const error=new ExtractionAuditError('extraction_audit_stale');
+ expect(error).toBeInstanceOf(Error);
+ expect(error.name).toBe('ExtractionAuditError');
+ expect(error.code).toBe('extraction_audit_stale');
+ expect(error.message).toBe('extraction_audit_stale');
 });

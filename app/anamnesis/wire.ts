@@ -16,7 +16,6 @@ export function fault(error: unknown): RpcFault {
   if (error instanceof RpcFault) return error;
   if (error instanceof Error && ["stale_writer_epoch", "ownership_lost"].includes(error.message)) return new RpcFault("ownership_lost", "writer ownership was lost");
   if (storageUnavailable(error)) return new RpcFault("storage_unavailable", "database unavailable", true);
-  if (error instanceof Error && /^dream_[a-z_]+$/.test(error.message) && RpcErrorCode.safeParse(error.message).success) return new RpcFault(error.message as ErrorCode, error.message);
   if (error instanceof Error && "code" in error) {
     const parsed = RpcErrorCode.safeParse(error.code);
     if (parsed.success) return new RpcFault(parsed.data, error.message.slice(0, 512));

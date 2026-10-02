@@ -8,6 +8,7 @@ import {
   SCHEMA_LABELS,
   TIME_BEARING,
   TimePrecision,
+  isEpisodeSchema,
 } from "./index.ts";
 import { LINK_LATTICE, LinkRole } from "./link.ts";
 
@@ -287,5 +288,14 @@ describe("MemoryLink", () => {
   test("rejects non-positive weights", () => {
     expect(() => MemoryLink.parse({ ...validLink, weight: 0 })).toThrow();
     expect(() => MemoryLink.parse({ ...validLink, weight: -1 })).toThrow();
+  });
+});
+
+describe("episode-bearing schemas", () => {
+  test("only the two original-* schemas may be delivered directly by a source", () => {
+    expect(isEpisodeSchema("anamnesis.original-message/1")).toBe(true);
+    expect(isEpisodeSchema("anamnesis.original-document/1")).toBe(true);
+    expect(isEpisodeSchema("anamnesis.entity/1")).toBe(false);
+    expect(isEpisodeSchema("anamnesis.original-message/2")).toBe(false);
   });
 });

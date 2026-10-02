@@ -1,8 +1,6 @@
-import { createReadStream } from "node:fs";
 import { walkSorted } from "./walk.ts";
-import { createInterface } from "node:readline";
 import { Database } from "bun:sqlite";
-import { CONVERSATION_ROLES, SESSION_HEADER, byEpisodeTime, createSessionParser, isRecord, messageText, optionalText, parseEvent, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
+import { CONVERSATION_ROLES, byEpisodeTime, createSessionParser, isRecord, messageText, optionalText, readSessionFile, toEpisode, type RawSessionEpisode, type SessionEvent } from "./pi-session.ts";
 
 /**
  * The snapshot holds two homes side by side — the agent's own `~/.omo` store
@@ -22,35 +20,6 @@ const omoEpisode = (event: SessionEvent): OmoRawEpisode => {
   return toEpisode(event, "omo", properties);
 };
 export const createOmoRawParser = (): ((line: string) => OmoRawEpisode[]) => createSessionParser(omoEpisode);
-async function readSession(path: string): Promise<SessionEvent[]> {
-  const events: SessionEvent[] = [];
-  let session: string | undefined;
-  const stream = createReadStream(path, { encoding: "utf8" });
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of lines) {
-      if (line.trim() === "") continue;
-      let raw: unknown;
-      try {
-        raw = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!isRecord(raw)) continue;
-      if (raw["type"] === SESSION_HEADER) {
-        session = optionalText(raw["id"]);
-        continue;
-      }
-      if (session === undefined) continue;
-      const event = parseEvent(line);
-      if (event !== undefined) events.push({ ...event, session });
-    }
-  } finally {
-    lines.close();
-    stream.destroy();
-  }
-  return events;
-}
 
 /**
  * The memory extension re-encodes sessions it has already observed into
@@ -186,7 +155,7 @@ export async function collectOmoRaw(root: string): Promise<OmoRawEpisode[]> {
   const { transcripts, databases } = await sources(root);
   const episodes: OmoRawEpisode[] = [];
   for (const path of transcripts) {
-    for (const event of await readSession(path)) {
+    for (const event of await readSessionFile(path)) {
       episodes.push(omoEpisode(event));
     }
   }

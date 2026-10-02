@@ -46,6 +46,7 @@ app/anamnesis/managed-supervisor.test.ts
 packages/core/src/backoff.test.ts
 app/anamnesis/timing.test.ts
 packages/core/src/store/digest.test.ts
+packages/core/src/store/schema.test.ts
 packages/protocol/src/materialization.test.ts
 packages/core/src/legacy-format.test.ts
 app/anamnesis/recovery-probe.test.ts
@@ -54,3 +55,15 @@ app/anamnesis/client-deadline.test.ts
 app/anamnesis/runtime-authority.test.ts
 app/anamnesis/owned-neo4j-adapter.test.ts
 app/anamnesis/backup-restore-orchestrator.test.ts
+app/anamnesis/archive-manifest.test.mjs
+packages/core/src/extraction-scheduler-pure.test.ts
+packages/backfill/src/agentlog-stream.test.ts
+packages/backfill/src/clauderaw-parser.test.ts
+packages/backfill/src/gjcraw.test.ts
+packages/backfill/src/miscraw-parser.test.ts
+packages/backfill/src/notion-parser.test.ts
+packages/core/src/store/helpers-pure.test.ts
+packages/backfill/src/raw-sessions-fs.test.ts
+packages/core/src/journal-pure.test.ts
+packages/backfill/src/codexraw-fs.test.ts
+packages/backfill/src/slack-fs.test.ts

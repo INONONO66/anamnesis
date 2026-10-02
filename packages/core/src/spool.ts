@@ -42,7 +42,7 @@ const emptyCompletion = (): Completion => ({ present: false, version: 2, frontie
 type SpoolState = SpoolPage & { boundary: number; count: number; completion: Completion; quarantined: boolean };
 const emptyState = (quarantined = false): SpoolState => ({ boundary: 0, count: 0, entries: [], nextCursor: null, completion: emptyCompletion(), quarantined });
 type PageCursor = { boundary: number; count: number; index: number; proof: string; identity: string };
-class CorruptSpool extends Error {}
+class CorruptSpool extends Error { constructor(message: string) { super(message); this.name = "CorruptSpool"; } }
 
 /** Streaming JSON for the existing double-encoded .done envelope, not a new authority.
  * No sequence array or payload string is materialized. Chunks are <=64 KiB;

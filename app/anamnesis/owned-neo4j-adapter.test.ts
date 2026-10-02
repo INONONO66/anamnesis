@@ -5,7 +5,7 @@ import type { ArchiveManifest } from "./archive-manifest.ts";
 const CONTAINER = "anamnesis-qa-neo4j";
 const OWNER = "qa-owner";
 const OWNER_LABEL = "anamnesis.qa.owner";
-const INSPECT = ["docker", "inspect", "--format", "{{json .}}", CONTAINER];
+const INSPECT = ["inspect", "--format", "{{json .}}", CONTAINER];
 
 type Arg = string | number | ArchiveManifest | undefined;
 

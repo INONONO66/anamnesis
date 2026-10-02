@@ -48,6 +48,12 @@ type Known = Extract<ExtractionPipeline, { state: "known" }>;
 type Action = Outcome | "run" | "pending" | "unresolved" | { kind: "retry" | "settle" | "cancel"; task: ModelTask };
 interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null; task: string | null }
 
+/** The engine surface the scheduler drives: the daemon passes its Engine, pure tests a scripted fake. */
+export type SchedulerEngine = Pick<Engine, "readExtractionSelection" | "cutoverExtractionGeneration" | "createExtractionPipeline" | "runExtractionPipeline"> & {
+  readonly store: Pick<Engine["store"], "getExtractionGeneration" | "createExtractionGeneration" | "recordExtractionCoverage" | "readExtractionPipeline"
+    | "factRelationFailures" | "sealFactRelationOmission" | "retryModelTask" | "cancelModelTask" | "settleModelTask">;
+};
+
 const PARTITIONS = ["episodes", "active_extraction"] as const;
 /** Scan window and coverage step; recordExtractionCoverage refuses larger batches. */
 const COVERAGE_STEP = 256;
@@ -75,7 +81,7 @@ export class ExtractionScheduler {
   /** Earliest lease expiry the lane must revisit (a lease held by a lost writer or a previous incarnation). */
   private deferred: { at: number; timer: ReturnType<typeof setTimeout> } | undefined;
 
-  constructor(private readonly engine: Engine, options: ExtractionSchedulerOptions) {
+  constructor(private readonly engine: SchedulerEngine, options: ExtractionSchedulerOptions) {
     this.provider = options.provider; this.context = options.context; this.read = options.read; this.wake = options.wake;
     this.workerId = options.workerId ?? "daemon-extraction";
     this.maxInFlight = options.maxInFlight ?? 4;

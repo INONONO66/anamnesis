@@ -12,6 +12,7 @@ import neo4j, { EagerResult } from "neo4j-driver";
 import { Store } from "../../packages/core/src/store.ts";
 import { EpisodeJournal } from "../../packages/core/src/journal.ts";
 import { DurableSpool } from "../../packages/core/src/spool.ts";
+import { legacyHashes, legacyLines } from "../../packages/core/src/legacy-journal.fixture.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
 import type { RpcRememberParams, RpcRememberResult } from "../../packages/protocol/src/rpc.ts";
 
@@ -27,14 +28,6 @@ function canonical(value: unknown): string {
 }
 const identity = (r: RpcRememberResult) => ({ revision_key: r.revision_key, body_digest: r.body_digest, data_incarnation: r.data_incarnation });
 const input = (record: string, minute: string): RpcRememberParams => ({ episode: { schema: "anamnesis.original-message/1", time: { value: `2026-09-09T00:${minute}:00Z`, precision: "second" }, content: `G001 ${record}`, origin: { source: "g001-crash", session: "ordered-crash-session", actor: "fixture", record }, mass: 1, properties: { fixture: true } }, source_revision: "v1", expected_previous_revision_key: null });
-// Exact reconstructed post167/pre194 contracts from legacy-integrity.test.ts;
-// these bytes are historical inspection fixtures, not a legacy import API.
-const legacyLines = [
-  '{"recordedAt":"2026-09-02T12:34:56.000Z","element":{"schema":"anamnesis.original-message/1","content":"Ino prefers dark mode.","origin":{"source":"slack","session":"C0123/2026-08-21","actor":"U098765","record":"1724221402.000300"},"mass":0.5,"properties":{}}}\n',
-  '{"recordedAt":"2026-09-02T12:34:56.000Z","element":{"schema":"anamnesis.claim/1","content":"Ino prefers dark mode.","origin":{"source":"slack","session":"C0123/2026-08-21","actor":"U098765","record":"1724221402.000300"},"mass":0.5,"properties":{}}}\n',
-  '{"recordedAt":"2026-09-02T12:34:56.000Z","element":{"schema":"anamnesis.claim/1","time":{"value":"2026-08-21T14:03:22+09:00","precision":"second"},"content":"Ino prefers dark mode.","origin":{"source":"slack","session":"C0123/2026-08-21","actor":"U098765","record":"1724221402.000300"},"mass":0.5,"properties":{"sub_kind":"opinion"}}}\n',
-];
-const legacyHashes = ["49db3f55710c6c97fd63f08fd02cc4cbd05b6087bb76b0f88172603471c2de56", "983f4439c13cf3bf8aeb877b73861cf4a3e0335970cffcb512df9810b893542c", "2149154d303dd0a84da9714b5acb3ba3bc1f580199c7c8679e3f6c3256ec10de"];
 const legacyDigests = ["25336ecb71d5a5703763925ee83621b5f014a2c2ea4f6051993018c390b181e1", "4d0514a31ade66835f45f840dd0609cf967a1b2a57cb37e30b4808f60c99c31b", "56ab9d7ca2f8f00995e99a6efe75fa8b8be2609b137141a630dba94db21085af"];
 const legacyIds = ["0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e0f", "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e10", "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e11"];
 const unknownOutcome = (error: unknown) => ({ success: false as const, error: String(error), code: error instanceof Error && "code" in error ? error.code : null });

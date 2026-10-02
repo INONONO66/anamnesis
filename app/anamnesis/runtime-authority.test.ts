@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuthoritySnapshot } from "@anamnesis/core";
 import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
-import { NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
+import { NEO4J_IMAGE, NEO4J_VERSION, OwnedNeo4jAdapter } from "./owned-neo4j-adapter.ts";
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const cutoff = { ingest_seq: 7, structure_revision: 3, policy_revision: 2 };
@@ -70,20 +70,33 @@ test("manifestTemplate pins format, image digest and one data+sidecar member per
   expect(manifest.objects).toBe(objects);
 });
 
+const AUTHORITY_ENV = ["ANAMNESIS_NEO4J_CONTAINER", "ANAMNESIS_QA_OWNER"] as const;
+type AuthorityEnv = typeof AUTHORITY_ENV[number];
+
+async function withAuthorityEnv(values: Partial<Record<AuthorityEnv, string>>, run: () => Promise<void>): Promise<void> {
+  const saved = AUTHORITY_ENV.map(name => [name, process.env[name]] as const);
+  for (const name of AUTHORITY_ENV) { const value = values[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  try { await run(); }
+  finally { for (const [name, value] of saved) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+}
+
+// Neither test reaches a path that reads engine, installation or context: the guard throws first, and the
+// construction path only captures them in closures that are never invoked here.
+type Args = Parameters<typeof createRuntimeAuthority>;
+const unreadArgs: Args = [{} as Args[0], {} as Args[1], {} as Args[2]];
+
 test.each([
   { missing: "ANAMNESIS_NEO4J_CONTAINER", present: "ANAMNESIS_QA_OWNER" },
   { missing: "ANAMNESIS_QA_OWNER", present: "ANAMNESIS_NEO4J_CONTAINER" },
-])("createRuntimeAuthority refuses to build when $missing is unset", async ({ missing, present }) => {
-  const saved = { container: process.env["ANAMNESIS_NEO4J_CONTAINER"], owner: process.env["ANAMNESIS_QA_OWNER"] };
-  delete process.env[missing];
-  process.env[present] = "set";
-  // The guard runs before any argument is read; the typed empty objects are never dereferenced.
-  type Args = Parameters<typeof createRuntimeAuthority>;
-  const [engine, installation, context]: Args = [{} as Args[0], {} as Args[1], {} as Args[2]];
-  try {
-    await expect(createRuntimeAuthority(engine, installation, context)).rejects.toMatchObject({ code: "backup_adapter_unavailable" });
-  } finally {
-    if (saved.container === undefined) delete process.env["ANAMNESIS_NEO4J_CONTAINER"]; else process.env["ANAMNESIS_NEO4J_CONTAINER"] = saved.container;
-    if (saved.owner === undefined) delete process.env["ANAMNESIS_QA_OWNER"]; else process.env["ANAMNESIS_QA_OWNER"] = saved.owner;
-  }
-});
+] as const)("createRuntimeAuthority refuses to build when $missing is unset", ({ present }) => withAuthorityEnv({ [present]: "set" }, async () => {
+  await expect(createRuntimeAuthority(...unreadArgs)).rejects.toMatchObject({ code: "backup_adapter_unavailable" });
+}));
+
+// The four methods invoked below are literal no-ops in createRuntimeAuthority; none of them may ever reach the adapter's docker exec,
+// or this pure suite would spawn a real docker process.
+test("createRuntimeAuthority returns an owned adapter once both names are set; rebind, verify, quarantine and stop resolve to nothing", () =>
+  withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: "anamnesis-qa-neo4j", ANAMNESIS_QA_OWNER: "qa-owner" }, async () => {
+    const adapter = await createRuntimeAuthority(...unreadArgs);
+    expect(adapter).toBeInstanceOf(OwnedNeo4jAdapter);
+    await expect(Promise.all([adapter.rebindSource("src"), adapter.verifyPhysicalLinks("/root"), adapter.quarantine("/root"), adapter.stop()])).resolves.toEqual([undefined, undefined, undefined, undefined]);
+  }));

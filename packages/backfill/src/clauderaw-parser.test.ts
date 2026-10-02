@@ -43,3 +43,9 @@ test("delegation context survives compaction and exact payload/masking stays nat
   expect(episode!.input.payload_media_type).toBe("text/plain");
   expect(episode!.input.source_revision).toBe(createHash("sha256").update("1970-01-01T00:00:01.000Z\n" + text).digest("hex"));
 });
+test("a message whose role contradicts its record type is dropped rather than relabeled", () => {
+  const parse = createClaudeRawParser({ path: "a.jsonl" }, true);
+  const message = (role: string) => bytes({ type: "user", timestamp: 1000, message: { role, content: [{ type: "text", text: "hi" }] } });
+  expect(parse(message("assistant"))).toEqual([]);
+  expect(parse(message("user"))).toHaveLength(1);
+});

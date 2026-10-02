@@ -41,3 +41,13 @@ test("fatal UTF-8 decoding reports a parse failure without logging record secret
     await expect(streamAgentLogFile(path).next()).rejects.toThrow(`source_parse_error: ${path}:1`);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("a non-numeric event time leaves the line non-recallable; a missing required field is rejected by name", () => fixture(
+  JSON.stringify({ ...event, occurred_at: "1000" }) + "\n" + JSON.stringify({ ...event, provider: undefined }) + "\n",
+  async (root, path) => {
+    const iterator = streamAgentLogFile(path);
+    expect((await iterator.next()).value).toEqual({ line: 1, episode: null });
+    await expect(iterator.next()).rejects.toThrow(`source_parse_error: ${path}:2`);
+    await expect(collectAgentLog(root)).rejects.toThrow(/^agent event without provider\b/);
+  },
+));
