@@ -1,5 +1,5 @@
 import { describe, expect, test, spyOn } from "bun:test";
-import { FrameFault, Frames, RpcByteBudget, RPC_BYTE_LIMITS, decodeRequest, encode, errorResponse, type ByteAccount } from "./wire.ts";
+import { FrameFault, Frames, RpcByteBudget, RpcFault, RPC_BYTE_LIMITS, decodeRequest, encode, errorResponse, fault, storageUnavailable, type ByteAccount } from "./wire.ts";
 import { RPC_LIMITS } from "../../packages/protocol/src/rpc.ts";
 
 const account = (): ByteAccount => ({ used: { general: 0, control: 0, ingress: 0 } });
@@ -134,5 +134,44 @@ describe("decodeRequest", () => {
       expect(caught).not.toBeInstanceOf(FrameFault);
       expect(["parse_error", "invalid_request"]).toContain((caught as { code: string }).code);
     }
+  });
+});
+
+describe("fault", () => {
+  const coded = (code: string, message = "driver said no") => Object.assign(new Error(message), { code });
+  test("storageUnavailable recognises only Error instances carrying a transient driver code", () => {
+    expect(storageUnavailable("ServiceUnavailable")).toBe(false);
+    expect(storageUnavailable(new Error("ServiceUnavailable"))).toBe(false);
+    expect(storageUnavailable(coded("Neo.ClientError.Statement.SyntaxError"))).toBe(false);
+    for (const code of ["ServiceUnavailable", "SessionExpired", "Neo.TransientError.General.DatabaseUnavailable"]) expect(storageUnavailable(coded(code))).toBe(true);
+  });
+  test("an RpcFault passes through untouched", () => {
+    const own = new RpcFault("policy_denied", "no", true);
+    expect(fault(own)).toBe(own);
+  });
+  test("runtime errors map to a protocol code, retryable only for a transient store", () => {
+    const cases: [unknown, RpcFault["code"], boolean][] = [
+      [new Error("stale_writer_epoch"), "ownership_lost", false],
+      [new Error("ownership_lost"), "ownership_lost", false],
+      [coded("SessionExpired"), "storage_unavailable", true],
+      [coded("invalid_selection"), "invalid_selection", false],
+      [coded("ENOSPC"), "resource_exhausted", false],
+      [coded("EDQUOT"), "resource_exhausted", false],
+      [coded("ENOENT"), "internal_error", false],
+      [new Error("spool quota exceeded"), "resource_exhausted", false],
+      [new Error("anything else"), "internal_error", false],
+      ["not an error", "internal_error", false],
+    ];
+    for (const [error, code, retryable] of cases) {
+      const mapped = fault(error);
+      expect([mapped.code, mapped.retryable]).toEqual([code, retryable]);
+    }
+  });
+  test("a message that merely spells a protocol code is not mapped; only the ownership and spool message allowlists are", () => {
+    expect([fault(new Error("policy_denied")).code, fault(new Error("storage_unavailable")).code]).toEqual(["internal_error", "internal_error"]);
+  });
+  test("a protocol-coded error keeps at most 512 characters of its own message; other mappings use fixed text", () => {
+    expect(fault(coded("invalid_selection", "x".repeat(600))).message).toBe("x".repeat(512));
+    expect(fault(coded("ENOENT", "secret path")).message).not.toContain("secret path");
   });
 });

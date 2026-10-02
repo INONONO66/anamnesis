@@ -11,7 +11,8 @@ export const NEO4J_IMAGE = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f
 export const NEO4J_VERSION = "5.26.30";
 const OWNER_LABEL = "anamnesis.qa.owner";
 
-type Exec = (args: string[], options?: { stdin?: Uint8Array }) => Promise<{ stdout: string }>;
+/** Runs one docker sub-command; `args` never include the `docker` executable itself. */
+type Exec = (args: string[]) => Promise<{ stdout: string }>;
 export interface OwnedNeo4jAdapterOptions {
   container: string;
   owner: string;
@@ -21,8 +22,7 @@ export interface OwnedNeo4jAdapterOptions {
 }
 
 async function command(args: string[]): Promise<{ stdout: string }> {
-  if (args[0] !== "docker") throw new Error("owned adapter only permits docker");
-  const child = spawn("docker", args.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
   let stdout = Buffer.alloc(0), stderr = "";
   child.stdout?.on("data", (b: Buffer) => { stdout = Buffer.concat([stdout, b]); });
   child.stderr?.on("data", (b: Buffer) => { stderr += b.toString(); });
@@ -39,7 +39,7 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
   constructor(private readonly options: OwnedNeo4jAdapterOptions) { this.run = options.exec ?? command; }
 
   private async assertOwned(): Promise<void> {
-    const result = await this.run(["docker", "inspect", "--format", "{{json .}}", this.options.container]);
+    const result = await this.run(["inspect", "--format", "{{json .}}", this.options.container]);
     const value = JSON.parse(result.stdout) as { Config?: { Labels?: Record<string, string> }; State?: { Running?: boolean } };
     if (value.Config?.Labels?.[OWNER_LABEL] !== this.options.owner) throw new Error("owned_container_required");
   }
@@ -76,6 +76,6 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
     const completion = new Promise<number>((resolve, reject) => { child.once("error", reject); child.once("close", c => resolve(c ?? 1)); });
     await pipeline(createReadStream(dump, { flags: "r" }), child.stdin!);
     if (await completion !== 0) throw new Error(`neo4j_load_failed: ${stderr.slice(-1000)}`);
-    await this.run(["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "chown", "-v", `${staging}/database:/data`, NEO4J_IMAGE, "-R", "7474:7474", "/data"]);
+    await this.run(["run", "--rm", "--user", "0:0", "--entrypoint", "chown", "-v", `${staging}/database:/data`, NEO4J_IMAGE, "-R", "7474:7474", "/data"]);
   }
 }

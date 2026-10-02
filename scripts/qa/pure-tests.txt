@@ -55,6 +55,7 @@ app/anamnesis/client-deadline.test.ts
 app/anamnesis/runtime-authority.test.ts
 app/anamnesis/owned-neo4j-adapter.test.ts
 app/anamnesis/backup-restore-orchestrator.test.ts
+app/anamnesis/archive-manifest.test.mjs
 packages/core/src/extraction-scheduler-pure.test.ts
 packages/backfill/src/agentlog-stream.test.ts
 packages/backfill/src/clauderaw-parser.test.ts
