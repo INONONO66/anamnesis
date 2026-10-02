@@ -46,6 +46,7 @@ app/anamnesis/managed-supervisor.test.ts
 packages/core/src/backoff.test.ts
 app/anamnesis/timing.test.ts
 packages/core/src/store/digest.test.ts
+packages/core/src/store/schema.test.ts
 packages/protocol/src/materialization.test.ts
 packages/core/src/legacy-format.test.ts
 app/anamnesis/recovery-probe.test.ts

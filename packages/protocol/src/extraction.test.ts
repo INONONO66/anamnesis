@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ExtractionAttempt, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
+import { CompleteExtractionAttempt, ExtractionAttempt, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 describe("G004 extraction contract", () => {
   test("canonicalizes JSON domain with UTF-16 ordering and rejects invalid values", () => {
@@ -69,5 +69,22 @@ describe("G004 extraction contract", () => {
     expect(LeaseModelTask.parse({ ...base, lease_ms: 120000 }).lease_ms).toBe(120000);
     expect(() => LeaseModelTask.parse({ ...base, lease_ms: 120001 })).toThrow();
     expect(() => LeaseModelTask.parse({ ...base, lease_ms: 0 })).toThrow();
+  });
+
+  test("a failed completion names a provider or size reason and carries no disposition or reported model", () => {
+    const failed = {
+      task_id: "018f5b5e-7b1e-7abc-8def-123456789012", expected_version: 1, id: "018f5b5e-7b1e-7abc-8def-123456789015", lease_epoch: "018f5b5e-7b1e-7abc-8def-123456789016",
+      state: "failed", reason: "provider_unavailable", disposition: null, output: null, spans: [],
+    };
+    const refineRejects = (value: object) => {
+      const result = CompleteExtractionAttempt.safeParse(value);
+      return !result.success && result.error.issues.map(issue => issue.code).join() === "custom";
+    };
+    expect(CompleteExtractionAttempt.parse(failed).reason).toBe("provider_unavailable");
+    expect(CompleteExtractionAttempt.parse({ ...failed, reason: "input_too_large", detail: "json" }).detail).toBe("json");
+    expect(refineRejects({ ...failed, reason: "policy_denied" })).toBe(true);
+    expect(refineRejects({ ...failed, reason: null })).toBe(true);
+    expect(refineRejects({ ...failed, reported_model: "fixture" })).toBe(true);
+    expect(refineRejects({ ...failed, disposition: "retain" })).toBe(true);
   });
 });
