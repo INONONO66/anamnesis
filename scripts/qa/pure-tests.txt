@@ -63,3 +63,5 @@ packages/backfill/src/notion-parser.test.ts
 packages/core/src/store/helpers-pure.test.ts
 packages/backfill/src/raw-sessions-fs.test.ts
 packages/core/src/journal-pure.test.ts
+packages/backfill/src/codexraw-fs.test.ts
+packages/backfill/src/slack-fs.test.ts
