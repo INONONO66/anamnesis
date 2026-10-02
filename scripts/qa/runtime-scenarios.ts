@@ -18,7 +18,7 @@ const BLOCKED_CASES = new Map<string, string>();
 // Storage contracts contain real CAS, ordered-edge and legacy-format assertions.
 // Keep whole files: each receives the same isolated DB, cleared before the next.
 const CASE_TEST_PATHS = new Map<string, string[]>([
-  ["foundation", ["packages", "scripts/qa"]],
+  ["foundation", ["packages", "scripts/qa", "app/anamnesis/runtime.test.ts"]],
   ["contract-and-cas", [
     "packages/core/src/remember-input.test.ts",
     "packages/core/src/storage-contract.test.ts",
