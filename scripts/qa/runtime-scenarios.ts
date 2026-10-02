@@ -318,9 +318,12 @@ export async function main(args = process.argv.slice(2)): Promise<string> {
       throw new Error(`Neo4j did not emit Started: ${JSON.stringify(result)}`);
     }
     endpointTiming?.({ layer: "neo4j", event: "ready" });
-    const port = await docker(["inspect", "-f", '{{(index (index .NetworkSettings.Ports "7687/tcp") 0).HostPort}}', name]);
-    if (port.code !== 0 || !/^\d+$/.test(port.output.trim())) throw new Error("Unable to inspect mapped Bolt port");
-    const uri = `bolt://127.0.0.1:${port.output.trim()}`;
+    const mappedBoltUri = async () => {
+      const port = await docker(["inspect", "-f", '{{(index (index .NetworkSettings.Ports "7687/tcp") 0).HostPort}}', name]);
+      if (port.code !== 0 || !/^\d+$/.test(port.output.trim())) throw new Error("Unable to inspect mapped Bolt port");
+      return `bolt://127.0.0.1:${port.output.trim()}`;
+    };
+    let uri = await mappedBoltUri();
     record("endpoint.json", { uri, user: "neo4j", container: name });
     controller.signal.throwIfAborted();
     const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 10_000, connectionAcquisitionTimeout: 10_000 });
@@ -344,12 +347,15 @@ export async function main(args = process.argv.slice(2)): Promise<string> {
         testChild = launch(runtimeCase ? "node" : bunRunner, runtimeCase ? [file, options.caseName, evidence] : ["test", file], {
           deadlineMs: 900_000,
           signal: controller.signal,
-          env: { ...process.env, ANAMNESIS_TEST_NEO4J_URI: uri, ANAMNESIS_TEST_NEO4J_USER: "neo4j", ANAMNESIS_TEST_NEO4J_PASSWORD: password, ANAMNESIS_NEO4J_PASSWORD: password },
+          env: { ...process.env, ANAMNESIS_TEST_NEO4J_URI: uri, ANAMNESIS_TEST_NEO4J_USER: "neo4j", ANAMNESIS_TEST_NEO4J_PASSWORD: password, ANAMNESIS_NEO4J_PASSWORD: password,
+            ANAMNESIS_NEO4J_CONTAINER: name, ANAMNESIS_QA_OWNER: owner },
         }, "child-output.txt");
         return testChild;
       },
       cleanup: async () => {
-        const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password));
+        // A test that restarts the owned container receives a fresh ephemeral Bolt port; the next child must get the new one.
+        uri = await mappedBoltUri();
+        const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 10_000, connectionAcquisitionTimeout: 10_000 });
         try { await driver.executeQuery("MATCH (n) DETACH DELETE n"); }
         finally { await driver.close(); }
       },

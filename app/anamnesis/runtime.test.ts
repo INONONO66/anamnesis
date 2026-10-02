@@ -388,6 +388,21 @@ dbTest("storage-backed RPCs pass through to the engine under the caller's custod
   expect(await runtime.embeddingStatus(uuidv7(), receiptContext)).toMatchObject({ state: "unknown" });
 });
 
+dbTest("a prior revision denied by episode id is withheld from the primary's supersedes view", async () => {
+  const installation = installationAt(await freshRoot());
+  const { runtime } = await boot(installation);
+  const original = delivery({ record: "revised", content: "the sleepy owl hoots" });
+  const first = asCommitted(await runtime.remember(original));
+  const second = asCommitted(await runtime.remember(delivery({ record: "revised", revision: "v2", predecessor: sourceRevisionKey(original), content: "the sleepy owl hoots at dusk" })));
+  const view = (recall: Awaited<ReturnType<Runtime["recall"]>>) => recall.results.map(item => [item.id, item.provenance.supersedes, item.provenance.supersedes_redacted]);
+  const query = { query: "sleepy owl hoots", limit: 5 };
+  expect(view(await runtime.recall(query, autoContext))).toEqual([[second.id, [{ id: first.id, content: "the sleepy owl hoots" }], false]]);
+  expect(await runtime.setPolicy({ policy_id: uuidv7(), selector: { episode_id: first.id }, scope: "content" }, receiptContext)).toMatchObject({ action: "deny", applied: true });
+  const withheld = await runtime.recall(query, autoContext);
+  expect(view(withheld)).toEqual([[second.id, [], true]]);
+  expect(withheld.results[0]!.provenance.warnings.map(warning => warning.code)).toEqual(["supersedes_withheld"]);
+});
+
 dbTest("backup and restore need an injected adapter and authenticated custody, then report operation state", async () => {
   const installation = installationAt(await freshRoot());
   const unequipped = await boot(installation);

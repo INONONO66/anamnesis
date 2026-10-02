@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AuthoritySnapshot } from "@anamnesis/core";
+import { promisify } from "node:util";
+import neo4j from "neo4j-driver";
+import { v7 as uuidv7 } from "uuid";
+import { Engine, type AuthoritySnapshot, type InstallationContext } from "@anamnesis/core";
 import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { NEO4J_IMAGE, NEO4J_VERSION, OwnedNeo4jAdapter } from "./owned-neo4j-adapter.ts";
 
@@ -70,7 +74,7 @@ test("manifestTemplate pins format, image digest and one data+sidecar member per
   expect(manifest.objects).toBe(objects);
 });
 
-const AUTHORITY_ENV = ["ANAMNESIS_NEO4J_CONTAINER", "ANAMNESIS_QA_OWNER"] as const;
+const AUTHORITY_ENV = ["ANAMNESIS_NEO4J_CONTAINER", "ANAMNESIS_QA_OWNER", "ANAMNESIS_NEO4J_URI"] as const;
 type AuthorityEnv = typeof AUTHORITY_ENV[number];
 
 async function withAuthorityEnv(values: Partial<Record<AuthorityEnv, string>>, run: () => Promise<void>): Promise<void> {
@@ -100,3 +104,68 @@ test("createRuntimeAuthority returns an owned adapter once both names are set; r
     expect(adapter).toBeInstanceOf(OwnedNeo4jAdapter);
     await expect(Promise.all([adapter.rebindSource("src"), adapter.verifyPhysicalLinks("/root"), adapter.quarantine("/root"), adapter.stop()])).resolves.toEqual([undefined, undefined, undefined, undefined]);
   }));
+
+const OWNED = {
+  uri: process.env["ANAMNESIS_TEST_NEO4J_URI"] ?? "", password: process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"] ?? "",
+  container: process.env["ANAMNESIS_NEO4J_CONTAINER"] ?? "", owner: process.env["ANAMNESIS_QA_OWNER"] ?? "",
+};
+const ownedTest = test.skipIf(Object.values(OWNED).some(value => value === ""));
+const dockerOutput = async (args: string[]) => (await promisify(execFile)("docker", args)).stdout.trim();
+const installationContext: InstallationContext = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() };
+
+ownedTest("the runtime authority fences the owned container, dumps and reloads it offline, then restarts it on its new port", async () => {
+  const parent = join(homedir(), ".cache/anamnesis-qa");
+  await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(join(parent, "runtime-authority-"));
+  const engine = new Engine({ uri: OWNED.uri, password: OWNED.password, objectsRoot: join(root, "objects") });
+  const installation = { root, token: "token", incarnation: uuidv7(), epoch: uuidv7(), assertOwned: async () => {}, release: async () => {} };
+  const archive = join(root, "archive"), staging = join(root, "staging"), corrupt = join(root, "corrupt");
+  await mkdir(join(archive, "database"), { recursive: true });
+  await mkdir(join(corrupt, "database"), { recursive: true });
+  await writeFile(join(corrupt, "database", "neo4j.dump"), "not a neo4j dump");
+  try {
+    await engine.init();
+    await engine.claimWriterEpoch();
+    const episode = await engine.remember({ content: "fenced before the dump", time: { value: "2026-09-01T00:00:00Z", precision: "day" }, origin: { source: root, session: root, actor: "user", record: "one" }, source_revision: "v1", expected_previous_revision_key: null },
+      { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context: installationContext });
+    await withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: OWNED.container, ANAMNESIS_QA_OWNER: OWNED.owner, ANAMNESIS_NEO4J_URI: OWNED.uri }, async () => {
+      const adapter = await createRuntimeAuthority(engine, installation, installationContext);
+      await expect(adapter.authoritySnapshot("1")).rejects.toThrow("writer_fence_required");
+      const fenced = await adapter.revokeWriters();
+      expect(fenced.epoch).toMatch(/^\d+$/);
+      expect(fenced.cutoff).toMatchObject({ ingest_seq: 1, policy_revision: 0 });
+      expect(await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container])).toBe("false");
+      const authority = await adapter.authoritySnapshot(fenced.epoch);
+      expect(authority.members).toEqual([episode.id]);
+      expect(authority.coverage).toEqual(fenced.cutoff);
+      const dumpPath = join(archive, "database", "neo4j.dump");
+      const dump = await adapter.dumpOffline(dumpPath, fenced.epoch);
+      const bytes = (await stat(dumpPath)).size;
+      expect(bytes).toBeGreaterThan(0);
+      expect(dump).toEqual({ metadata: Buffer.from(JSON.stringify({ format: "anamnesis.adapter-dump/1", epoch: fenced.epoch, bytes }) + "\n"), neo4jVersion: NEO4J_VERSION, imageDigest: NEO4J_IMAGE.slice("neo4j@".length) });
+      const manifest = manifestTemplate("op-live", fenced.cutoff, authority, [], "c".repeat(64));
+      await adapter.materializeMembers(archive, manifest);
+      const config = await readFile(join(archive, "config.jsonc"));
+      expect(JSON.parse(config.toString())).toEqual({ uri: OWNED.uri, user: "neo4j", database: "neo4j" });
+      expect(JSON.parse(await readFile(join(archive, "neo4j.auth"), "utf8"))).toEqual({ database: "neo4j" });
+      expect(manifest.members.find(member => member.role === "config")).toMatchObject({ bytes: config.byteLength, sha256: sha256(config) });
+      expect(manifest.members.find(member => member.role === "auth")?.bytes).toBe((await stat(join(archive, "neo4j.auth"))).size);
+      await mkdir(join(root, "memberless"));
+      await expect(adapter.materializeMembers(join(root, "memberless"), { ...manifest, members: [] })).rejects.toThrow("invalid_manifest_members");
+      await adapter.restoreOffline(archive, staging, manifest);
+      expect(await readdir(join(staging, "database", "databases"))).toContain("neo4j");
+      await expect(adapter.restoreOffline(corrupt, join(root, "corrupt-staging"), manifest)).rejects.toThrow("neo4j_load_failed");
+      expect(await adapter.startAndReady(root, fenced.epoch)).toEqual({ sourceId: installation.incarnation, epoch: fenced.epoch, ready: true });
+      const restarted = process.env["ANAMNESIS_NEO4J_URI"] ?? "";
+      expect(restarted).toMatch(/^bolt:\/\/127\.0\.0\.1:\d+$/);
+      expect(await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container])).toBe("true");
+      const driver = neo4j.driver(restarted, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
+      try { expect((await driver.executeQuery("MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).records[0]!.get("n")).toBe(1); }
+      finally { await driver.close(); }
+    });
+  } finally {
+    await engine.close();
+    if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
+    await rm(root, { recursive: true, force: true });
+  }
+}, 240_000);
