@@ -20,7 +20,7 @@ test("selected test files replace default package and QA discovery", () => {
     .toEqual(["./packages/core/src/remember-input.test.ts"]);
 });
 
-test("foundation defaults to packages plus QA tests without launching another harness", () => {
+test("foundation defaults to packages, QA tests and the in-process app suites without launching another harness", () => {
   expect(parseOptions(base).testPaths).toEqual(["packages", "scripts/qa", "app/anamnesis/runtime.test.ts", "app/anamnesis/runtime-authority.test.ts"]);
 });
 
