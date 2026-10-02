@@ -127,7 +127,6 @@ export async function ingestRawLane(root: string, checkpoint: string, client: Rp
     };
     const manifest: Manifest = [];
     for await (const _record of laneRecords(root, lane, initial, manifest, true)) { /* bounded preflight */ }
-    await assertUnchanged();
     const sourceHash = sha(JSON.stringify({ format: lane.format, manifest, fingerprints: [...initial.fingerprints] }));
     return { sourceHash, records: laneRecords(root, lane, initial, manifest, false), assertUnchanged };
   });

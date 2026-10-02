@@ -9,7 +9,7 @@
 // gate's sandbox.
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { sourceFiles } from "./sources.ts";
 
 const PURE_LIST = "scripts/qa/pure-tests.txt";
@@ -158,9 +158,10 @@ try {
   const tests = (await readFile(PURE_LIST, "utf8")).split("\n").filter(Boolean);
   const shipped = sourceFiles();
   const bySource = await mapCoverage(tests, new Set(shipped), scratch);
-  const only = process.argv.slice(2);
+  const only = process.argv.slice(2).map(arg => relative(process.cwd(), resolve(arg)));
+  const unloaded = only.filter(source => !bySource.has(source));
+  if (unloaded.length > 0) throw new Error(`no pure test loads ${unloaded.join(" ")}`);
   const groups = groupBySuite(bySource).filter(group => only.length === 0 || only.some(source => group.sources.has(source)));
-  if (groups.length === 0) throw new Error(`no pure test loads ${only.join(" ")}`);
   const untested = shipped.filter(source => !bySource.has(source));
   const pinned = (await readFile(UNTESTED_LIST, "utf8")).split("\n").filter(Boolean);
   const unpinned = untested.filter(source => !pinned.includes(source)), stale = pinned.filter(source => !untested.includes(source));

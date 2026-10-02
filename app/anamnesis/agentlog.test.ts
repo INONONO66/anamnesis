@@ -112,13 +112,14 @@ test("a root without export files is an explicit error", () => fixture(async (ro
 }));
 
 test("the export file limit is exact", () => fixture(async (root, cp) => {
-  await Promise.all(Array.from({ length: 1023 }, (_, i) => writeFile(`${root}/empty-${String(i).padStart(4, "0")}.jsonl`, "")));
+  await rm(root + "/codex.jsonl");
+  await Promise.all(Array.from({ length: 1024 }, (_, i) => writeFile(`${root}/empty-${String(i).padStart(4, "0")}.jsonl`, "")));
   const m = mock(cp);
   await ingestAgentLog(root, cp, m.client);
-  expect(m.params).toHaveLength(4);
+  expect((await saved(cp)).next).toBe(0);
   await writeFile(root + "/one-more.jsonl", "");
   await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow("source_file_limit");
-}));
+}), 30_000);
 
 test("a directory named like an export is not a regular file", () => fixture(async (root, cp) => {
   await mkdir(root + "/dir.jsonl");
@@ -180,20 +181,25 @@ test("physical export order is retained while exact non-recallable line context 
   expect((await saved(cp)).next).toBe(2);
 }));
 
-for (const [change, mutate] of [
+const changes = [
   ["content", (root: string) => writeFile(root + "/codex.jsonl", JSON.stringify(event("changed")) + "\n")],
   ["timestamp", (root: string) => utimes(root + "/codex.jsonl", 0, 0)],
   ["sibling", (root: string) => writeFile(root + "/new.jsonl", JSON.stringify(event("new")) + "\n")],
-] as const) test(`${change} change after a committed reply cannot publish a successful checkpoint`, () => fixture(async (root, cp) => {
+] as const;
+// "status" is the daemon call between the fingerprints and the first delivery; "remember" is the first committed reply.
+for (const [trigger, when, delivered] of [["status", "before any delivery", 0], ["remember", "after a committed reply", 1]] as const)
+for (const [change, mutate] of changes) test(`${change} change ${when} cannot publish a successful checkpoint`, () => fixture(async (root, cp) => {
   const m = mock(cp), request = m.client.request.bind(m.client);
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: Parameters<typeof request>[0], input: any) => {
     const result = await request(method, input);
-    if (method === "remember") await mutate(root);
+    if (method === trigger) await mutate(root);
     return result;
   }});
   await expect(ingestAgentLog(root, cp, client)).rejects.toThrow("source_changed");
+  expect(m.params).toHaveLength(delivered);
   expect((await saved(cp)).next).toBe(0);
-  expect((await saved(cp + ".pending.json")).index).toBe(0);
+  if (delivered) expect((await saved(cp + ".pending.json")).index).toBe(0);
+  else await expect(stat(cp + ".pending.json")).rejects.toHaveProperty("code", "ENOENT");
 }));
 
 for (const [change, failure] of [

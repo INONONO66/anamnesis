@@ -33,6 +33,7 @@ export async function ingestAgentLog(root: string, checkpointPath: string, clien
   await ingestSnapshot(checkpointPath, client, async () => {
     const names = await files(root);
     const paths = names.map(name => join(root, name));
+    // The .pending.json sidecar needs no check here: files() admits only *.jsonl names.
     if (paths.some(path => resolve(path) === resolve(checkpointPath))) throw new Error("source_checkpoint_path_conflict");
     const manifest: { file: string; sha256: string }[] = [];
     const fingerprints = new Map<string, string>();

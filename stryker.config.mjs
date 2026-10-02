@@ -11,7 +11,7 @@ export default {
   testRunner: "command",
   commandRunner: { command },
   ignorePatterns: [".omo", "dist"],
-  tempDirName: process.env.STRYKER_TEMP_DIR ?? "/tmp/anamnesis-stryker",
+  tempDirName: "/tmp/anamnesis-stryker",
   // A run with survivors exits non-zero; its sandbox copy must still go, or every gate run leaves one behind.
   cleanTempDir: "always",
   reporters: ["clear-text", "json"],
