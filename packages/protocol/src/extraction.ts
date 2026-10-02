@@ -122,7 +122,7 @@ export const CompleteExtractionAttempt = ModelTaskCAS.extend({
 }).refine(v => {
   if (v.state === "succeeded") return v.output !== null && v.disposition !== null && v.reason === null && v.detail === undefined;
   return v.output === null && v.disposition === null && v.spans.length === 0 && v.reason !== null && v.reported_model === undefined
-    && (v.reason.startsWith("provider_") || ["input_too_large", "output_too_large"].includes(v.reason));
+    && (v.reason.startsWith("provider_") || ["input_too_large", "output_too_large"].includes(v.reason)) && (v.detail === undefined || v.reason === "provider_mismatch");
 }, "invalid completion");
 export type CompleteExtractionAttempt = z.infer<typeof CompleteExtractionAttempt>;
 const partition = z.enum(["episodes", "active_extraction"]);

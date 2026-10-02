@@ -81,7 +81,8 @@ describe("G004 extraction contract", () => {
       return !result.success && result.error.issues.map(issue => issue.code).join() === "custom";
     };
     expect(CompleteExtractionAttempt.parse(failed).reason).toBe("provider_unavailable");
-    expect(CompleteExtractionAttempt.parse({ ...failed, reason: "input_too_large", detail: "json" }).detail).toBe("json");
+    expect(CompleteExtractionAttempt.parse({ ...failed, reason: "provider_mismatch", detail: "json" }).detail).toBe("json");
+    expect(refineRejects({ ...failed, reason: "input_too_large", detail: "json" })).toBe(true);
     expect(refineRejects({ ...failed, reason: "policy_denied" })).toBe(true);
     expect(refineRejects({ ...failed, reason: null })).toBe(true);
     expect(refineRejects({ ...failed, reported_model: "fixture" })).toBe(true);
