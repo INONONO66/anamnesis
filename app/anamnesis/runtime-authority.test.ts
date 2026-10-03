@@ -189,7 +189,7 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
         expect(await count(source, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(0);
         // Quarantine removes the container that served the rejected tree and forgets the binding.
         await adapter.quarantine(staging);
-        await expect(dockerOutput(["inspect", "--format", "{{.State.Running}}", bound.container])).rejects.toThrow();
+        await expect(dockerOutput(["inspect", "--format", "{{.State.Running}}", bound.container])).rejects.toThrow(/no such (object|container)/i);
         await expect(adapter.restoredAuthoritySnapshot()).rejects.toThrow("restore_not_started");
         restoredContainer = undefined;
       }

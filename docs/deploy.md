@@ -203,8 +203,11 @@ under `<root>/database`, restore starts an owner-labelled Neo4j on that
 directory (recorded in `<root>/authority.json`), recomputes this evidence from
 it and compares it with the manifest before rebinding the source or removing
 rollback data; differences refuse with `authority_digest_mismatch`, return the
-rollback copy to the live name and remove the restored container. The fenced
-source container is never the verification target.
+rollback copy to the live name and remove the restored container. A removal
+that fails is reported as `quarantine_failed` beside the refusal (a failed undo
+as `rollback_failed`); after either, check `docker ps` for a leftover
+`anamnesis.qa.owner`-labelled container. The fenced source container is never
+the verification target.
 
 `anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily as root: `systemctl stop anamnesis`, offline `ops backup <dir>` as the `anamnesis` user into a not-yet-existing `<stamp>/` directory with the JSON result beside it as `<stamp>.result.json` (`ops backup` refuses a live daemon with `daemon_live` and an existing destination with `destination_exists`; the daemon is restarted even if the dump fails), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
 

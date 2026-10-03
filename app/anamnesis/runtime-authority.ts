@@ -35,8 +35,13 @@ async function waitBolt(uri: string, user: string, password: string): Promise<vo
 
 export interface RestoredDatabase { container: string; uri: string; user: "neo4j"; database: "neo4j"; password: string }
 
-/** Removes a container this process started; a container that is already gone is not an error. */
-export const removeContainer = async (container: string) => { await dockerExec("docker", ["rm", "-f", container]).catch(() => undefined); };
+/** Removes a container this process started. Only confirmed absence is tolerated; any other docker failure propagates. */
+export const removeContainer = async (container: string) => {
+  try { await dockerExec("docker", ["rm", "-f", container]); }
+  catch (error) {
+    if (!/no such (object|container)/i.test(String((error as { stderr?: unknown }).stderr ?? error))) throw error;
+  }
+};
 
 /** Starts an owner-labelled Neo4j on the database `restoreOffline` loaded under `root`, waits for Bolt,
  * and records the endpoint in `<root>/authority.json` so a later `ops up` binds to the restored database.
@@ -50,7 +55,12 @@ export async function startRestoredDatabase(root: string, owner: string, passwor
     await waitBolt(uri, "neo4j", password);
     await writeFile(join(root, "authority.json"), JSON.stringify({ container, uri, database: "neo4j", owner }) + "\n", { mode: 0o600 });
     return { container, uri, user: "neo4j", database: "neo4j", password };
-  } catch (error) { await removeContainer(container); throw error; }
+  } catch (error) {
+    // The start failure is the error to report; a removal failure is appended, never substituted.
+    try { await removeContainer(container); }
+    catch (cleanup) { throw Object.assign(new Error(`${String(error)}; container ${container} not removed: ${String(cleanup)}`), { code: "restored_container_leaked", cause: error }); }
+    throw error;
+  }
 }
 
 /** The orchestrator fences again; serve the fence and snapshot already taken so the stopped source is never asked twice. */
@@ -134,6 +144,7 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
     rebindSource: async () => {},
     verifyPhysicalLinks: async () => {},
     // The quarantined tree keeps its data; the container that was serving it must not stay up.
+    // The binding is dropped only once removal succeeded, so a failed removal stays addressable.
     quarantine: async () => { if (restored) { await removeContainer(restored.container); restored = undefined; } },
   };
   const lifecycle = { stop: async () => {} };

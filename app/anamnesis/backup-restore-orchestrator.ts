@@ -171,12 +171,16 @@ export async function restoreOwned(input: RestoreInput, adapter: TrustedAuthorit
     return admitted;
   } catch (e) {
     // A tree that failed verification after promotion must not stay live: move it back
-    // to the staging name, return the rollback copy to live, then quarantine staging.
+    // to the staging name and return the rollback copy to live. Quarantine runs whether or
+    // not that undo succeeded, so the container serving the rejected tree never outlives
+    // the refusal; a cleanup failure is reported beside the refusal, never instead of it.
+    let failure = e;
     if (promoted) {
       try { await rename(live, staging); await rename(rollback, live); await fsync(dirname(live)); }
-      catch (undo) { throw new AuthorityOrchestrationError("rollback_failed", `${String(e)}; undo: ${String(undo)}`); }
+      catch (undo) { failure = new AuthorityOrchestrationError("rollback_failed", `${String(e)}; undo: ${String(undo)}`); }
     }
-    await adapter.quarantine(staging).catch(() => undefined);
-    throw e;
+    try { await adapter.quarantine(staging); }
+    catch (cleanup) { failure = new AuthorityOrchestrationError("quarantine_failed", `${String(failure)}; quarantine: ${String(cleanup)}`); }
+    throw failure;
   }
 }

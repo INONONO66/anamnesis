@@ -363,6 +363,34 @@ async function expectRolledBack(live: string, staging: string, rollback: string)
   await expect(lstat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
 }
 
+test("restoreOwned still quarantines the rejected tree when the post-promotion undo fails", async () => {
+  const { archive, live, staging, rollback } = await archiveFromBackup();
+  // The rollback copy vanishes while the promoted tree is being verified, so `rename(rollback, live)` cannot succeed.
+  const { adapter, calls } = fakeAdapter(record => ({
+    restoredAuthoritySnapshot: async () => { record("restoredAuthoritySnapshot"); await rm(rollback, { recursive: true }); throw new Error("snapshot_exploded"); },
+  }));
+  const result = restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter);
+  await expect(result).rejects.toMatchObject({ code: "rollback_failed" });
+  await expect(result).rejects.toThrow(/snapshot_exploded; undo: .*ENOENT/);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", `quarantine:${staging}`]);
+  // The undo got as far as moving the rejected tree back under the staging name; no live root remains.
+  await expect(lstat(join(staging, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(live)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("restoreOwned reports a quarantine failure beside the refusal that caused it", async () => {
+  const { archive, live, staging, rollback } = await archiveFromBackup();
+  const { adapter, calls } = fakeAdapter(record => ({
+    startRestored: async (_root, epoch) => { record("startRestored"); return { sourceId: "impostor", epoch, ready: true }; },
+    quarantine: async root => { record(`quarantine:${root}`); throw new Error("container_stuck"); },
+  }));
+  const result = restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter);
+  await expect(result).rejects.toMatchObject({ code: "quarantine_failed" });
+  await expect(result).rejects.toThrow(/source_rebind_mismatch: .*; quarantine: Error: container_stuck/);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", `quarantine:${staging}`]);
+  await expectRolledBack(live, staging, rollback);
+});
+
 test("restoreOwned refuses an archive whose operation id differs before touching the adapter", async () => {
   const { archive, live, staging, rollback } = await archiveFromBackup();
   const { adapter, calls } = fakeAdapter();
