@@ -17,7 +17,7 @@ export interface OwnedNeo4jAdapterOptions {
   container: string;
   owner: string;
   exec?: Exec;
-  authority: Pick<TrustedAuthorityAdapter, "revokeWriters" | "authoritySnapshot" | "materializeMembers" | "startAndReady" | "rebindSource" | "verifyPhysicalLinks" | "quarantine">;
+  authority: Pick<TrustedAuthorityAdapter, "revokeWriters" | "authoritySnapshot" | "restoredAuthoritySnapshot" | "materializeMembers" | "startAndReady" | "startRestored" | "rebindSource" | "verifyPhysicalLinks" | "quarantine">;
   lifecycle: Pick<TrustedAuthorityAdapter, "stop">;
 }
 
@@ -45,9 +45,11 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
   }
 
   revokeWriters() { return this.options.authority.revokeWriters(); }
-  authoritySnapshot(epoch: string, limit?: number) { return this.options.authority.authoritySnapshot(epoch, limit); }
+  authoritySnapshot(epoch: string) { return this.options.authority.authoritySnapshot(epoch); }
+  restoredAuthoritySnapshot() { return this.options.authority.restoredAuthoritySnapshot(); }
   materializeMembers(root: string, manifest: ArchiveManifest) { return this.options.authority.materializeMembers(root, manifest); }
   startAndReady(root: string, epoch: string) { return this.options.authority.startAndReady(root, epoch); }
+  startRestored(root: string, epoch: string) { return this.options.authority.startRestored(root, epoch); }
   rebindSource(sourceId: string) { return this.options.authority.rebindSource(sourceId); }
   verifyPhysicalLinks(root: string) { return this.options.authority.verifyPhysicalLinks(root); }
   quarantine(root: string) { return this.options.authority.quarantine(root); }

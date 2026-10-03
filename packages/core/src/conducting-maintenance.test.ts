@@ -4,7 +4,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { z } from "zod";
+import { extractionBodyDigest } from "@anamnesis/protocol";
 import { Engine } from "./engine.ts";
+import { canonicalJson, sha256 } from "./store/digest.ts";
 import { CONDUCTING_ROLES } from "./store/schema.ts";
 import type { ConductingArcRow } from "./store/conducting.ts";
 
@@ -12,6 +14,7 @@ const context = { principal: "installation", commit_mode: "receipt" } as const;
 const id = (n: number) => `01900000-0000-7000-8000-${n.toString(16).padStart(12, "0")}`;
 const T = Date.parse("2027-01-01T00:00:00Z");
 const byCodepoint = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
+const digest = (items: Parameters<typeof canonicalJson>[0][]) => ({ count: items.length, sha256: sha256(canonicalJson(items)) });
 const Physical = z.object({ a: z.string(), b: z.string(), link_id: z.string(), role: z.enum(CONDUCTING_ROLES), generation: z.number().nullable(), source_extraction_generation: z.number().nullable() });
 const Arc = z.object({ source_id: z.string(), link_id: z.string(), peer_id: z.string(), role: z.enum(CONDUCTING_ROLES), generation: z.number().nullable(), source_extraction_generation: z.number().nullable() });
 const State = z.object({ ready: z.boolean().nullable(), revision: z.number().nullable(), structure_revision: z.number().nullable() });
@@ -100,14 +103,27 @@ test("ConductingArc rows mirror every physical link through remember, rewire, pu
     await expect(f.engine.store.putLink({ id: id(205), from: id(10), to: id(10), role: "DERIVED_FROM", content: "self" })).rejects.toThrow("self-link is not allowed");
     await expect(f.engine.store.putLink({ id: id(101), from: id(11), to: id(12), role: "RELATES_TO", content: "cross-role collision" })).rejects.toThrow("conducting_link_id_collision");
     expect(await f.engine.verifyConductingArcs()).toMatchObject({ issues: [], ready: true, physical_links: 7, endpoint_rows: 14 });
-    const authority = await f.engine.store.authoritySnapshot({}, context);
-    expect(authority.physical_links.map(link => link.id).sort()).toEqual((await f.physical()).map(link => link.link_id).sort());
-    expect(authority.members).toEqual((await f.query("MATCH (e:Element) RETURN e.id AS id", {}, z.object({ id: z.string() }))).map(row => row.id).sort(byCodepoint));
-    expect(authority.members).toHaveLength(8);
-    expect(authority.invalidation_evidence.map(row => row.id)).toEqual([id(203)]);
-    expect(authority.source_hashes).toHaveLength(3);
+    const authority = await f.engine.store.authoritySnapshot(context);
+    const members = (await f.query("MATCH (e:Element) RETURN e.id AS id ORDER BY e.id", {}, z.object({ id: z.string() }))).map(row => row.id);
+    expect(authority.members).toEqual(digest(members));
+    expect(authority.members.count).toBe(8);
+    const authorityLinks = (await f.physical()).map(link => ({ id: link.link_id, from: link.a, to: link.b,
+      role: link.role === "DERIVED_FROM" ? "DERIVED_FROM" : "ConductingArc" }));
+    expect(authority.physical_links).toEqual(digest(authorityLinks));
+    expect(authority.physical_links.count).toBe(7);
+    const invalidation = await f.query(`MATCH (a:Element)-[l:INVALIDATES]->(b:Element)
+      RETURN l.id AS id,a.digest AS source_hash,a.id AS from,b.id AS to,l.target_id AS target_id,
+        l.effective_time_utc AS effective_time_utc,l.generation AS generation ORDER BY l.id`, {},
+      z.object({ id: z.string(), source_hash: z.string(), from: z.string(), to: z.string(), target_id: z.string(),
+        effective_time_utc: z.string(), generation: z.union([z.string(), z.number()]).nullable() }));
+    expect(authority.invalidation_evidence).toEqual(digest(invalidation.map(({ source_hash, ...outcome }) =>
+      ({ id: outcome.id, source_hash, outcome_hash: extractionBodyDigest(outcome) }))));
+    expect(authority.invalidation_evidence.count).toBe(1);
+    const sources = (await f.query("MATCH (e:Element:Episode) RETURN e.digest AS digest ORDER BY e.id", {},
+      z.object({ digest: z.string() }))).map(row => row.digest);
+    expect(authority.source_hashes).toEqual(digest(sources));
+    expect(authority.source_hashes.count).toBe(3);
     expect(authority.coverage).toMatchObject({ ingest_seq: 3, policy_revision: 0 });
-    await expect(f.engine.store.authoritySnapshot({ maxItems: 1 }, context)).rejects.toThrow("authority_snapshot_limit_exceeded");
     await expect(f.engine.store.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: null, expected_selector_version: 0 }, context)).rejects.toMatchObject({ code: "coverage_incomplete" });
   } finally { await f.close(); }
 }, 120000);
@@ -193,14 +209,14 @@ test("envelope probes detect stale rows and fence; verify is read-only; rebuild 
       const fenced = await f.snapshot();
       await expect(f.engine.rebuildConductingArcs()).rejects.toThrow("stale_writer_epoch");
       await expect(f.engine.checkConductingArcs()).rejects.toThrow("stale_writer_epoch");
-      await expect(f.engine.store.authoritySnapshot({}, context)).rejects.toThrow("stale_writer_epoch");
+      await expect(f.engine.store.authoritySnapshot(context)).rejects.toThrow("stale_writer_epoch");
       expect(await f.snapshot()).toEqual(fenced);
     } finally { await contender.close(); }
     const fresh = new Engine(f.options);
     try {
       await expect(fresh.rebuildConductingArcs()).rejects.toThrow("writer_epoch_required");
       await expect(fresh.checkConductingArcs()).rejects.toThrow("writer_epoch_required");
-      await expect(fresh.store.authoritySnapshot({}, context)).rejects.toThrow("writer_epoch_required");
+      await expect(fresh.store.authoritySnapshot(context)).rejects.toThrow("writer_epoch_required");
     } finally { await fresh.close(); }
   } finally { await f.close(); }
 }, 180000);

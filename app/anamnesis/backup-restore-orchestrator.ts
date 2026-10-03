@@ -10,10 +10,14 @@ import { ARCHIVE_LIMITS, preflightArchive, verifyAuthoritySnapshot, type Archive
 /** The only boundary at which process, Neo4j, spool, or source identity effects may occur. */
 export interface TrustedAuthorityAdapter {
   revokeWriters(): Promise<{ epoch: string; cutoff: ArchiveManifest["cutoff"] }>;
-  authoritySnapshot(epoch: string, limit?: number): Promise<AuthoritySnapshot>;
+  authoritySnapshot(epoch: string): Promise<AuthoritySnapshot>;
+  restoredAuthoritySnapshot(): Promise<AuthoritySnapshot>;
   dumpOffline(destination: string, epoch: string): Promise<{ metadata: Uint8Array; neo4jVersion: string; imageDigest: string }>;
   materializeMembers(root: string, manifest: ArchiveManifest): Promise<void>;
+  /** Backup: restart the fenced source under `root`. */
   startAndReady(root: string, epoch: string): Promise<{ sourceId: string; epoch: string; ready: boolean }>;
+  /** Restore: start the database `restoreOffline` loaded under `root`; `restoredAuthoritySnapshot` then reads it. */
+  startRestored(root: string, epoch: string): Promise<{ sourceId: string; epoch: string; ready: boolean }>;
   stop(): Promise<void>;
   restoreOffline(archive: string, staging: string, manifest: ArchiveManifest): Promise<void>;
   rebindSource(sourceId: string): Promise<void>;
@@ -148,17 +152,35 @@ export async function restoreOwned(input: RestoreInput, adapter: TrustedAuthorit
   await ownedDir(archive); await ownedDir(dirname(live)); await fresh(staging); await fresh(rollback);
   const admitted = await preflightArchive(archive, input.compatibility);
   if (admitted.manifest.operation_id !== input.operationId) throw new AuthorityOrchestrationError("identity_conflict", "archive operation mismatch");
+  if (!admitted.manifest.authority) throw new AuthorityOrchestrationError("authority_snapshot_unavailable", "manifest authority evidence is absent");
   await mkdir(staging, { mode: 0o700 });
+  let promoted = false;
   try {
     // The adapter must perform the actual Neo4j restore and physical-link rebuild.
     await adapter.stop();
     await adapter.restoreOffline(archive, staging, admitted.manifest);
     await adapter.verifyPhysicalLinks(staging);
     await rename(live, rollback); await rename(staging, live); await fsync(dirname(live));
-    const ready = await adapter.startAndReady(live, admitted.manifest.cutoff.ingest_seq.toString());
+    promoted = true;
+    const ready = await adapter.startRestored(live, admitted.manifest.cutoff.ingest_seq.toString());
     if (!ready.ready || ready.sourceId !== input.expectedSourceId || ready.epoch !== admitted.manifest.cutoff.ingest_seq.toString()) throw new AuthorityOrchestrationError("source_rebind_mismatch", "restored source is not the expected authority");
+    const restored = verifyAuthoritySnapshot(await adapter.restoredAuthoritySnapshot());
+    if (canonical(restored) !== canonical(admitted.manifest.authority)) throw new AuthorityOrchestrationError("authority_digest_mismatch", "restored authority does not match manifest");
     await adapter.rebindSource(input.expectedSourceId);
     await rm(rollback, { recursive: true });
     return admitted;
-  } catch (e) { await adapter.quarantine(staging).catch(() => undefined); throw e; }
+  } catch (e) {
+    // A tree that failed verification after promotion must not stay live: move it back
+    // to the staging name and return the rollback copy to live. Quarantine runs whether or
+    // not that undo succeeded, so the container serving the rejected tree never outlives
+    // the refusal; a cleanup failure is reported beside the refusal, never instead of it.
+    let failure = e;
+    if (promoted) {
+      try { await rename(live, staging); await rename(rollback, live); await fsync(dirname(live)); }
+      catch (undo) { failure = new AuthorityOrchestrationError("rollback_failed", `${String(e)}; undo: ${String(undo)}`); }
+    }
+    try { await adapter.quarantine(staging); }
+    catch (cleanup) { failure = new AuthorityOrchestrationError("quarantine_failed", `${String(failure)}; quarantine: ${String(cleanup)}`); }
+    throw failure;
+  }
 }

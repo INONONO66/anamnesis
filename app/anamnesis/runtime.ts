@@ -22,7 +22,7 @@ import { fault, RpcFault, storageUnavailable } from "./wire.ts";
 import { RECOVERY_PROBE_MS, RecoveryProbe, nodeTimers } from "./recovery-probe.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
-import { manifestTemplate, objectInventory } from "./runtime-authority.ts";
+import { fencedAdapter, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: false, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -607,18 +607,7 @@ export class Runtime {
     const objects = await objectInventory(objectRoot);
     const config = Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
     const manifest = manifestTemplate(operationId, fenced.cutoff, authority, objects, createHash("sha256").update(config).digest("hex"));
-    const cached: TrustedAuthorityAdapter = {
-      revokeWriters: async () => fenced,
-      authoritySnapshot: async () => authority,
-      dumpOffline: this.authorityAdapter.dumpOffline.bind(this.authorityAdapter),
-      materializeMembers: this.authorityAdapter.materializeMembers.bind(this.authorityAdapter),
-      startAndReady: this.authorityAdapter.startAndReady.bind(this.authorityAdapter),
-      stop: this.authorityAdapter.stop.bind(this.authorityAdapter),
-      restoreOffline: this.authorityAdapter.restoreOffline.bind(this.authorityAdapter),
-      rebindSource: this.authorityAdapter.rebindSource.bind(this.authorityAdapter),
-      verifyPhysicalLinks: this.authorityAdapter.verifyPhysicalLinks.bind(this.authorityAdapter),
-      quarantine: this.authorityAdapter.quarantine.bind(this.authorityAdapter),
-    };
+    const cached = fencedAdapter(this.authorityAdapter, fenced, authority);
     this.backupOperations.set(operationId, { state: "running" });
     try { await backupOwned({ root: this.installation.root, destination, operationId, compatibility: { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [manifest.compatibility.neo4j_version], neo4j_image_digests: [manifest.compatibility.neo4j_image_digest], episode_digest_version_ceiling: 2 }, manifest, objectRoot }, cached); this.backupOperations.set(operationId, { state: "complete" }); return { state: "complete", operation_id: operationId }; }
     catch (error) { this.backupOperations.set(operationId, { state: "failed", error: String(error) }); throw error; }

@@ -210,10 +210,9 @@ export class Store {
     return this.conducting.rebuildConductingArcs(options);
   }
 
-  /** Authenticated, writer-fenced authority inventory. Every collection is
-   * independently capped; overflow is a refusal, never an incomplete snapshot. */
-  authoritySnapshot(options?: { maxItems?: number }, context?: InstallationContext): Promise<AuthoritySnapshot> {
-    return this.conducting.authoritySnapshot(options, context);
+  /** Authenticated, writer-fenced per-collection digests without a size cap. */
+  authoritySnapshot(context?: InstallationContext): Promise<AuthoritySnapshot> {
+    return this.conducting.authoritySnapshot(context);
   }
 
   /** Bounded physical ConductingArc probe. Raw rows are ordered and capped before

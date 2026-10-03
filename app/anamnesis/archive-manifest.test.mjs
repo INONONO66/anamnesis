@@ -69,9 +69,8 @@ function fillTotal(m, objects) {
   dump.bytes = 128 * GIB - m.members.reduce((n, x) => n + (x === dump ? 0 : x.bytes), 0);
 }
 const authority = {
-  members: ["episode-1", "episode-2"], retained_generations: [0, 1], coverage: { ingest_seq: 0, structure_revision: 0, policy_revision: 0 },
-  physical_links: [{ id: "l1", from: "episode-1", to: "episode-2", role: "DERIVED_FROM" }, { id: "l2", from: "episode-2", to: "episode-1", role: "ConductingArc" }],
-  invalidation_evidence: [{ id: "i1", source_hash: HEX0, outcome_hash: HEX1 }, { id: "i2", source_hash: HEX1, outcome_hash: HEX0 }], source_hashes: [HEX0, HEX1],
+  members: { count: 2, sha256: HEX0 }, retained_generations: [0, 1], coverage: { ingest_seq: 0, structure_revision: 0, policy_revision: 0 },
+  physical_links: { count: 2, sha256: HEX0 }, invalidation_evidence: { count: 2, sha256: HEX1 }, source_hashes: { count: 2, sha256: HEX1 },
 };
 const withAuthority = (change = () => {}) => m => { m.authority = structuredClone(authority); change(m.authority); };
 const sections = { null: null, string: "x", array: [] };
@@ -187,43 +186,55 @@ const authorityRejects = [
   ...Object.entries(sections).map(([kind, value]) => [`${kind} authority`, m => { m.authority = value; }, "authority_members_missing", "snapshot is absent"]),
   ["unknown field", withAuthority(a => { a.extra = 1; }), "authority_members_missing", "snapshot has missing or unknown fields"],
   ["renamed field", withAuthority(a => { delete a.members; a.extra = 1; }), "authority_members_missing", "snapshot has missing or unknown fields"],
-  ["members not an array", withAuthority(a => { a.members = "x"; }), "authority_members_missing", "Neo4j member enumeration was not supplied"],
-  ["members empty", withAuthority(a => { a.members = []; }), "authority_members_missing", "Neo4j member enumeration was not supplied"],
-  ["members mixed", withAuthority(a => { a.members = ["a", 1]; }), "authority_members_missing", "Neo4j member enumeration was not supplied"],
-  ["members unsorted", withAuthority(a => { a.members.reverse(); }), "authority_members_missing", "identities must be sorted and unique"],
-  ["members duplicate", withAuthority(a => { a.members = ["a", "a"]; }), "authority_members_missing", "identities must be sorted and unique"],
+  ["members not a digest", withAuthority(a => { a.members = "x"; }), "authority_members_missing", "digest is absent or invalid"],
+  ["members missing", withAuthority(a => { delete a.members; }), "authority_members_missing", "digest is absent or invalid"],
+  ["members missing count", withAuthority(a => { delete a.members.count; }), "authority_members_missing", "digest is absent or invalid"],
+  ["members zero", withAuthority(a => { a.members.count = 0; }), "authority_members_missing", "digest is absent or invalid"],
+  ["members fractional count", withAuthority(a => { a.members.count = 0.5; }), "authority_members_missing", "digest is absent or invalid"],
+  ["members SHA length", withAuthority(a => { a.members.sha256 = "a".repeat(65); }), "authority_members_missing", "digest is absent or invalid"],
+  ["members SHA nonhex", withAuthority(a => { a.members.sha256 = "z".repeat(64); }), "authority_members_missing", "digest is absent or invalid"],
+  ["members digest extra field", withAuthority(a => { a.members.extra = 1; }), "authority_members_missing", "digest is absent or invalid"],
   ["generations not an array", withAuthority(a => { a.retained_generations = "x"; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
+  ["generations missing", withAuthority(a => { delete a.retained_generations; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
   ["generation fractional", withAuthority(a => { a.retained_generations = [0, 0.5]; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
   ["generation negative", withAuthority(a => { a.retained_generations = [-1, 0]; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
   ["generation string", withAuthority(a => { a.retained_generations = [0, "1"]; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
   ["generations unsorted", withAuthority(a => { a.retained_generations = [1, 0]; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
   ["generations duplicate", withAuthority(a => { a.retained_generations = [1, 1]; }), "authority_generations_missing", "retained generation coverage is absent or unsorted"],
   ["coverage absent", withAuthority(a => { a.coverage = null; }), "authority_coverage_missing", "cutoff coverage is absent"],
+  ["coverage missing", withAuthority(a => { delete a.coverage; }), "authority_coverage_missing", "cutoff coverage is absent"],
+  ["coverage extra field", withAuthority(a => { a.coverage.extra = 1; }), "authority_coverage_missing", "cutoff coverage is absent"],
   ["coverage counter missing", withAuthority(a => { delete a.coverage.ingest_seq; }), "authority_coverage_missing", "cutoff coverage is absent"],
   ["coverage counter fractional", withAuthority(a => { a.coverage.structure_revision = 0.5; }), "authority_coverage_missing", "cutoff coverage is absent"],
   ["coverage counter negative", withAuthority(a => { a.coverage.policy_revision = -1; }), "authority_coverage_missing", "cutoff coverage is absent"],
   ["coverage counter string", withAuthority(a => { a.coverage.ingest_seq = "0"; }), "authority_coverage_missing", "cutoff coverage is absent"],
-  ["links not an array", withAuthority(a => { a.physical_links = "x"; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["link null", withAuthority(a => { a.physical_links[0] = null; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["link string", withAuthority(a => { a.physical_links[0] = "x"; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["link id", withAuthority(a => { a.physical_links[0].id = 1; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["link from", withAuthority(a => { a.physical_links[0].from = 1; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["link to", withAuthority(a => { a.physical_links[0].to = 1; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["link role", withAuthority(a => { a.physical_links[0].role = "OTHER"; }), "authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent"],
-  ["invalidation not an array", withAuthority(a => { a.invalidation_evidence = "x"; }), "authority_invalidation_missing", "invalidation evidence is absent or unhashed"],
-  ["invalidation null", withAuthority(a => { a.invalidation_evidence[0] = null; }), "authority_invalidation_missing", "invalidation evidence is absent or unhashed"],
-  ["invalidation string", withAuthority(a => { a.invalidation_evidence[0] = "x"; }), "authority_invalidation_missing", "invalidation evidence is absent or unhashed"],
-  ["invalidation id", withAuthority(a => { a.invalidation_evidence[0].id = 1; }), "authority_invalidation_missing", "invalidation evidence is absent or unhashed"],
-  ["invalidation source hash", withAuthority(a => { a.invalidation_evidence[0].source_hash = "zz"; }), "authority_invalidation_missing", "invalidation evidence is absent or unhashed"],
-  ["invalidation outcome hash", withAuthority(a => { a.invalidation_evidence[0].outcome_hash = "zz"; }), "authority_invalidation_missing", "invalidation evidence is absent or unhashed"],
-  ["sources not an array", withAuthority(a => { a.source_hashes = "x"; }), "authority_sources_missing", "source hashes are absent"],
-  ["source hash case", withAuthority(a => { a.source_hashes = [HEX0, "A".repeat(64)]; }), "authority_sources_missing", "source hashes are absent"],
-  ["sources unsorted", withAuthority(a => { a.source_hashes.reverse(); }), "authority_sources_missing", "identities must be sorted and unique"],
-  ["sources duplicate", withAuthority(a => { a.source_hashes = [HEX0, HEX0]; }), "authority_sources_missing", "identities must be sorted and unique"],
+  ["links not a digest", withAuthority(a => { a.physical_links = "x"; }), "authority_links_missing", "digest is absent or invalid"],
+  ["links missing", withAuthority(a => { delete a.physical_links; }), "authority_links_missing", "digest is absent or invalid"],
+  ["links missing SHA", withAuthority(a => { delete a.physical_links.sha256; }), "authority_links_missing", "digest is absent or invalid"],
+  ["links extra field", withAuthority(a => { a.physical_links.extra = 1; }), "authority_links_missing", "digest is absent or invalid"],
+  ["invalidation not a digest", withAuthority(a => { a.invalidation_evidence = "x"; }), "authority_invalidation_missing", "digest is absent or invalid"],
+  ["invalidation missing", withAuthority(a => { delete a.invalidation_evidence; }), "authority_invalidation_missing", "digest is absent or invalid"],
+  ["invalidation negative count", withAuthority(a => { a.invalidation_evidence.count = -1; }), "authority_invalidation_missing", "digest is absent or invalid"],
+  ["invalidation SHA nonhex", withAuthority(a => { a.invalidation_evidence.sha256 = "zz"; }), "authority_invalidation_missing", "digest is absent or invalid"],
+  ["sources not a digest", withAuthority(a => { a.source_hashes = "x"; }), "authority_sources_missing", "digest is absent or invalid"],
+  ["sources missing", withAuthority(a => { delete a.source_hashes; }), "authority_sources_missing", "digest is absent or invalid"],
+  ["source SHA case", withAuthority(a => { a.source_hashes.sha256 = "A".repeat(64); }), "authority_sources_missing", "digest is absent or invalid"],
+  ["source SHA length", withAuthority(a => { a.source_hashes.sha256 = "a".repeat(65); }), "authority_sources_missing", "digest is absent or invalid"],
+  ["source digest extra field", withAuthority(a => { a.source_hashes.extra = 1; }), "authority_sources_missing", "digest is absent or invalid"],
 ];
 for (const [name, mutate, code, detail] of authorityRejects) test(`authority snapshot refuses ${name}`, async () => {
   const { parseArchiveManifest } = await api(), m = manifest(); mutate(m);
   assert.throws(() => parseArchiveManifest(canonical(m)), failure(code, detail));
+});
+
+test("authority snapshot requires own snapshot and coverage fields", async () => {
+  const { verifyAuthoritySnapshot } = await api();
+  const m = manifest(); withAuthority()(m);
+  const { source_hashes, ...rest } = m.authority;
+  assert.throws(() => verifyAuthoritySnapshot(Object.assign(Object.create({ source_hashes }), rest)),
+    { code: "authority_sources_missing" });
+  m.authority.coverage = Object.assign(Object.create({ ingest_seq: 0 }), { structure_revision: 0, policy_revision: 0, extra: 0 });
+  assert.throws(() => verifyAuthoritySnapshot(m.authority), { code: "authority_coverage_missing" });
 });
 
 const accepted = [
@@ -247,7 +258,8 @@ const accepted = [
   ["neo4j patch with one digit", m => { m.compatibility.neo4j_version = "5.26.1"; }],
   ["version pins at the length limit", m => { m.configuration.prior_version = "p".repeat(128); }],
   ["authority snapshot", withAuthority()],
-  ["authority with single identities", withAuthority(a => { a.members = ["only"]; a.retained_generations = [0]; a.source_hashes = [HEX0]; a.invalidation_evidence.pop(); })],
+  ["authority with single identities", withAuthority(a => { a.members = { count: 1, sha256: HEX0 }; a.retained_generations = [0]; a.source_hashes = { count: 1, sha256: HEX0 }; a.invalidation_evidence = { count: 1, sha256: HEX1 }; })],
+  ["authority with empty link, invalidation and source collections", withAuthority(a => { a.physical_links = { count: 0, sha256: HEX0 }; a.invalidation_evidence = { count: 0, sha256: HEX1 }; a.source_hashes = { count: 0, sha256: HEX0 }; })],
 ];
 for (const [name, mutate] of accepted) test(`strict manifest accepts ${name}`, async () => {
   const { parseArchiveManifest } = await api(), m = manifest(); mutate(m);

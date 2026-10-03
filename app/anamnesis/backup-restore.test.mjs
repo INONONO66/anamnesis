@@ -177,6 +177,6 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
   await run(['verify'], target);
   await run(['down'], target);
   const manifest = JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'));
-  assert.equal(manifest.authority.members.length, 3);
+  assert.equal(manifest.authority.members.count, 3);
   assert.equal(createHash('sha256').update(await readFile(join(archive, 'config.jsonc'))).digest('hex'), manifest.configuration.config_sha256);
 });

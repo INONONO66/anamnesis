@@ -51,25 +51,29 @@ class AuthoritySnapshotError extends Error {
   readonly code: AuthoritySnapshotRefusal;
   constructor(code: AuthoritySnapshotRefusal, detail: string) { super(`${code}: ${detail}`); this.name = "AuthoritySnapshotError"; this.code = code; }
 }
-function authoritySorted(values: string[], code: AuthoritySnapshotRefusal): void {
-  if (!values.every((v, i) => i === 0 || values[i - 1]! < v)) throw new AuthoritySnapshotError(code, "identities must be sorted and unique");
+type AuthorityDigest = { count: number; sha256: string };
+function authorityDigest(value: unknown, code: AuthoritySnapshotRefusal, minimum = 0): AuthorityDigest {
+  if (!isRecord(value) || Object.keys(value).length !== 2 || !Object.hasOwn(value, "count") || !Object.hasOwn(value, "sha256") ||
+    !integer(value.count, Number.MAX_SAFE_INTEGER, minimum) || !text(value.sha256, HEX)) {
+    throw new AuthoritySnapshotError(code, "digest is absent or invalid");
+  }
+  return { count: value.count, sha256: value.sha256 };
 }
 /** Validate adapter evidence before any offline dump is requested. Missing
  * Store APIs are a refusal, never an empty/guessed authority set. */
 export function verifyAuthoritySnapshot(value: unknown): AuthoritySnapshot {
   if (!isRecord(value)) throw new AuthoritySnapshotError("authority_members_missing", "snapshot is absent");
   const expectedKeys = ["members", "retained_generations", "coverage", "physical_links", "invalidation_evidence", "source_hashes"];
-  if (Object.keys(value).length !== expectedKeys.length || expectedKeys.some(k => !Object.hasOwn(value, k))) throw new AuthoritySnapshotError("authority_members_missing", "snapshot has missing or unknown fields");
-  const members = value.members; if (!Array.isArray(members) || members.length === 0 || !members.every(x => typeof x === "string")) throw new AuthoritySnapshotError("authority_members_missing", "Neo4j member enumeration was not supplied");
-  authoritySorted(members as string[], "authority_members_missing");
-  const generations = value.retained_generations; if (!Array.isArray(generations) || !generations.every((x, i) => integer(x) && (i === 0 || generations[i - 1] < x))) throw new AuthoritySnapshotError("authority_generations_missing", "retained generation coverage is absent or unsorted");
-  const coverage = value.coverage;
-  if (!isRecord(coverage) || !["ingest_seq", "structure_revision", "policy_revision"].every(k => integer(coverage[k]))) throw new AuthoritySnapshotError("authority_coverage_missing", "cutoff coverage is absent");
-  const links = value.physical_links; if (!Array.isArray(links) || !links.every(x => isRecord(x) && typeof x.id === "string" && typeof x.from === "string" && typeof x.to === "string" && (x.role === "DERIVED_FROM" || x.role === "ConductingArc"))) throw new AuthoritySnapshotError("authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent");
-  const invalidation = value.invalidation_evidence; if (!Array.isArray(invalidation) || !invalidation.every(x => isRecord(x) && typeof x.id === "string" && text(x.source_hash, HEX) && text(x.outcome_hash, HEX))) throw new AuthoritySnapshotError("authority_invalidation_missing", "invalidation evidence is absent or unhashed");
-  const sources = value.source_hashes; if (!Array.isArray(sources) || !sources.every(x => text(x, HEX))) throw new AuthoritySnapshotError("authority_sources_missing", "source hashes are absent");
-  authoritySorted(sources as string[], "authority_sources_missing");
-  return { members: members as string[], retained_generations: generations as number[], coverage: coverage as AuthoritySnapshot["coverage"], physical_links: links as AuthoritySnapshot["physical_links"], invalidation_evidence: invalidation as AuthoritySnapshot["invalidation_evidence"], source_hashes: sources as string[] };
+  if (Object.keys(value).some(k => !expectedKeys.includes(k))) throw new AuthoritySnapshotError("authority_members_missing", "snapshot has missing or unknown fields");
+  const own = (key: string) => Object.hasOwn(value, key) ? value[key] : undefined;
+  const members = authorityDigest(own("members"), "authority_members_missing", 1);
+  const generations = own("retained_generations"); if (!Array.isArray(generations) || !generations.every((x, i) => integer(x) && (i === 0 || generations[i - 1] < x))) throw new AuthoritySnapshotError("authority_generations_missing", "retained generation coverage is absent or unsorted");
+  const coverage = own("coverage");
+  if (!isRecord(coverage) || Object.keys(coverage).length !== 3 || !["ingest_seq", "structure_revision", "policy_revision"].every(k => Object.hasOwn(coverage, k) && integer(coverage[k]))) throw new AuthoritySnapshotError("authority_coverage_missing", "cutoff coverage is absent");
+  const links = authorityDigest(own("physical_links"), "authority_links_missing");
+  const invalidation = authorityDigest(own("invalidation_evidence"), "authority_invalidation_missing");
+  const sources = authorityDigest(own("source_hashes"), "authority_sources_missing");
+  return { members, retained_generations: generations as number[], coverage: coverage as AuthoritySnapshot["coverage"], physical_links: links, invalidation_evidence: invalidation, source_hashes: sources };
 }
 interface ArchiveEmbeddingProfile { embedding_profile_id: string; embedding_model_id: string; vector_index_id: string }
 interface ArchiveEmbeddingCoverage {

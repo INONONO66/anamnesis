@@ -3,6 +3,8 @@ import neo4j, { type ManagedTransaction } from "neo4j-driver";
 import { Generation, Coverage, type LinkRole } from "@anamnesis/protocol";
 import { extractionBodyDigest } from "@anamnesis/protocol";
 import { z } from "zod";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "./digest.ts";
 import { type ConductingArcRow, type ConductingArcProbe, type GraphEnvelope, GraphAccessError, type ConductingPartition, type PhysicalConductor, type ConductingArcVerification, ConductingMaintenanceOptions, conductingPartition, arcIdentity, arcTuple } from "./conducting.ts";
 import { CONDUCTING_ROLES } from "./schema.ts";
 import { receiptTime } from "./receipts.ts";
@@ -10,15 +12,15 @@ import { type InstallationContext, type PolicyState, requireInstallation } from 
 import type { StoreCore } from "./core.ts";
 
 export type AuthoritySnapshot = {
-  members: string[];
+  members: { count: number; sha256: string };
   retained_generations: number[];
   coverage: { ingest_seq: number; structure_revision: number; policy_revision: number };
-  physical_links: { id: string; from: string; to: string; role: "DERIVED_FROM" | "ConductingArc" }[];
-  invalidation_evidence: { id: string; source_hash: string; outcome_hash: string }[];
-  source_hashes: string[];
+  physical_links: { count: number; sha256: string };
+  invalidation_evidence: { count: number; sha256: string };
+  source_hashes: { count: number; sha256: string };
 };
 class AuthoritySnapshotError extends Error {
-  constructor(readonly code: "authority_snapshot_unavailable" | "authority_snapshot_limit_exceeded", detail: string = code) { super(`${code}: ${detail}`); }
+  constructor(readonly code: "authority_snapshot_unavailable", detail: string = code) { super(`${code}: ${detail}`); }
 }
 /** Each physical link yields one endpoint row per endpoint; malformed links, duplicate ids and self-links are reported alongside. */
 function physicalLinkRows(links: PhysicalConductor[]): { expected: Map<string, ConductingArcRow>; dataIssues: string[]; violations: string[] } {
@@ -185,42 +187,72 @@ export class ConductingStore {
       return (await this.conductingSnapshotTx(tx,maxItems)).report;
     });
   }
-  /** Authenticated, writer-fenced authority inventory. Every collection is
-   * independently capped; overflow is a refusal, never an incomplete snapshot. */
-  async authoritySnapshot(options: { maxItems?: number } = {}, context?: InstallationContext): Promise<AuthoritySnapshot> {
+  /** Hash canonical JSON arrays in ID order, in 5000-row pages under one fence.
+   * Counts include every row, so missing/duplicate identities cannot be skipped. */
+  async authoritySnapshot(context?: InstallationContext): Promise<AuthoritySnapshot> {
     requireInstallation(context!);
-    const maxItems = z.number().int().min(1).max(20000).default(10000).parse(options.maxItems);
     if (this.core.writerEpoch === undefined) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "writer_epoch_required");
     return this.core.withWriteTx(async tx => {
       const policy = await this.core.receiptLockTx(tx);
       const result = await tx.run(`
-        CALL () { MATCH (e:Element) WITH e ORDER BY e.id LIMIT $limit RETURN collect(e.id) AS members }
-        CALL () { MATCH (g:Generation) WHERE g.stream IN ['extraction','community'] WITH g ORDER BY g.stream,g.generation LIMIT $limit RETURN collect(g.generation) AS generations }
-        CALL () { MATCH (m:Meta {key:'meta'}) RETURN m.ingest_seq AS ingest_seq,coalesce(m.structure_revision,0) AS structure_revision }
-        CALL () { MATCH (p:PolicyAuthority {key:'installation'}) RETURN p.revision AS policy_revision }
-        CALL () { MATCH (a)-[l]->(b) WHERE type(l) IN $roles WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,from:a.id,to:b.id,role:CASE WHEN type(l)='DERIVED_FROM' THEN 'DERIVED_FROM' ELSE 'ConductingArc' END}) AS links }
-        CALL () { MATCH (a:Element)-[l:INVALIDATES]->(b:Element) WITH a,l,b ORDER BY l.id LIMIT $limit RETURN collect({id:l.id,source_hash:a.digest,from:a.id,to:b.id,target_id:l.target_id,effective_time_utc:l.effective_time_utc,generation:l.generation}) AS invalidation }
-        CALL () { MATCH (e:Element:Episode) WITH e ORDER BY e.id LIMIT $limit RETURN collect({hash:e.digest}) AS sources }
-        RETURN members,generations,ingest_seq,structure_revision,policy_revision,links,invalidation,sources`, { roles: [...CONDUCTING_ROLES], limit: neo4j.int(maxItems + 1) });
+        MATCH (m:Meta {key:'meta'})
+        CALL () { MATCH (g:Generation) WHERE g.stream IN ['extraction','community']
+          WITH DISTINCT g.generation AS generation ORDER BY generation RETURN collect(generation) AS generations }
+        CALL () { MATCH (e:Element) RETURN count(e) AS members }
+        CALL () { MATCH ()-[l]->() WHERE type(l) IN $roles RETURN count(l) AS links }
+        CALL () { MATCH (:Element)-[l:INVALIDATES]->(:Element) RETURN count(l) AS invalidation }
+        CALL () { MATCH (e:Element:Episode) RETURN count(e) AS sources }
+        RETURN generations,m.ingest_seq AS ingest_seq,coalesce(m.structure_revision,0) AS structure_revision,
+          members,links,invalidation,sources`, { roles: [...CONDUCTING_ROLES] });
       const row = result.records[0]; if (!row) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "snapshot query returned no record");
-      const count = (name: string) => (row.get(name) as unknown[]).length;
-      for (const name of ["members","generations","links","invalidation","sources"]) if (count(name) > maxItems) throw new AuthoritySnapshotError("authority_snapshot_limit_exceeded", name);
-      const members = (row.get("members") as string[]).filter((v): v is string => typeof v === "string").sort();
-      const generations = (row.get("generations") as unknown[]).filter((v): v is number => typeof v === "number").sort((a,b) => a-b);
-      const links = row.get("links") as AuthoritySnapshot["physical_links"];
-      // Archive hashes summarize persisted authority; they are not graph properties.
-      // Collect source maps so Cypher cannot silently discard a missing digest.
-      const rawSources = (row.get("sources") as { hash: unknown }[]).map(v => v.hash);
-      const evidence = z.array(z.object({ id: z.string().min(1), source_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      const generations = z.array(z.number().int().nonnegative()).parse(row.get("generations"));
+      const digest = async (query: string, schema: z.ZodType<Parameters<typeof canonicalJson>[0]>, collection: string, detail: string) => {
+        const hash = createHash("sha256").update("[");
+        let count = 0, after = "";
+        for (;;) {
+          const page = await tx.run<{ id: unknown; value: unknown }>(query, { after, batch: neo4j.int(5000) });
+          for (const record of page.records) {
+            const id = record.get("id"), value = schema.safeParse(record.get("value"));
+            if (typeof id !== "string" || id <= after || !value.success) throw new AuthoritySnapshotError("authority_snapshot_unavailable", detail);
+            if (count) hash.update(",");
+            hash.update(canonicalJson(value.data));
+            count++; after = id;
+          }
+          if (page.records.length < 5000) break;
+        }
+        if (count !== Number(row.get(collection))) throw new AuthoritySnapshotError("authority_snapshot_unavailable", detail);
+        return { count, sha256: hash.update("]").digest("hex") };
+      };
+      const members = await digest(`MATCH (e:Element) WHERE e.id > $after
+        RETURN e.id AS id,e.id AS value ORDER BY e.id LIMIT $batch`, z.string().min(1), "members", "member identity inventory is incomplete");
+      if (!members.count) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "member identity inventory is incomplete");
+      // Each role uses its ID index before the bounded global merge, rather than
+      // scanning all relationship types again for every page.
+      const links = await digest(`CALL () { ${CONDUCTING_ROLES.map(role => `
+        MATCH (a)-[l:${role}]->(b) WHERE l.id > $after
+        RETURN l.id AS id,{id:l.id,from:a.id,to:b.id,role:'${role === "DERIVED_FROM" ? "DERIVED_FROM" : "ConductingArc"}'} AS value
+        ORDER BY id LIMIT $batch`).join(" UNION ALL ")} }
+        RETURN id,value ORDER BY id LIMIT $batch`,
+      z.object({ id: z.string().min(1), from: z.string().min(1), to: z.string().min(1), role: z.enum(["DERIVED_FROM", "ConductingArc"]) }),
+      "links", "physical link evidence is incomplete");
+      const sources = await digest(`MATCH (e:Element) WHERE e.id > $after AND e:Episode
+        RETURN e.id AS id,e.digest AS value ORDER BY e.id LIMIT $batch`,
+      z.string().regex(/^[0-9a-f]{64}$/), "sources", "source hash evidence is incomplete");
+      const evidence = z.object({ id: z.string().min(1), source_hash: z.string().regex(/^[0-9a-f]{64}$/),
         from: z.string().min(1), to: z.string().min(1), target_id: z.string().min(1), effective_time_utc: z.iso.datetime(),
         generation: z.union([z.string().min(1), z.number().int().nonnegative()]).nullable(),
-      }).refine(v => v.target_id === v.to)).safeParse(row.get("invalidation"));
-      if (!members.length || !members.every((v,i) => i === 0 || v > members[i-1]!)) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "member identity inventory is incomplete");
-      if (!rawSources.every(v => typeof v === "string" && /^[0-9a-f]{64}$/.test(v))) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "source hash evidence is incomplete");
-      if (!evidence.success) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "invalidation hash evidence is incomplete");
-      const invalidation = evidence.data.map(({ source_hash, ...outcome }) => ({ id: outcome.id, source_hash, outcome_hash: extractionBodyDigest(outcome) }));
-      const sources = [...rawSources as string[]].sort();
+      }).refine(v => v.target_id === v.to).transform(({ source_hash, ...outcome }) => ({ id: outcome.id, source_hash, outcome_hash: extractionBodyDigest(outcome) }));
+      const invalidation = await digest(`MATCH (a:Element)-[l:INVALIDATES]->(b:Element) WHERE l.id > $after
+        RETURN l.id AS id,{id:l.id,source_hash:a.digest,from:a.id,to:b.id,target_id:l.target_id,effective_time_utc:l.effective_time_utc,generation:l.generation} AS value
+        ORDER BY l.id LIMIT $batch`, evidence, "invalidation", "invalidation hash evidence is incomplete");
       return { members, retained_generations: generations, coverage: { ingest_seq: Number(row.get("ingest_seq")), structure_revision: Number(row.get("structure_revision")), policy_revision: policy.policy_revision }, physical_links: links, invalidation_evidence: invalidation, source_hashes: sources };
+    }).catch(async (error: unknown) => {
+      // withWriteTx rejects a vanished Meta before entering the callback.
+      if (error instanceof Error && error.message === "stale_writer_epoch") {
+        const present = await this.core.withReadTx(tx => tx.run(`MATCH (m:Meta {key:'meta'}) RETURN m.key`));
+        if (!present.records.length) throw new AuthoritySnapshotError("authority_snapshot_unavailable", "snapshot query returned no record");
+      }
+      throw error;
     });
   }
   /** Bounded physical ConductingArc probe. Raw rows are ordered and capped before

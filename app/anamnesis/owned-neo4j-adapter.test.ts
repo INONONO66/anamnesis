@@ -27,8 +27,10 @@ function harness(ownerLabel: string) {
     authority: {
       revokeWriters: delegate("revokeWriters"),
       authoritySnapshot: delegate("authoritySnapshot"),
+      restoredAuthoritySnapshot: delegate("restoredAuthoritySnapshot"),
       materializeMembers: delegate("materializeMembers"),
       startAndReady: delegate("startAndReady"),
+      startRestored: delegate("startRestored"),
       rebindSource: delegate("rebindSource"),
       verifyPhysicalLinks: delegate("verifyPhysicalLinks"),
       quarantine: delegate("quarantine"),
@@ -44,9 +46,11 @@ test("authority and lifecycle methods pass their arguments straight through", as
   const { adapter, calls, execArgs } = harness(OWNER);
   const expected: [string, () => Promise<object | void>, Arg[]][] = [
     ["revokeWriters", () => adapter.revokeWriters(), []],
-    ["authoritySnapshot", () => adapter.authoritySnapshot("7", 20), ["7", 20]],
+    ["authoritySnapshot", () => adapter.authoritySnapshot("7"), ["7"]],
+    ["restoredAuthoritySnapshot", () => adapter.restoredAuthoritySnapshot(), []],
     ["materializeMembers", () => adapter.materializeMembers("/root", manifest), ["/root", manifest]],
     ["startAndReady", () => adapter.startAndReady("/root", "7"), ["/root", "7"]],
+    ["startRestored", () => adapter.startRestored("/root", "7"), ["/root", "7"]],
     ["rebindSource", () => adapter.rebindSource("src-1"), ["src-1"]],
     ["verifyPhysicalLinks", () => adapter.verifyPhysicalLinks("/root"), ["/root"]],
     ["quarantine", () => adapter.quarantine("/root"), ["/root"]],

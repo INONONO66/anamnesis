@@ -65,7 +65,7 @@ test("backupOwned refuses mismatched identity, stale cutoff, and changed or abse
     ["identity_conflict", "manifest operation mismatch", noOverrides, input => { input.operationId = "01993000-0000-7000-8000-000000000099"; }],
     ["stale_epoch", "cutoff changed before dump", () => ({ revokeWriters: async () => ({ epoch: "1", cutoff: { ...fixtureCutoff, ingest_seq: 8 } }) }), () => {}],
     ["authority_snapshot_unavailable", "manifest authority evidence is absent", noOverrides, input => { delete input.manifest.authority; }],
-    ["authority_snapshot_changed", "authority snapshot does not match cutoff manifest", () => ({ authoritySnapshot: async () => ({ ...fixtureAuthority(), members: ["episode-2"] }) }), () => {}],
+    ["authority_snapshot_changed", "authority snapshot does not match cutoff manifest", () => ({ authoritySnapshot: async () => ({ ...fixtureAuthority(), members: { count: 1, sha256: sha256('["episode-2"]') } }) }), () => {}],
     ["object_limit", "manifest exceeds the archive object limits", noOverrides, input => { input.manifest.objects = Array.from({ length: ARCHIVE_LIMITS.objects + 1 }, (_, i) => ({ hash: i.toString(16).padStart(64, "0"), size: 1, media_type: "text/plain" })); }],
     ["object_limit", "manifest exceeds the archive object limits", noOverrides, input => { input.manifest.objects = [{ hash: ONE, size: ARCHIVE_LIMITS.total_member_bytes + 1, media_type: "text/plain" }]; }],
   ];
@@ -336,7 +336,7 @@ test("restoreOwned swaps the admitted archive into a private live root behind th
   const { adapter, calls } = fakeAdapter();
   const admitted = await restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter);
   expect(admitted.manifest.operation_id).toBe(OPERATION);
-  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startAndReady", "rebindSource"]);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", "rebindSource"]);
   expect(await mode(live)).toBe(0o700);
   await expect(lstat(join(live, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
   await expect(lstat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
@@ -344,16 +344,51 @@ test("restoreOwned swaps the admitted archive into a private live root behind th
 });
 
 test("restoreOwned quarantines staging when the restarted source does not match or is not ready", async () => {
-  const readiness: [string, Partial<Awaited<ReturnType<ReturnType<typeof fakeAdapter>["adapter"]["startAndReady"]>>>][] = [["impostor", { sourceId: "impostor" }], ["not ready", { ready: false }], ["wrong epoch", { epoch: "99" }]];
+  const readiness: [string, Partial<Awaited<ReturnType<ReturnType<typeof fakeAdapter>["adapter"]["startRestored"]>>>][] = [["impostor", { sourceId: "impostor" }], ["not ready", { ready: false }], ["wrong epoch", { epoch: "99" }]];
   for (const [, patch] of readiness) {
     const { archive, live, staging, rollback } = await archiveFromBackup();
-    const { adapter, calls } = fakeAdapter(record => ({ startAndReady: async (_root, epoch) => { record("startAndReady"); return { sourceId: SOURCE, epoch, ready: true, ...patch }; } }));
+    const { adapter, calls } = fakeAdapter(record => ({ startRestored: async (_root, epoch) => { record("startRestored"); return { sourceId: SOURCE, epoch, ready: true, ...patch }; } }));
     await expect(restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter))
       .rejects.toMatchObject(failure("source_rebind_mismatch", "restored source is not the expected authority"));
-    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startAndReady", `quarantine:${staging}`]);
-    expect((await readFile(join(rollback, "sentinel"), "utf8"))).toBe("old live data");
-    await expect(lstat(join(live, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", `quarantine:${staging}`]);
+    await expectRolledBack(live, staging, rollback);
   }
+});
+
+/** After a post-promotion failure the old root is live again, the restored tree waits under the staging name, and no rollback copy remains. */
+async function expectRolledBack(live: string, staging: string, rollback: string) {
+  expect(await readFile(join(live, "sentinel"), "utf8")).toBe("old live data");
+  expect((await lstat(staging)).isDirectory()).toBe(true);
+  await expect(lstat(join(staging, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
+}
+
+test("restoreOwned still quarantines the rejected tree when the post-promotion undo fails", async () => {
+  const { archive, live, staging, rollback } = await archiveFromBackup();
+  // The rollback copy vanishes while the promoted tree is being verified, so `rename(rollback, live)` cannot succeed.
+  const { adapter, calls } = fakeAdapter(record => ({
+    restoredAuthoritySnapshot: async () => { record("restoredAuthoritySnapshot"); await rm(rollback, { recursive: true }); throw new Error("snapshot_exploded"); },
+  }));
+  const result = restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter);
+  await expect(result).rejects.toMatchObject({ code: "rollback_failed" });
+  await expect(result).rejects.toThrow(/snapshot_exploded; undo: .*ENOENT/);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", `quarantine:${staging}`]);
+  // The undo got as far as moving the rejected tree back under the staging name; no live root remains.
+  await expect(lstat(join(staging, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(live)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("restoreOwned reports a quarantine failure beside the refusal that caused it", async () => {
+  const { archive, live, staging, rollback } = await archiveFromBackup();
+  const { adapter, calls } = fakeAdapter(record => ({
+    startRestored: async (_root, epoch) => { record("startRestored"); return { sourceId: "impostor", epoch, ready: true }; },
+    quarantine: async root => { record(`quarantine:${root}`); throw new Error("container_stuck"); },
+  }));
+  const result = restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter);
+  await expect(result).rejects.toMatchObject({ code: "quarantine_failed" });
+  await expect(result).rejects.toThrow(/source_rebind_mismatch: .*; quarantine: Error: container_stuck/);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", `quarantine:${staging}`]);
+  await expectRolledBack(live, staging, rollback);
 });
 
 test("restoreOwned refuses an archive whose operation id differs before touching the adapter", async () => {
@@ -364,3 +399,20 @@ test("restoreOwned refuses an archive whose operation id differs before touching
   expect(calls).toEqual([]);
   await expect(lstat(staging)).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+test.each(["members", "physical_links", "invalidation_evidence", "source_hashes"] as const)(
+  "restoreOwned refuses a changed %s digest before rebinding or discarding rollback", async field => {
+    const { archive, live, staging, rollback } = await archiveFromBackup();
+    const { adapter, calls } = fakeAdapter(record => ({
+      restoredAuthoritySnapshot: async () => {
+        record("restoredAuthoritySnapshot");
+        const restored = fixtureAuthority();
+        restored[field] = { ...restored[field], sha256: "b".repeat(64) };
+        return restored;
+      },
+    }));
+    await expect(restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter))
+      .rejects.toMatchObject(failure("authority_digest_mismatch", "restored authority does not match manifest"));
+    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", `quarantine:${staging}`]);
+    await expectRolledBack(live, staging, rollback);
+  });

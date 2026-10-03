@@ -7,13 +7,88 @@ import neo4j from "neo4j-driver";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import type { ArchiveManifest, AuthoritySnapshot } from "./archive-manifest.ts";
-import type { InstallationContext } from "@anamnesis/core";
+import { Store, type StoreOptions, type InstallationContext } from "@anamnesis/core";
 import type { Engine } from "@anamnesis/core";
 import type { Installation } from "./config.ts";
 
+const OWNER_LABEL = "anamnesis.qa.owner";
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const dockerExec = promisify(execFile);
 const dockerOutput = async (args: string[]) => (await dockerExec("docker", args)).stdout.trim();
+const neo4jUser = () => process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j";
+const neo4jPassword = () => process.env["ANAMNESIS_NEO4J_PASSWORD"] ?? "";
+
+/** Waits for Bolt to answer while the database boots; a security refusal cannot heal with time and is thrown at once. */
+async function waitBolt(uri: string, user: string, password: string): Promise<void> {
+  const driver = neo4j.driver(uri, neo4j.auth.basic(user, password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+  try {
+    const deadline = Date.now() + 90000;
+    while (true) {
+      try { await driver.verifyConnectivity(); return; }
+      catch (error) {
+        if (error instanceof neo4j.Neo4jError && error.code.startsWith("Neo.ClientError.Security.")) throw error;
+        if (Date.now() >= deadline) throw error;
+      }
+    }
+  } finally { await driver.close(); }
+}
+
+export interface RestoredDatabase { container: string; uri: string; user: "neo4j"; database: "neo4j"; password: string }
+
+/** Removes a container this process started. Only confirmed absence is tolerated; any other docker failure propagates. */
+export const removeContainer = async (container: string) => {
+  try { await dockerExec("docker", ["rm", "-f", container]); }
+  catch (error) {
+    if (!/no such (object|container)/i.test(String((error as { stderr?: unknown }).stderr ?? error))) throw error;
+  }
+};
+
+/** Starts an owner-labelled Neo4j on the database `restoreOffline` loaded under `root`, waits for Bolt,
+ * and records the endpoint in `<root>/authority.json` so a later `ops up` binds to the restored database.
+ * The fresh container always serves user `neo4j` and database `neo4j`, whatever the source was configured with;
+ * a container that never became ready is removed before the failure propagates. */
+export async function startRestoredDatabase(root: string, owner: string, password: string): Promise<RestoredDatabase> {
+  const container = await dockerOutput(["run", "-d", "--label", `${OWNER_LABEL}=${owner}`, "-p", "127.0.0.1::7687", "-v", `${join(root, "database")}:/data`, "-e", `NEO4J_AUTH=neo4j/${password}`, NEO4J_IMAGE]);
+  try {
+    const mapped = await dockerOutput(["port", container, "7687/tcp"]);
+    const uri = `bolt://127.0.0.1:${Number(mapped.split(":").at(-1))}`;
+    await waitBolt(uri, "neo4j", password);
+    await writeFile(join(root, "authority.json"), JSON.stringify({ container, uri, database: "neo4j", owner }) + "\n", { mode: 0o600 });
+    return { container, uri, user: "neo4j", database: "neo4j", password };
+  } catch (error) {
+    // The start failure is the error to report; a removal failure is appended, never substituted.
+    try { await removeContainer(container); }
+    catch (cleanup) { throw Object.assign(new Error(`${String(error)}; container ${container} not removed: ${String(cleanup)}`), { code: "restored_container_leaked", cause: error }); }
+    throw error;
+  }
+}
+
+/** The orchestrator fences again; serve the fence and snapshot already taken so the stopped source is never asked twice. */
+export function fencedAdapter(adapter: TrustedAuthorityAdapter, fenced: Awaited<ReturnType<TrustedAuthorityAdapter["revokeWriters"]>>, authority: AuthoritySnapshot): TrustedAuthorityAdapter {
+  return {
+    revokeWriters: async () => fenced,
+    authoritySnapshot: async () => authority,
+    restoredAuthoritySnapshot: adapter.restoredAuthoritySnapshot.bind(adapter),
+    dumpOffline: adapter.dumpOffline.bind(adapter),
+    materializeMembers: adapter.materializeMembers.bind(adapter),
+    startAndReady: adapter.startAndReady.bind(adapter),
+    startRestored: adapter.startRestored.bind(adapter),
+    stop: adapter.stop.bind(adapter),
+    restoreOffline: adapter.restoreOffline.bind(adapter),
+    rebindSource: adapter.rebindSource.bind(adapter),
+    verifyPhysicalLinks: adapter.verifyPhysicalLinks.bind(adapter),
+    quarantine: adapter.quarantine.bind(adapter),
+  };
+}
+
+/** Read restored authority without init/migrations rewriting the restored graph. */
+export async function readRestoredAuthority(options: StoreOptions, context: InstallationContext): Promise<AuthoritySnapshot> {
+  const store = new Store(options);
+  try {
+    await store.claimWriterEpoch();
+    return await store.authoritySnapshot(context);
+  } finally { await store.close(); }
+}
 
 /** The lifecycle-owned adapter used by the runtime. It is intentionally built
  * per authenticated operation so the Store authority context cannot be lost. */
@@ -23,11 +98,11 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
   if (!container || !owner) throw Object.assign(new Error("backup_adapter_unavailable"), { code: "backup_adapter_unavailable" });
   let cutoff: ArchiveManifest["cutoff"] | undefined;
   let authorityEvidence: AuthoritySnapshot | undefined;
+  let restored: RestoredDatabase | undefined;
   const authority = {
     revokeWriters: async () => {
       const epoch = String(await engine.claimWriterEpoch());
-      // Bridge for #229: schema maximum. The inventory design itself does not scale; see the issue.
-      const snapshot = await engine.store.authoritySnapshot({ maxItems: 20000 }, context);
+      const snapshot = await engine.store.authoritySnapshot(context);
       cutoff = snapshot.coverage;
       authorityEvidence = snapshot;
       const running = await dockerOutput(["inspect", "--format", "{{.State.Running}}", container]);
@@ -37,6 +112,10 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
     authoritySnapshot: async (_epoch: string) => {
       if (!cutoff || !authorityEvidence) throw new Error("writer_fence_required");
       return authorityEvidence;
+    },
+    restoredAuthoritySnapshot: async () => {
+      if (!restored) throw new Error("restore_not_started");
+      return readRestoredAuthority({ uri: restored.uri, user: restored.user, password: restored.password, database: restored.database }, context);
     },
     materializeMembers: async (root: string, manifest: ArchiveManifest) => {
       const config = Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
@@ -48,24 +127,25 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
       configMember.bytes = config.byteLength; configMember.sha256 = sha256(config);
       const auth = await readFile(join(root, "neo4j.auth")); authMember.bytes = auth.byteLength; authMember.sha256 = sha256(auth);
     },
+    // A backup only restarts the fenced source on its new ephemeral port.
     startAndReady: async (_root: string, epoch: string) => {
       if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", container]) !== "true") await dockerOutput(["start", container]);
       const mapped = await dockerOutput(["port", container, "7687/tcp"]);
-      const port = Number(mapped.split(":").at(-1));
-      const uri = `bolt://127.0.0.1:${port}`;
+      const uri = `bolt://127.0.0.1:${Number(mapped.split(":").at(-1))}`;
       process.env["ANAMNESIS_NEO4J_URI"] = uri;
-      const driver = neo4j.driver(uri, neo4j.auth.basic(process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", process.env["ANAMNESIS_NEO4J_PASSWORD"] ?? ""), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
-      try {
-        const deadline = Date.now() + 90000;
-        while (true) {
-          try { await driver.verifyConnectivity(); return { sourceId: installation.incarnation, epoch, ready: true }; }
-          catch (error) { if (Date.now() >= deadline) throw error; }
-        }
-      } finally { await driver.close(); }
+      await waitBolt(uri, neo4jUser(), neo4jPassword());
+      return { sourceId: installation.incarnation, epoch, ready: true };
+    },
+    // A restore verifies the database it loaded under `<root>/database`, never the fenced source.
+    startRestored: async (root: string, epoch: string) => {
+      restored = await startRestoredDatabase(root, owner, neo4jPassword());
+      return { sourceId: installation.incarnation, epoch, ready: true };
     },
     rebindSource: async () => {},
     verifyPhysicalLinks: async () => {},
-    quarantine: async () => {},
+    // The quarantined tree keeps its data; the container that was serving it must not stay up.
+    // The binding is dropped only once removal succeeded, so a failed removal stays addressable.
+    quarantine: async () => { if (restored) { await removeContainer(restored.container); restored = undefined; } },
   };
   const lifecycle = { stop: async () => {} };
   return new OwnedNeo4jAdapter({ container, owner, authority, lifecycle });
