@@ -440,5 +440,5 @@ dbTest("backup and restore need an injected adapter and authenticated custody, t
   expect(calls.splice(0)).toEqual([]);
   expect(await runtime.restore(receiptContext, destination, operation)).toMatchObject({ state: "complete", operation_id: operation });
   expect(await runtime.restoreStatus(operation)).toEqual({ state: "complete", operation_id: operation });
-  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startAndReady", "restoredAuthoritySnapshot", "rebindSource"]);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", "rebindSource"]);
 });

@@ -259,6 +259,7 @@ const accepted = [
   ["version pins at the length limit", m => { m.configuration.prior_version = "p".repeat(128); }],
   ["authority snapshot", withAuthority()],
   ["authority with single identities", withAuthority(a => { a.members = { count: 1, sha256: HEX0 }; a.retained_generations = [0]; a.source_hashes = { count: 1, sha256: HEX0 }; a.invalidation_evidence = { count: 1, sha256: HEX1 }; })],
+  ["authority with empty link, invalidation and source collections", withAuthority(a => { a.physical_links = { count: 0, sha256: HEX0 }; a.invalidation_evidence = { count: 0, sha256: HEX1 }; a.source_hashes = { count: 0, sha256: HEX0 }; })],
 ];
 for (const [name, mutate] of accepted) test(`strict manifest accepts ${name}`, async () => {
   const { parseArchiveManifest } = await api(), m = manifest(); mutate(m);

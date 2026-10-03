@@ -29,6 +29,7 @@ test("backup publishes an object store at the archive object paths", async t => 
     },
     materializeMembers: async () => {},
     startAndReady: async () => ({ sourceId: "source", epoch: "1", ready: true }),
+    startRestored: async () => ({ sourceId: "source", epoch: "1", ready: true }),
     stop: async () => {}, restoreOffline: async () => {}, rebindSource: async () => {},
     verifyPhysicalLinks: async () => {}, quarantine: async () => {},
   };

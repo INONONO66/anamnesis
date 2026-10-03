@@ -1635,7 +1635,9 @@ reads the fenced source container, whose data the restore does not touch.
 Restore compares the snapshot, including retained generations and coverage,
 with the manifest before source rebind or rollback removal. A difference
 refuses with `authority_digest_mismatch`; opaque dump checksums alone do not
-establish restored authority.
+establish restored authority. A tree that fails after promotion is moved back
+to the staging name, the rollback copy returns to the live name, and the
+adapter's quarantine removes the container that served the rejected tree.
 
 ```text
   anamnesis restore <backup>

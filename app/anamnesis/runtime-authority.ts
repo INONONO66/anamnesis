@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
@@ -33,15 +33,24 @@ async function waitBolt(uri: string, user: string, password: string): Promise<vo
   } finally { await driver.close(); }
 }
 
+export interface RestoredDatabase { container: string; uri: string; user: "neo4j"; database: "neo4j"; password: string }
+
+/** Removes a container this process started; a container that is already gone is not an error. */
+export const removeContainer = async (container: string) => { await dockerExec("docker", ["rm", "-f", container]).catch(() => undefined); };
+
 /** Starts an owner-labelled Neo4j on the database `restoreOffline` loaded under `root`, waits for Bolt,
- * and records the endpoint in `<root>/authority.json` so a later `ops up` binds to the restored database. */
-export async function startRestoredDatabase(root: string, owner: string, password: string): Promise<{ container: string; uri: string }> {
+ * and records the endpoint in `<root>/authority.json` so a later `ops up` binds to the restored database.
+ * The fresh container always serves user `neo4j` and database `neo4j`, whatever the source was configured with;
+ * a container that never became ready is removed before the failure propagates. */
+export async function startRestoredDatabase(root: string, owner: string, password: string): Promise<RestoredDatabase> {
   const container = await dockerOutput(["run", "-d", "--label", `${OWNER_LABEL}=${owner}`, "-p", "127.0.0.1::7687", "-v", `${join(root, "database")}:/data`, "-e", `NEO4J_AUTH=neo4j/${password}`, NEO4J_IMAGE]);
-  const mapped = await dockerOutput(["port", container, "7687/tcp"]);
-  const uri = `bolt://127.0.0.1:${Number(mapped.split(":").at(-1))}`;
-  await waitBolt(uri, "neo4j", password);
-  await writeFile(join(root, "authority.json"), JSON.stringify({ container, uri, database: "neo4j", owner }) + "\n", { mode: 0o600 });
-  return { container, uri };
+  try {
+    const mapped = await dockerOutput(["port", container, "7687/tcp"]);
+    const uri = `bolt://127.0.0.1:${Number(mapped.split(":").at(-1))}`;
+    await waitBolt(uri, "neo4j", password);
+    await writeFile(join(root, "authority.json"), JSON.stringify({ container, uri, database: "neo4j", owner }) + "\n", { mode: 0o600 });
+    return { container, uri, user: "neo4j", database: "neo4j", password };
+  } catch (error) { await removeContainer(container); throw error; }
 }
 
 /** The orchestrator fences again; serve the fence and snapshot already taken so the stopped source is never asked twice. */
@@ -53,6 +62,7 @@ export function fencedAdapter(adapter: TrustedAuthorityAdapter, fenced: Awaited<
     dumpOffline: adapter.dumpOffline.bind(adapter),
     materializeMembers: adapter.materializeMembers.bind(adapter),
     startAndReady: adapter.startAndReady.bind(adapter),
+    startRestored: adapter.startRestored.bind(adapter),
     stop: adapter.stop.bind(adapter),
     restoreOffline: adapter.restoreOffline.bind(adapter),
     rebindSource: adapter.rebindSource.bind(adapter),
@@ -78,7 +88,7 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
   if (!container || !owner) throw Object.assign(new Error("backup_adapter_unavailable"), { code: "backup_adapter_unavailable" });
   let cutoff: ArchiveManifest["cutoff"] | undefined;
   let authorityEvidence: AuthoritySnapshot | undefined;
-  let restoredUri: string | undefined;
+  let restored: RestoredDatabase | undefined;
   const authority = {
     revokeWriters: async () => {
       const epoch = String(await engine.claimWriterEpoch());
@@ -94,8 +104,8 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
       return authorityEvidence;
     },
     restoredAuthoritySnapshot: async () => {
-      if (!restoredUri) throw new Error("restore_not_started");
-      return readRestoredAuthority({ uri: restoredUri, user: neo4jUser(), password: neo4jPassword(), database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }, context);
+      if (!restored) throw new Error("restore_not_started");
+      return readRestoredAuthority({ uri: restored.uri, user: restored.user, password: restored.password, database: restored.database }, context);
     },
     materializeMembers: async (root: string, manifest: ArchiveManifest) => {
       const config = Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
@@ -107,24 +117,24 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
       configMember.bytes = config.byteLength; configMember.sha256 = sha256(config);
       const auth = await readFile(join(root, "neo4j.auth")); authMember.bytes = auth.byteLength; authMember.sha256 = sha256(auth);
     },
-    startAndReady: async (root: string, epoch: string) => {
-      const ready = { sourceId: installation.incarnation, epoch, ready: true };
-      // A restore has loaded the archive under `<root>/database`: verification must read that database, never the fenced source.
-      if (await lstat(join(root, "database")).then(info => info.isDirectory(), () => false)) {
-        restoredUri = (await startRestoredDatabase(root, owner, neo4jPassword())).uri;
-        return ready;
-      }
-      // A backup only restarts the fenced source on its new ephemeral port.
+    // A backup only restarts the fenced source on its new ephemeral port.
+    startAndReady: async (_root: string, epoch: string) => {
       if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", container]) !== "true") await dockerOutput(["start", container]);
       const mapped = await dockerOutput(["port", container, "7687/tcp"]);
       const uri = `bolt://127.0.0.1:${Number(mapped.split(":").at(-1))}`;
       process.env["ANAMNESIS_NEO4J_URI"] = uri;
       await waitBolt(uri, neo4jUser(), neo4jPassword());
-      return ready;
+      return { sourceId: installation.incarnation, epoch, ready: true };
+    },
+    // A restore verifies the database it loaded under `<root>/database`, never the fenced source.
+    startRestored: async (root: string, epoch: string) => {
+      restored = await startRestoredDatabase(root, owner, neo4jPassword());
+      return { sourceId: installation.incarnation, epoch, ready: true };
     },
     rebindSource: async () => {},
     verifyPhysicalLinks: async () => {},
-    quarantine: async () => {},
+    // The quarantined tree keeps its data; the container that was serving it must not stay up.
+    quarantine: async () => { if (restored) { await removeContainer(restored.container); restored = undefined; } },
   };
   const lifecycle = { stop: async () => {} };
   return new OwnedNeo4jAdapter({ container, owner, authority, lifecycle });

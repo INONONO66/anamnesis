@@ -336,7 +336,7 @@ test("restoreOwned swaps the admitted archive into a private live root behind th
   const { adapter, calls } = fakeAdapter();
   const admitted = await restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter);
   expect(admitted.manifest.operation_id).toBe(OPERATION);
-  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startAndReady", "restoredAuthoritySnapshot", "rebindSource"]);
+  expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", "rebindSource"]);
   expect(await mode(live)).toBe(0o700);
   await expect(lstat(join(live, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
   await expect(lstat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
@@ -344,17 +344,24 @@ test("restoreOwned swaps the admitted archive into a private live root behind th
 });
 
 test("restoreOwned quarantines staging when the restarted source does not match or is not ready", async () => {
-  const readiness: [string, Partial<Awaited<ReturnType<ReturnType<typeof fakeAdapter>["adapter"]["startAndReady"]>>>][] = [["impostor", { sourceId: "impostor" }], ["not ready", { ready: false }], ["wrong epoch", { epoch: "99" }]];
+  const readiness: [string, Partial<Awaited<ReturnType<ReturnType<typeof fakeAdapter>["adapter"]["startRestored"]>>>][] = [["impostor", { sourceId: "impostor" }], ["not ready", { ready: false }], ["wrong epoch", { epoch: "99" }]];
   for (const [, patch] of readiness) {
     const { archive, live, staging, rollback } = await archiveFromBackup();
-    const { adapter, calls } = fakeAdapter(record => ({ startAndReady: async (_root, epoch) => { record("startAndReady"); return { sourceId: SOURCE, epoch, ready: true, ...patch }; } }));
+    const { adapter, calls } = fakeAdapter(record => ({ startRestored: async (_root, epoch) => { record("startRestored"); return { sourceId: SOURCE, epoch, ready: true, ...patch }; } }));
     await expect(restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter))
       .rejects.toMatchObject(failure("source_rebind_mismatch", "restored source is not the expected authority"));
-    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startAndReady", `quarantine:${staging}`]);
-    expect((await readFile(join(rollback, "sentinel"), "utf8"))).toBe("old live data");
-    await expect(lstat(join(live, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", `quarantine:${staging}`]);
+    await expectRolledBack(live, staging, rollback);
   }
 });
+
+/** After a post-promotion failure the old root is live again, the restored tree waits under the staging name, and no rollback copy remains. */
+async function expectRolledBack(live: string, staging: string, rollback: string) {
+  expect(await readFile(join(live, "sentinel"), "utf8")).toBe("old live data");
+  expect((await lstat(staging)).isDirectory()).toBe(true);
+  await expect(lstat(join(staging, "sentinel"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
+}
 
 test("restoreOwned refuses an archive whose operation id differs before touching the adapter", async () => {
   const { archive, live, staging, rollback } = await archiveFromBackup();
@@ -378,6 +385,6 @@ test.each(["members", "physical_links", "invalidation_evidence", "source_hashes"
     }));
     await expect(restoreOwned(restoreInput({ archive, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback }), adapter))
       .rejects.toMatchObject(failure("authority_digest_mismatch", "restored authority does not match manifest"));
-    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startAndReady", "restoredAuthoritySnapshot", `quarantine:${staging}`]);
-    expect(await readFile(join(rollback, "sentinel"), "utf8")).toBe("old live data");
+    expect(calls).toEqual(["stop", "restoreOffline", "verifyPhysicalLinks", "startRestored", "restoredAuthoritySnapshot", `quarantine:${staging}`]);
+    await expectRolledBack(live, staging, rollback);
   });

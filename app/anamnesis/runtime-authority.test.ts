@@ -174,7 +174,7 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
         expect(await count(source, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(1);
         // Diverge the source after the dump so the restored database is distinguishable from it.
         await source.executeQuery("MATCH (e:Episode {id:$id}) SET e.id=$changed", { id: episode.id, changed: uuidv7() });
-        expect(await adapter.startAndReady(staging, fenced.epoch)).toEqual({ sourceId: installation.incarnation, epoch: fenced.epoch, ready: true });
+        expect(await adapter.startRestored(staging, fenced.epoch)).toEqual({ sourceId: installation.incarnation, epoch: fenced.epoch, ready: true });
         const bound = await restoredBinding(staging);
         restoredContainer = bound.container;
         expect(bound.container).not.toBe(OWNED.container);
@@ -187,17 +187,29 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
         try { expect(await count(restored, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(1); }
         finally { await restored.close(); }
         expect(await count(source, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(0);
+        // Quarantine removes the container that served the rejected tree and forgets the binding.
+        await adapter.quarantine(staging);
+        await expect(dockerOutput(["inspect", "--format", "{{.State.Running}}", bound.container])).rejects.toThrow();
+        await expect(adapter.restoredAuthoritySnapshot()).rejects.toThrow("restore_not_started");
+        restoredContainer = undefined;
       }
       finally { await source.close(); }
     });
   } finally {
     try {
       await engine.close();
-      if (restoredContainer) await dockerOutput(["rm", "-f", restoredContainer]);
+      await removeOwnedContainers(restoredContainer);
       if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 }, 240_000);
+
+/** Removes every container this test started, including one a failed restore left running before its binding was read. */
+async function removeOwnedContainers(known: string | undefined) {
+  const shared = await dockerOutput(["inspect", "--format", "{{.Id}}", OWNED.container]);
+  const started = (await dockerOutput(["ps", "-aq", "--no-trunc", "--filter", `label=anamnesis.qa.owner=${OWNED.owner}`])).split("\n").filter(id => id && id !== shared);
+  for (const container of new Set([...(known ? [known] : []), ...started])) await dockerOutput(["rm", "-f", container]).catch(() => undefined);
+}
 
 // #229 acceptance: 100k members through the real archive and restore boundary, no sleeps. The source is diverged after
 // the archive completes, so the digest comparison inside restoreOwned can only pass against the database the restore loaded.
@@ -262,17 +274,20 @@ ownedTest("100k Elements round-trip through the archive; the restored database, 
         expect(await readRestoredAuthority({ uri: bound.uri, user: "neo4j", password: OWNED.password }, installationContext)).toEqual(authority);
         await expect(stat(staging)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(stat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
-        // Remove the fixture from the shared owned source; the Episode is left as the other owned test leaves its own.
-        const session = source.session();
-        try { await session.run("MATCH (e:Element) WHERE e.id STARTS WITH $prefix CALL { WITH e DETACH DELETE e } IN TRANSACTIONS OF 5000 ROWS", { prefix }); }
-        finally { await session.close(); }
-        expect(await count(source, "MATCH (e:Element) WHERE e.id STARTS WITH $prefix RETURN count(e) AS n", { prefix })).toBe(0);
-      } finally { await source.close(); }
+      } finally {
+        // Remove the fixture from the shared owned source on every path; the Episode is left as the other owned test leaves its own.
+        try {
+          const session = source.session();
+          try { await session.run("MATCH (e:Element) WHERE e.id STARTS WITH $prefix CALL { WITH e DETACH DELETE e } IN TRANSACTIONS OF 5000 ROWS", { prefix }); }
+          finally { await session.close(); }
+          expect(await count(source, "MATCH (e:Element) WHERE e.id STARTS WITH $prefix RETURN count(e) AS n", { prefix })).toBe(0);
+        } finally { await source.close(); }
+      }
     });
   } finally {
     try {
       await engine.close();
-      if (restoredContainer) await dockerOutput(["rm", "-f", restoredContainer]);
+      await removeOwnedContainers(restoredContainer);
       if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
     } finally { await rm(base, { recursive: true, force: true }); }
   }

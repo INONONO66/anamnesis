@@ -11,10 +11,11 @@ export const FIXTURE_IMAGE_DIGEST = NEO4J_IMAGE.slice("neo4j@".length);
 export const FIXTURE_CONFIG = Buffer.from('{"fixture":true}\n');
 const FIXTURE_AUTH = Buffer.from("neo4j/fixture-not-a-live-secret\n");
 
+/** `{count, sha256}` of a canonical JSON array, as `Store.authoritySnapshot` streams it. */
+const digestOf = (items: unknown[]) => ({ count: items.length, sha256: sha256(JSON.stringify(items)) });
 export function fixtureAuthority(): AuthoritySnapshot {
-  return { members: { count: 1, sha256: sha256('["episode-1"]') }, retained_generations: [1], coverage: { ...fixtureCutoff },
-    physical_links: { count: 0, sha256: sha256("[]") }, invalidation_evidence: { count: 0, sha256: sha256("[]") },
-    source_hashes: { count: 1, sha256: sha256(JSON.stringify(["a".repeat(64)])) } };
+  return { members: digestOf(["episode-1"]), retained_generations: [1], coverage: { ...fixtureCutoff },
+    physical_links: digestOf([]), invalidation_evidence: digestOf([]), source_hashes: digestOf(["a".repeat(64)]) };
 }
 
 type Recorder = (name: string) => void;
@@ -44,6 +45,7 @@ export function fakeAuthorityAdapter(sourceId: string, { overrides = noOverrides
       }
     },
     startAndReady: async (_root, epoch) => { record("startAndReady"); return { sourceId, epoch, ready: true }; },
+    startRestored: async (_root, epoch) => { record("startRestored"); return { sourceId, epoch, ready: true }; },
     stop: async () => { record("stop"); },
     restoreOffline: async () => { record("restoreOffline"); },
     rebindSource: async () => { record("rebindSource"); },

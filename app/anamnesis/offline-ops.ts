@@ -5,7 +5,7 @@ import { Engine } from "@anamnesis/core";
 import { acquireInstallation } from "./config.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { preflightArchive, type ArchiveCompatibility, type ArchiveManifest } from "./archive-manifest.ts";
-import { createRuntimeAuthority, fencedAdapter, manifestTemplate, objectInventory, readRestoredAuthority, startRestoredDatabase } from "./runtime-authority.ts";
+import { createRuntimeAuthority, fencedAdapter, manifestTemplate, objectInventory, readRestoredAuthority, removeContainer, startRestoredDatabase, type RestoredDatabase } from "./runtime-authority.ts";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { InstallationContext } from "@anamnesis/core";
 
@@ -57,18 +57,24 @@ export async function offlineRestore(root: string, archive: string): Promise<{ o
   const staging = `${root}.restore-staging.${operationId}`, rollback = `${root}.restore-rollback.${operationId}`;
   const owner = process.env["ANAMNESIS_QA_OWNER"];
   if (!owner) throw Object.assign(new Error("owner_required"), { code: "owner_required" });
-  let container = "", uri = "";
+  let restored: RestoredDatabase | undefined;
   const password = process.env["ANAMNESIS_NEO4J_PASSWORD"] ?? "g3-isolated-password";
   const authority = {
     revokeWriters: async () => ({ epoch: String(admitted.manifest.cutoff.ingest_seq), cutoff: admitted.manifest.cutoff }),
     authoritySnapshot: async () => admitted.manifest.authority!,
-    restoredAuthoritySnapshot: async () => readRestoredAuthority({ uri, user: "neo4j", password, database: "neo4j" }, context()),
+    restoredAuthoritySnapshot: async () => {
+      if (!restored) throw Object.assign(new Error("restore_not_started"), { code: "restore_not_started" });
+      return readRestoredAuthority({ uri: restored.uri, user: restored.user, password: restored.password, database: restored.database }, context());
+    },
     materializeMembers: async () => {},
-    startAndReady: async (live: string, epoch: string) => {
-      ({ container, uri } = await startRestoredDatabase(live, owner, password));
+    // There is no running source to restart: an offline restore only ever starts the restored database.
+    startAndReady: async () => { throw Object.assign(new Error("restore_only"), { code: "restore_only" }); },
+    startRestored: async (live: string, epoch: string) => {
+      restored = await startRestoredDatabase(live, owner, password);
       return { sourceId: incarnation, epoch, ready: true };
     },
-    rebindSource: async () => {}, verifyPhysicalLinks: async () => {}, quarantine: async () => {},
+    rebindSource: async () => {}, verifyPhysicalLinks: async () => {},
+    quarantine: async () => { if (restored) { await removeContainer(restored.container); restored = undefined; } },
   };
   const adapter = new OwnedNeo4jAdapter({ container: "restore-placeholder", owner, authority, lifecycle: { stop: async () => {} } });
   const originalExists = await lstat(root).then(() => true).catch(() => false);
@@ -89,5 +95,6 @@ export async function offlineRestore(root: string, archive: string): Promise<{ o
   // restoreOwned requires an owned parent and a live directory. The existing
   // empty target root is the live reservation; no daemon owner is held yet.
   await restoreOwned({ archive, liveRoot: root, stagingRoot: staging, rollbackRoot: rollback, operationId, compatibility, expectedSourceId: incarnation }, adapter);
-  return { operation_id: operationId, manifest: admitted.manifest, container, uri };
+  if (!restored) throw Object.assign(new Error("restore_not_started"), { code: "restore_not_started" });
+  return { operation_id: operationId, manifest: admitted.manifest, container: restored.container, uri: restored.uri };
 }
