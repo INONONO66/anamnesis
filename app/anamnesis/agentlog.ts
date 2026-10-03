@@ -23,7 +23,7 @@ async function files(root: string): Promise<string[]> {
 async function fingerprint(path: string): Promise<string> {
   const info = await lstat(path, { bigint: true });
   if (!info.isFile()) throw new Error(`source_not_regular_file: ${path}`);
-  return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
+  return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}`;
 }
 
 /** Immutable normalized export only: no watcher, append, rotation, SQLite or
@@ -33,19 +33,19 @@ export async function ingestAgentLog(root: string, checkpointPath: string, clien
   await ingestSnapshot(checkpointPath, client, async () => {
     const names = await files(root);
     const paths = names.map(name => join(root, name));
-    if (paths.some(path => [checkpointPath, checkpointPath + ".pending.json"].some(cp => resolve(path) === resolve(cp)))) throw new Error("source_checkpoint_path_conflict");
+    // The .pending.json sidecar needs no check here: files() admits only *.jsonl names.
+    if (paths.some(path => resolve(path) === resolve(checkpointPath))) throw new Error("source_checkpoint_path_conflict");
     const manifest: { file: string; sha256: string }[] = [];
     const fingerprints = new Map<string, string>();
     for (const path of paths) {
       const before = await fingerprint(path);
       const hash = createHash("sha256");
-      for await (const chunk of createReadStream(path, { highWaterMark: 64 * 1024 })) hash.update(chunk);
-      if (await fingerprint(path) !== before) throw new Error("source_changed");
+      for await (const chunk of createReadStream(path)) hash.update(chunk);
       fingerprints.set(path, before);
       manifest.push({ file: basename(path), sha256: hash.digest("hex") });
-      // Reject partial/invalid/oversized exports before any graph delivery.
+      // Reject partial/invalid/oversized exports before any graph delivery; a file that changes after `before`
+      // fails assertUnchanged ahead of the first delivery.
       for await (const _record of streamAgentLogFile(path)) { /* bounded validation */ }
-      if (await fingerprint(path) !== before) throw new Error("source_changed");
     }
     const sourceHash = sha(JSON.stringify({ format: "normalized-agentlog-snapshot/1", manifest }));
     const assertUnchanged = async () => {

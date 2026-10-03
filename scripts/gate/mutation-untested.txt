@@ -1,10 +1,7 @@
-app/anamnesis/backup-restore-orchestrator.ts
 app/anamnesis/daemon.ts
 app/anamnesis/main.ts
 app/anamnesis/offline-ops.ts
 app/anamnesis/ops.ts
-app/anamnesis/owned-neo4j-adapter.ts
 app/anamnesis/restore-authority.ts
-app/anamnesis/runtime-authority.ts
 app/anamnesis/runtime.ts
 packages/backfill/src/run.ts

@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { chmod, mkdtemp, writeFile, rm, readFile, stat } from "node:fs/promises";
+import { expect, spyOn, test } from "bun:test";
+import { chmod, mkdir, mkdtemp, writeFile, rm, readFile, stat, utimes } from "node:fs/promises";
 import { maskSecrets } from "../../packages/backfill/src/secrets.ts";
 import { createHash } from "node:crypto";
 import { ingestAgentLog } from "./agentlog.ts";
@@ -56,6 +56,7 @@ test("normalized snapshot preserves native revision, duplicate predecessor, and 
   const [a, duplicate, b, returned] = m.params;
   expect(a!.source_revision).toBe(hash("1970-01-01T00:00:05.000Z\nA"));
   expect(duplicate).toEqual(a);
+  expect(a).not.toHaveProperty("lineage_mode");
   expect(b!.expected_previous_revision_key).toBe(pending.identity.revision_key);
   expect(returned!.source_revision).not.toBe(a!.source_revision);
   expect(returned!.episode).toEqual(a!.episode);
@@ -88,6 +89,56 @@ for (const [name, content, error] of [
 
 test("missing source is an explicit error", () => fixture(async (root, cp) => {
   await expect(ingestAgentLog(root + "/missing", cp, mock(cp).client)).rejects.toHaveProperty("code", "ENOENT");
+}));
+
+test("exports are read in name order, AppleDouble siblings and other files are ignored, and the checkpoint anchors the byte manifest", () => fixture(async (root, cp) => {
+  await rm(root + "/codex.jsonl");
+  const names = ["h", "c", "a", "f", "b", "e", "g", "d"].map(n => n + ".jsonl");
+  for (const name of names) await writeFile(`${root}/${name}`, JSON.stringify(event(name)) + "\n");
+  await writeFile(root + "/._a.jsonl", "{not json\n");
+  await writeFile(root + "/notes.txt", "{not json\n");
+  const m = mock(cp);
+  await ingestAgentLog(root, cp, m.client);
+  const sorted = [...names].sort();
+  expect(m.params.map(p => p.episode.content)).toEqual(sorted);
+  const manifest = sorted.map(file => ({ file, sha256: hash(JSON.stringify(event(file)) + "\n") }));
+  expect((await saved(cp)).source_hash).toBe(hash(JSON.stringify({ format: "normalized-agentlog-snapshot/1", manifest })));
+}));
+
+test("a root without export files is an explicit error", () => fixture(async (root, cp) => {
+  await rm(root + "/codex.jsonl");
+  await writeFile(root + "/notes.txt", "");
+  await expect(ingestAgentLog(root, cp, mock(cp).client)).rejects.toThrow("source_no_export_files");
+}));
+
+test("the export file limit is exact", () => fixture(async (root, cp) => {
+  await rm(root + "/codex.jsonl");
+  await Promise.all(Array.from({ length: 1024 }, (_, i) => writeFile(`${root}/empty-${String(i).padStart(4, "0")}.jsonl`, "")));
+  const m = mock(cp);
+  await ingestAgentLog(root, cp, m.client);
+  expect((await saved(cp)).next).toBe(0);
+  await writeFile(root + "/one-more.jsonl", "");
+  await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow("source_file_limit");
+}), 30_000);
+
+test("a directory named like an export is not a regular file", () => fixture(async (root, cp) => {
+  await mkdir(root + "/dir.jsonl");
+  await expect(ingestAgentLog(root, cp, mock(cp).client)).rejects.toThrow("source_not_regular_file");
+}));
+
+test("a checkpoint inside the export set is a conflict", () => fixture(async (root, cp) => {
+  await writeFile(root + "/cp.jsonl", JSON.stringify(event("cp")) + "\n");
+  await expect(ingestAgentLog(root, root + "/cp.jsonl", mock(cp).client)).rejects.toThrow("source_checkpoint_path_conflict");
+}));
+
+test("one native revision with two bodies is a conflict at its exact line", () => fixture(async (root, cp) => {
+  await expect(ingestAgentLog(root, cp, mock(cp).client)).rejects.toThrow(`source_revision_conflict: ${root}/codex.jsonl:2`);
+}, [event(), { ...event(), kind: "tool" }]));
+
+test("a completed snapshot logs its scope", () => fixture(async (root, cp) => {
+  const lines: string[] = [], log = spyOn(console, "log").mockImplementation(line => { lines.push(line); });
+  try { await ingestAgentLog(root, cp, mock(cp).client); } finally { log.mockRestore(); }
+  expect(lines.map(line => JSON.parse(line))).toContainEqual(expect.objectContaining({ level: "info", event: "source_scope", format: "normalized-agentlog", snapshot: "complete", tail: "incomplete", rotation: "incomplete" }));
 }));
 
 
@@ -130,26 +181,38 @@ test("physical export order is retained while exact non-recallable line context 
   expect((await saved(cp)).next).toBe(2);
 }));
 
-test("mutation after committed reply cannot publish a successful checkpoint", () => fixture(async (root, cp) => {
+const changes = [
+  ["content", (root: string) => writeFile(root + "/codex.jsonl", JSON.stringify(event("changed")) + "\n")],
+  ["timestamp", (root: string) => utimes(root + "/codex.jsonl", 0, 0)],
+  ["sibling", (root: string) => writeFile(root + "/new.jsonl", JSON.stringify(event("new")) + "\n")],
+] as const;
+// "status" is the daemon call between the fingerprints and the first delivery; "remember" is the first committed reply.
+for (const [trigger, when, delivered] of [["status", "before any delivery", 0], ["remember", "after a committed reply", 1]] as const)
+for (const [change, mutate] of changes) test(`${change} change ${when} cannot publish a successful checkpoint`, () => fixture(async (root, cp) => {
   const m = mock(cp), request = m.client.request.bind(m.client);
   const client = Object.assign(Object.create(RpcClient.prototype) as RpcClient, { request: async (method: Parameters<typeof request>[0], input: any) => {
     const result = await request(method, input);
-    if (method === "remember") await writeFile(root + "/codex.jsonl", JSON.stringify(event("changed")) + "\n");
+    if (method === trigger) await mutate(root);
     return result;
   }});
   await expect(ingestAgentLog(root, cp, client)).rejects.toThrow("source_changed");
-  expect((await saved(cp)).next).toBe(0);
-  expect((await saved(cp + ".pending.json")).index).toBe(0);
+  expect(m.params).toHaveLength(delivered);
+  if (delivered) { expect((await saved(cp)).next).toBe(0); expect((await saved(cp + ".pending.json")).index).toBe(0); }
+  else for (const path of [cp, cp + ".pending.json"]) await expect(stat(path)).rejects.toHaveProperty("code", "ENOENT");
 }));
 
-for (const change of ["delete", "permission", "add", "rename"] as const) test(`${change} is not successful immutable resume`, () => fixture(async (root, cp) => {
+for (const [change, failure] of [
+  ["delete", "source_no_export_files"], ["permission", "EACCES"], ["add", "source_changed"], ["rename", "source_changed"],
+] as const) test(`${change} is not successful immutable resume`, () => fixture(async (root, cp) => {
   const m = mock(cp);
   await ingestAgentLog(root, cp, m.client);
   if (change === "delete") await rm(root + "/codex.jsonl");
   if (change === "permission") await chmod(root + "/codex.jsonl", 0);
   if (change === "add" || change === "rename") await writeFile(root + "/new.jsonl", JSON.stringify(event("new")) + "\n");
   if (change === "rename") await rm(root + "/codex.jsonl");
-  try { await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow(); }
+  // Root reads a mode-0 file, so there the changed mode surfaces through the fingerprint instead.
+  const expected = change === "permission" && process.getuid?.() === 0 ? "source_changed" : failure;
+  try { await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow(expected); }
   finally { if (change === "permission") await chmod(root + "/codex.jsonl", 0o600); }
   expect(m.params).toHaveLength(4);
 }));

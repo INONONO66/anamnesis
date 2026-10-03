@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { RpcClient } from "./client.ts";
-import { ingestSource } from "./source.ts";
+import { ingestSnapshot, ingestSource } from "./source.ts";
 import { RpcRememberParams, type RpcIngestStatusParams } from "../../packages/protocol/src/rpc.ts";
 
 const incarnation = "11111111-1111-4111-8111-111111111111";
@@ -218,4 +218,13 @@ test("crash after checkpoint publish reclaims only its matching committed pendin
   });
   await ingestSource(source, cp, client);
   expect(await saved(cp)).toEqual(checkpoint); await expect(stat(pending)).rejects.toHaveProperty("code", "ENOENT");
+}));
+
+test("a snapshot torn while it was read persists no checkpoint and reaches no RPC", () => fixture(async ({ cp, sourceHash }) => {
+  const calls: string[] = [];
+  const client = mock(async method => { calls.push(method); return ready; });
+  const prepare = async () => ({ sourceHash, records: (async function* () {})(), assertUnchanged: async () => { throw new Error("source_changed"); } });
+  await expect(ingestSnapshot(cp, client, prepare)).rejects.toThrow("source_changed");
+  await expect(stat(cp)).rejects.toHaveProperty("code", "ENOENT");
+  expect(calls).toEqual([]);
 }));

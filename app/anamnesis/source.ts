@@ -73,21 +73,16 @@ async function sourceFingerprint(path: string): Promise<string> {
   return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.mode].join(":");
 }
 async function snapshot(path: string): Promise<SourceFile> {
-  const before = await sourceFingerprint(path);
+  const fingerprint = await sourceFingerprint(path);
   const file = await open(path, "r");
   try {
     const bytes = Buffer.allocUnsafe(SOURCE_MAX_BYTES + 1);
     let length = 0;
     while (length < bytes.length) {
       const { bytesRead } = await file.read(bytes, length, bytes.length - length, null);
-      if (!bytesRead) {
-        const after = await sourceFingerprint(path);
-        if (after !== before) throw new Error("source_changed");
-        return { bytes: bytes.subarray(0, length), fingerprint: before };
-      }
+      if (!bytesRead) return { bytes: bytes.subarray(0, length), fingerprint };
       length += bytesRead;
     }
-    if (await sourceFingerprint(path) !== before) throw new Error("source_changed");
     throw new Error("source_too_large");
   } finally { await file.close(); }
 }
@@ -230,7 +225,10 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
   const lease = await acquireInstallation(resolve(checkpointPath) + ".lease");
   try {
     const snapshot = await prepare();
+    await snapshot.assertUnchanged();
     const status = await client.request("status", {});
+    // Checked again after the daemon round trip: a source that moved while `status` was pending gets no checkpoint.
+    await snapshot.assertUnchanged();
     const state = await openState(checkpointPath, pendingPath, snapshot.sourceHash, status.data_incarnation);
     await new Delivery({ checkpoint: checkpointPath, pending: pendingPath }, lease, client, snapshot, state).run();
   } finally { await lease.release(); }

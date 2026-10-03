@@ -4,10 +4,12 @@
 // survivor is a mutant on an executed line that no running test noticed. Sources no pure test loads are pinned in
 // mutation-untested.txt so that set can neither grow nor go stale unnoticed. Exit 1 on any surviving,
 // errored or unpinned mutant, and on a group Stryker generates no mutants for; timeouts count as detections but
-// are printed so load-induced ones are visible.
+// are printed so load-induced ones are visible. Source paths given as arguments restrict the run to the groups
+// containing them (a targeted re-run after killing survivors); STRYKER_TEMP_DIR keeps such a run out of the full
+// gate's sandbox.
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { sourceFiles } from "./sources.ts";
 
 const PURE_LIST = "scripts/qa/pure-tests.txt";
@@ -156,7 +158,10 @@ try {
   const tests = (await readFile(PURE_LIST, "utf8")).split("\n").filter(Boolean);
   const shipped = sourceFiles();
   const bySource = await mapCoverage(tests, new Set(shipped), scratch);
-  const groups = groupBySuite(bySource);
+  const only = process.argv.slice(2).map(arg => relative(process.cwd(), resolve(arg)));
+  const unloaded = only.filter(source => !bySource.has(source));
+  if (unloaded.length > 0) throw new Error(`no pure test loads ${unloaded.join(" ")}`);
+  const groups = groupBySuite(bySource).filter(group => only.length === 0 || only.some(source => group.sources.has(source)));
   const untested = shipped.filter(source => !bySource.has(source));
   const pinned = (await readFile(UNTESTED_LIST, "utf8")).split("\n").filter(Boolean);
   const unpinned = untested.filter(source => !pinned.includes(source)), stale = pinned.filter(source => !untested.includes(source));
