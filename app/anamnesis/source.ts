@@ -227,6 +227,8 @@ export async function ingestSnapshot(checkpointPath: string, client: RpcClient, 
     const snapshot = await prepare();
     await snapshot.assertUnchanged();
     const status = await client.request("status", {});
+    // Checked again after the daemon round trip: a source that moved while `status` was pending gets no checkpoint.
+    await snapshot.assertUnchanged();
     const state = await openState(checkpointPath, pendingPath, snapshot.sourceHash, status.data_incarnation);
     await new Delivery({ checkpoint: checkpointPath, pending: pendingPath }, lease, client, snapshot, state).run();
   } finally { await lease.release(); }

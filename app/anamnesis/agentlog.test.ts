@@ -197,9 +197,8 @@ for (const [change, mutate] of changes) test(`${change} change ${when} cannot pu
   }});
   await expect(ingestAgentLog(root, cp, client)).rejects.toThrow("source_changed");
   expect(m.params).toHaveLength(delivered);
-  expect((await saved(cp)).next).toBe(0);
-  if (delivered) expect((await saved(cp + ".pending.json")).index).toBe(0);
-  else await expect(stat(cp + ".pending.json")).rejects.toHaveProperty("code", "ENOENT");
+  if (delivered) { expect((await saved(cp)).next).toBe(0); expect((await saved(cp + ".pending.json")).index).toBe(0); }
+  else for (const path of [cp, cp + ".pending.json"]) await expect(stat(path)).rejects.toHaveProperty("code", "ENOENT");
 }));
 
 for (const [change, failure] of [
@@ -211,7 +210,9 @@ for (const [change, failure] of [
   if (change === "permission") await chmod(root + "/codex.jsonl", 0);
   if (change === "add" || change === "rename") await writeFile(root + "/new.jsonl", JSON.stringify(event("new")) + "\n");
   if (change === "rename") await rm(root + "/codex.jsonl");
-  try { await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow(failure); }
+  // Root reads a mode-0 file, so there the changed mode surfaces through the fingerprint instead.
+  const expected = change === "permission" && process.getuid?.() === 0 ? "source_changed" : failure;
+  try { await expect(ingestAgentLog(root, cp, m.client)).rejects.toThrow(expected); }
   finally { if (change === "permission") await chmod(root + "/codex.jsonl", 0o600); }
   expect(m.params).toHaveLength(4);
 }));

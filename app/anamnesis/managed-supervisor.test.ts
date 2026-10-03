@@ -38,7 +38,8 @@ test("a termination signal stops the supervised child once and the supervisor re
       announced = resolve;
       AbortSignal.timeout(4000).addEventListener("abort", () => reject(new Error("the child never announced itself")));
     });
-    process.once("SIGUSR2", announced);
+    // Stays armed (not `once`): a second signal from a restarted child must never reach the default handler.
+    process.on("SIGUSR2", announced);
     run = managed(entry, async () => { throw new Error("a stopped child must not be restarted"); });
     await up;
     const stop = process.listeners("SIGTERM").find(listener => !before.has(listener));
