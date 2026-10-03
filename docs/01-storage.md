@@ -1628,11 +1628,14 @@ destination contains `backup.complete`, whose body pins the manifest hash.
 
 After the restored database is loaded and started, the trusted adapter recomputes
 the authority digests under the writer fence without running migrations or
-initialization that could rewrite the restored graph. Restore compares the
-snapshot, including retained generations and coverage, with the manifest before
-source rebind or rollback removal. A difference refuses with
-`authority_digest_mismatch`; opaque dump checksums alone do not establish
-restored authority.
+initialization that could rewrite the restored graph. The recomputation reads
+the database the restore loaded: the adapter starts an owner-labelled Neo4j on
+`<root>/database` and records its endpoint in `<root>/authority.json`; it never
+reads the fenced source container, whose data the restore does not touch.
+Restore compares the snapshot, including retained generations and coverage,
+with the manifest before source rebind or rollback removal. A difference
+refuses with `authority_digest_mismatch`; opaque dump checksums alone do not
+establish restored authority.
 
 ```text
   anamnesis restore <backup>

@@ -8,7 +8,8 @@ import { promisify } from "node:util";
 import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { Engine, type AuthoritySnapshot, type InstallationContext } from "@anamnesis/core";
-import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
+import { createRuntimeAuthority, fencedAdapter, manifestTemplate, objectInventory, readRestoredAuthority } from "./runtime-authority.ts";
+import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { NEO4J_IMAGE, NEO4J_VERSION, OwnedNeo4jAdapter } from "./owned-neo4j-adapter.ts";
 import { fixtureAuthority } from "./authority-adapter.fixture.ts";
 
@@ -75,7 +76,7 @@ test("manifestTemplate pins format, image digest and one data+sidecar member per
   expect(manifest.objects).toBe(objects);
 });
 
-const AUTHORITY_ENV = ["ANAMNESIS_NEO4J_CONTAINER", "ANAMNESIS_QA_OWNER", "ANAMNESIS_NEO4J_URI"] as const;
+const AUTHORITY_ENV = ["ANAMNESIS_NEO4J_CONTAINER", "ANAMNESIS_QA_OWNER", "ANAMNESIS_NEO4J_URI", "ANAMNESIS_NEO4J_PASSWORD"] as const;
 type AuthorityEnv = typeof AUTHORITY_ENV[number];
 
 async function withAuthorityEnv(values: Partial<Record<AuthorityEnv, string>>, run: () => Promise<void>): Promise<void> {
@@ -112,6 +113,10 @@ const OWNED = {
 };
 const ownedTest = test.skipIf(Object.values(OWNED).some(value => value === ""));
 const dockerOutput = async (args: string[]) => (await promisify(execFile)("docker", args)).stdout.trim();
+/** A test that fences the owned container restarts it on a fresh ephemeral port; the env URI from file start is then stale. */
+const ownedUri = async () => `bolt://127.0.0.1:${(await dockerOutput(["port", OWNED.container, "7687/tcp"])).split(":").at(-1)}`;
+const restoredBinding = async (root: string) => JSON.parse(await readFile(join(root, "authority.json"), "utf8")) as { container: string; uri: string; owner: string };
+const count = async (driver: neo4j.Driver, cypher: string, params: Record<string, unknown> = {}) => (await driver.executeQuery(cypher, params)).records[0]!.get("n") as number;
 const installationContext: InstallationContext = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() };
 
 ownedTest("the runtime authority fences the owned container, dumps and reloads it offline, then restarts it on its new port", async () => {
@@ -124,12 +129,13 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
   await mkdir(join(archive, "database"), { recursive: true });
   await mkdir(join(corrupt, "database"), { recursive: true });
   await writeFile(join(corrupt, "database", "neo4j.dump"), "not a neo4j dump");
+  let restoredContainer: string | undefined;
   try {
     await engine.init();
     await engine.claimWriterEpoch();
     const episode = await engine.remember({ content: "fenced before the dump", time: { value: "2026-09-01T00:00:00Z", precision: "day" }, origin: { source: root, session: root, actor: "user", record: "one" }, source_revision: "v1", expected_previous_revision_key: null },
       { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context: installationContext });
-    await withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: OWNED.container, ANAMNESIS_QA_OWNER: OWNED.owner, ANAMNESIS_NEO4J_URI: OWNED.uri }, async () => {
+    await withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: OWNED.container, ANAMNESIS_QA_OWNER: OWNED.owner, ANAMNESIS_NEO4J_URI: OWNED.uri, ANAMNESIS_NEO4J_PASSWORD: OWNED.password }, async () => {
       const adapter = await createRuntimeAuthority(engine, installation, installationContext);
       await expect(adapter.authoritySnapshot("1")).rejects.toThrow("writer_fence_required");
       await expect(adapter.restoredAuthoritySnapshot()).rejects.toThrow("restore_not_started");
@@ -161,20 +167,113 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
       const restarted = process.env["ANAMNESIS_NEO4J_URI"] ?? "";
       expect(restarted).toMatch(/^bolt:\/\/127\.0\.0\.1:\d+$/);
       expect(await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container])).toBe("true");
-      expect(await adapter.restoredAuthoritySnapshot()).toEqual(authority);
-      const driver = neo4j.driver(restarted, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
+      // Restarting the fenced source is not a restore: nothing restored exists to read yet.
+      await expect(adapter.restoredAuthoritySnapshot()).rejects.toThrow("restore_not_started");
+      const source = neo4j.driver(restarted, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
       try {
-        expect((await driver.executeQuery("MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).records[0]!.get("n")).toBe(1);
-        const changed = uuidv7();
-        await driver.executeQuery("MATCH (e:Episode {id:$id}) SET e.id=$changed", { id: episode.id, changed });
-        expect((await adapter.restoredAuthoritySnapshot()).members).toEqual({ count: 1, sha256: sha256(JSON.stringify([changed])) });
+        expect(await count(source, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(1);
+        // Diverge the source after the dump so the restored database is distinguishable from it.
+        await source.executeQuery("MATCH (e:Episode {id:$id}) SET e.id=$changed", { id: episode.id, changed: uuidv7() });
+        expect(await adapter.startAndReady(staging, fenced.epoch)).toEqual({ sourceId: installation.incarnation, epoch: fenced.epoch, ready: true });
+        const bound = await restoredBinding(staging);
+        restoredContainer = bound.container;
+        expect(bound.container).not.toBe(OWNED.container);
+        expect(bound.uri).not.toBe(restarted);
+        expect(bound.owner).toBe(OWNED.owner);
+        expect(await dockerOutput(["inspect", "--format", '{{index .Config.Labels "anamnesis.qa.owner"}}', bound.container])).toBe(OWNED.owner);
+        // The restored snapshot is the dump-time authority, not the diverged source.
+        expect(await adapter.restoredAuthoritySnapshot()).toEqual(authority);
+        const restored = neo4j.driver(bound.uri, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
+        try { expect(await count(restored, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(1); }
+        finally { await restored.close(); }
+        expect(await count(source, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(0);
       }
-      finally { await driver.close(); }
+      finally { await source.close(); }
     });
   } finally {
     try {
       await engine.close();
+      if (restoredContainer) await dockerOutput(["rm", "-f", restoredContainer]);
       if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 }, 240_000);
+
+// #229 acceptance: 100k members through the real archive and restore boundary, no sleeps. The source is diverged after
+// the archive completes, so the digest comparison inside restoreOwned can only pass against the database the restore loaded.
+ownedTest("100k Elements round-trip through the archive; the restored database, not the diverged source, reproduces the manifest digests", async () => {
+  const parent = join(homedir(), ".cache/anamnesis-qa");
+  await mkdir(parent, { recursive: true });
+  const base = await mkdtemp(join(parent, "runtime-round-trip-"));
+  const live = join(base, "live"), destination = join(base, "archive");
+  await mkdir(join(live, "objects"), { recursive: true, mode: 0o700 });
+  const operationId = uuidv7(), size = 100_000, page = 5_000;
+  const staging = `${live}.restore-staging.${operationId}`, rollback = `${live}.restore-rollback.${operationId}`;
+  const installation = { root: live, token: "token", incarnation: uuidv7(), epoch: uuidv7(), assertOwned: async () => {}, release: async () => {} };
+  // UUIDv7-shaped member IDs that share one prefix, so the fixture is both admissible and removable in one pass.
+  const prefix = installation.incarnation.slice(0, 31);
+  const memberId = (n: number) => `${prefix}${n.toString(16).padStart(5, "0")}`;
+  const compatibility = { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [NEO4J_VERSION], neo4j_image_digests: [NEO4J_IMAGE.slice("neo4j@".length)], episode_digest_version_ceiling: 2 as const };
+  const sourceUri = await ownedUri();
+  const engine = new Engine({ uri: sourceUri, password: OWNED.password, objectsRoot: join(live, "objects") });
+  const seed = neo4j.driver(sourceUri, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
+  let restoredContainer: string | undefined;
+  try {
+    await engine.init();
+    await engine.claimWriterEpoch();
+    // The owned container is shared within this file: the previous test leaves its Episode behind.
+    const baseElements = await count(seed, "MATCH (e:Element) RETURN count(e) AS n");
+    const baseEpisodes = await count(seed, "MATCH (e:Episode) RETURN count(e) AS n");
+    const episode = await engine.remember({ content: "archived with one hundred thousand members", time: { value: "2026-09-01T00:00:00Z", precision: "day" }, origin: { source: live, session: live, actor: "user", record: "one" }, source_revision: "v1", expected_previous_revision_key: null },
+      { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context: installationContext });
+    for (let first = 1; first <= size; first += page) {
+      const ids = Array.from({ length: Math.min(page, size - first + 1) }, (_, offset) => memberId(first + offset));
+      await seed.executeQuery("UNWIND $ids AS id CREATE (:Element {id:id})", { ids });
+    }
+    await seed.close();
+    await withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: OWNED.container, ANAMNESIS_QA_OWNER: OWNED.owner, ANAMNESIS_NEO4J_URI: sourceUri, ANAMNESIS_NEO4J_PASSWORD: OWNED.password }, async () => {
+      const adapter = await createRuntimeAuthority(engine, installation, installationContext);
+      const fenced = await adapter.revokeWriters();
+      const authority = await adapter.authoritySnapshot(fenced.epoch);
+      expect(authority.members.count).toBe(baseElements + size + 1);
+      expect(authority.source_hashes.count).toBe(baseEpisodes + 1);
+      // The archive preflight pins the config member to this fingerprint; materializeMembers writes exactly these bytes.
+      const configSha256 = sha256(JSON.stringify({ uri: sourceUri, user: "neo4j", database: "neo4j" }));
+      const manifest = manifestTemplate(operationId, fenced.cutoff, authority, await objectInventory(join(live, "objects")), configSha256);
+      const written = await backupOwned({ root: live, destination, operationId, compatibility, manifest, objectRoot: join(live, "objects") }, fencedAdapter(adapter, fenced, authority));
+      expect(written.authority).toEqual(authority);
+      expect(JSON.parse(await readFile(join(destination, "manifest.json"), "utf8")).authority).toEqual(authority);
+      // backupOwned restarted the fenced source on a new port; diverge it so the restore can only verify against the loaded database.
+      const source = neo4j.driver(process.env["ANAMNESIS_NEO4J_URI"] ?? "", neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
+      try {
+        await source.executeQuery("CREATE (:Element {id:$id})", { id: memberId(0) });
+        expect(await count(source, "MATCH (e:Element) WHERE e.id STARTS WITH $prefix RETURN count(e) AS n", { prefix })).toBe(size + 1);
+        const result = await restoreOwned({ archive: destination, liveRoot: live, stagingRoot: staging, rollbackRoot: rollback, operationId, compatibility, expectedSourceId: installation.incarnation }, adapter);
+        expect(result.manifest.authority).toEqual(authority);
+        const bound = await restoredBinding(live);
+        restoredContainer = bound.container;
+        expect(bound.container).not.toBe(OWNED.container);
+        const restored = neo4j.driver(bound.uri, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
+        try {
+          expect(await count(restored, "MATCH (e:Element) RETURN count(e) AS n")).toBe(baseElements + size + 1);
+          expect(await count(restored, "MATCH (e:Element {id:$id}) RETURN count(e) AS n", { id: memberId(0) })).toBe(0);
+          expect(await count(restored, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(1);
+        } finally { await restored.close(); }
+        expect(await readRestoredAuthority({ uri: bound.uri, user: "neo4j", password: OWNED.password }, installationContext)).toEqual(authority);
+        await expect(stat(staging)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(stat(rollback)).rejects.toMatchObject({ code: "ENOENT" });
+        // Remove the fixture from the shared owned source; the Episode is left as the other owned test leaves its own.
+        const session = source.session();
+        try { await session.run("MATCH (e:Element) WHERE e.id STARTS WITH $prefix CALL { WITH e DETACH DELETE e } IN TRANSACTIONS OF 5000 ROWS", { prefix }); }
+        finally { await session.close(); }
+        expect(await count(source, "MATCH (e:Element) WHERE e.id STARTS WITH $prefix RETURN count(e) AS n", { prefix })).toBe(0);
+      } finally { await source.close(); }
+    });
+  } finally {
+    try {
+      await engine.close();
+      if (restoredContainer) await dockerOutput(["rm", "-f", restoredContainer]);
+      if (await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container]) !== "true") await dockerOutput(["start", OWNED.container]);
+    } finally { await rm(base, { recursive: true, force: true }); }
+  }
+}, 600_000);

@@ -198,10 +198,12 @@ The archive manifest carries per-collection `{count, sha256}` authority digests
 for member IDs, physical links, invalidation evidence and Episode source hashes,
 plus retained generations and cutoff coverage. Digests hash canonical JSON arrays
 streamed in stable ID order in 5,000-row pages within one writer-fenced
-transaction. There is no authority collection size cap. After loading and
-starting the restored database, restore recomputes this evidence and compares it
-with the manifest before rebinding the source or removing rollback data;
-differences refuse with `authority_digest_mismatch`.
+transaction. There is no authority collection size cap. After loading the dump
+under `<root>/database`, restore starts an owner-labelled Neo4j on that
+directory (recorded in `<root>/authority.json`), recomputes this evidence from
+it and compares it with the manifest before rebinding the source or removing
+rollback data; differences refuse with `authority_digest_mismatch`. The fenced
+source container is never the verification target.
 
 `anamnesis-backup.timer` runs `deploy/vm/backup.sh` daily as root: `systemctl stop anamnesis`, offline `ops backup <dir>` as the `anamnesis` user into a not-yet-existing `<stamp>/` directory with the JSON result beside it as `<stamp>.result.json` (`ops backup` refuses a live daemon with `daemon_live` and an existing destination with `destination_exists`; the daemon is restarted even if the dump fails), then `rsync` of `/var/lib/anamnesis/backups/` to inonono `/mnt/data/anamnesis/backups/pve-vm/`, keeping 14 local copies. `systemctl list-timers anamnesis-backup.timer` and `journalctl -u anamnesis-backup` show the last run; a non-zero exit marks the unit failed. Restore follows [Restore a dump](#restore-a-dump) with the daemon stopped (`systemctl stop anamnesis`).
 

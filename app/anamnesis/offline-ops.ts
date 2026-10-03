@@ -1,35 +1,20 @@
 import { randomUUID, createHash } from "node:crypto";
 import { cp, mkdir, readFile, writeFile, lstat } from "node:fs/promises";
-import { spawn } from "node:child_process";
 import { join } from "node:path";
-import neo4j from "neo4j-driver";
 import { Engine } from "@anamnesis/core";
 import { acquireInstallation } from "./config.ts";
-import { backupOwned, restoreOwned, type TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
+import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { preflightArchive, type ArchiveCompatibility, type ArchiveManifest } from "./archive-manifest.ts";
-import { createRuntimeAuthority, manifestTemplate, objectInventory, readRestoredAuthority } from "./runtime-authority.ts";
+import { createRuntimeAuthority, fencedAdapter, manifestTemplate, objectInventory, readRestoredAuthority, startRestoredDatabase } from "./runtime-authority.ts";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { InstallationContext } from "@anamnesis/core";
 
-const OWNER_LABEL = "anamnesis.qa.owner";
 const IMAGE_DIGEST = NEO4J_IMAGE.slice("neo4j@".length);
 const compatibility: ArchiveCompatibility = { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [NEO4J_VERSION], neo4j_image_digests: [IMAGE_DIGEST], episode_digest_version_ceiling: 2 };
 const context = (): InstallationContext => ({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() });
 const configBytes = () => Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-async function execDocker(args: string[]): Promise<string> {
-  const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
-  let out = "", err = ""; child.stdout?.on("data", b => out += b); child.stderr?.on("data", b => err += b);
-  const code = await new Promise<number>((resolve, reject) => { child.once("error", reject); child.once("close", c => resolve(c ?? 1)); });
-  if (code !== 0) throw new Error(`docker failed (${code}): ${err.slice(-1000)}`);
-  return out.trim();
-}
-async function waitBolt(uri: string, password: string): Promise<void> {
-  const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
-  try { const deadline = Date.now() + 90000; while (true) { try { await driver.verifyConnectivity(); return; } catch (error) { if (Date.now() >= deadline) throw error; } } }
-  finally { await driver.close(); }
-}
 async function uniqueOperation(): Promise<string> { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; }
 
 export async function applyAuthorityEnvironment(root: string): Promise<void> {
@@ -58,11 +43,7 @@ export async function offlineBackup(root: string, destination: string): Promise<
     const authority = await adapter.authoritySnapshot(fenced.epoch);
     const objects = await objectInventory(join(root, "objects"));
     const manifest = makeManifest(operationId, fenced.cutoff, authority, objects);
-    const cached: TrustedAuthorityAdapter = {
-      revokeWriters: async () => fenced, authoritySnapshot: async () => authority,
-      restoredAuthoritySnapshot: adapter.restoredAuthoritySnapshot.bind(adapter),
-      dumpOffline: adapter.dumpOffline.bind(adapter), materializeMembers: adapter.materializeMembers.bind(adapter), startAndReady: adapter.startAndReady.bind(adapter), stop: adapter.stop.bind(adapter), restoreOffline: adapter.restoreOffline.bind(adapter), rebindSource: adapter.rebindSource.bind(adapter), verifyPhysicalLinks: adapter.verifyPhysicalLinks.bind(adapter), quarantine: adapter.quarantine.bind(adapter),
-    };
+    const cached = fencedAdapter(adapter, fenced, authority);
     await backupOwned({ root, destination, operationId, compatibility, manifest, objectRoot: join(root, "objects") }, cached);
     return { operation_id: operationId, manifest };
   } finally { await engine.close(); await installation.release(); }
@@ -84,11 +65,7 @@ export async function offlineRestore(root: string, archive: string): Promise<{ o
     restoredAuthoritySnapshot: async () => readRestoredAuthority({ uri, user: "neo4j", password, database: "neo4j" }, context()),
     materializeMembers: async () => {},
     startAndReady: async (live: string, epoch: string) => {
-      container = await execDocker(["run", "-d", "--label", `${OWNER_LABEL}=${owner}`, "-p", "127.0.0.1::7687", "-v", `${live}/database:/data`, "-e", `NEO4J_AUTH=neo4j/${password}`, NEO4J_IMAGE]);
-      const portText = await execDocker(["port", container, "7687/tcp"]);
-      const port = Number(portText.split(":").at(-1)); uri = `bolt://127.0.0.1:${port}`;
-      await waitBolt(uri, password);
-      await writeFile(join(live, "authority.json"), JSON.stringify({ container, uri, database: "neo4j", owner }) + "\n", { mode: 0o600 });
+      ({ container, uri } = await startRestoredDatabase(live, owner, password));
       return { sourceId: incarnation, epoch, ready: true };
     },
     rebindSource: async () => {}, verifyPhysicalLinks: async () => {}, quarantine: async () => {},
