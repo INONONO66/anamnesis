@@ -57,18 +57,17 @@ function authoritySorted(values: string[], code: AuthoritySnapshotRefusal): void
 /** Validate adapter evidence before any offline dump is requested. Missing
  * Store APIs are a refusal, never an empty/guessed authority set. */
 export function verifyAuthoritySnapshot(value: unknown): AuthoritySnapshot {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new AuthoritySnapshotError("authority_members_missing", "snapshot is absent");
-  const v = value as Record<string, unknown>;
+  if (!isRecord(value)) throw new AuthoritySnapshotError("authority_members_missing", "snapshot is absent");
   const expectedKeys = ["members", "retained_generations", "coverage", "physical_links", "invalidation_evidence", "source_hashes"];
-  if (Object.keys(v).length !== expectedKeys.length || expectedKeys.some(k => !Object.hasOwn(v, k))) throw new AuthoritySnapshotError("authority_members_missing", "snapshot has missing or unknown fields");
-  const members = v.members; if (!Array.isArray(members) || members.length === 0 || !members.every(x => typeof x === "string")) throw new AuthoritySnapshotError("authority_members_missing", "Neo4j member enumeration was not supplied");
+  if (Object.keys(value).length !== expectedKeys.length || expectedKeys.some(k => !Object.hasOwn(value, k))) throw new AuthoritySnapshotError("authority_members_missing", "snapshot has missing or unknown fields");
+  const members = value.members; if (!Array.isArray(members) || members.length === 0 || !members.every(x => typeof x === "string")) throw new AuthoritySnapshotError("authority_members_missing", "Neo4j member enumeration was not supplied");
   authoritySorted(members as string[], "authority_members_missing");
-  const generations = v.retained_generations; if (!Array.isArray(generations) || !generations.every(x => typeof x === "number" && Number.isSafeInteger(x) && x >= 0) || generations.some((x, i) => i > 0 && (generations[i - 1] as number) >= x)) throw new AuthoritySnapshotError("authority_generations_missing", "retained generation coverage is absent or unsorted");
-  const coverage = v.coverage as Record<string, unknown> | undefined;
-  if (!coverage || !["ingest_seq", "structure_revision", "policy_revision"].every(k => typeof coverage[k] === "number" && Number.isSafeInteger(coverage[k]) && (coverage[k] as number) >= 0)) throw new AuthoritySnapshotError("authority_coverage_missing", "cutoff coverage is absent");
-  const links = v.physical_links; if (!Array.isArray(links) || !links.every(x => x && typeof x === "object" && typeof (x as Record<string, unknown>).id === "string" && typeof (x as Record<string, unknown>).from === "string" && typeof (x as Record<string, unknown>).to === "string" && ((x as Record<string, unknown>).role === "DERIVED_FROM" || (x as Record<string, unknown>).role === "ConductingArc"))) throw new AuthoritySnapshotError("authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent");
-  const invalidation = v.invalidation_evidence; if (!Array.isArray(invalidation) || !invalidation.every(x => x && typeof x === "object" && typeof (x as Record<string, unknown>).id === "string" && text((x as Record<string, unknown>).source_hash, HEX) && text((x as Record<string, unknown>).outcome_hash, HEX))) throw new AuthoritySnapshotError("authority_invalidation_missing", "invalidation evidence is absent or unhashed");
-  const sources = v.source_hashes; if (!Array.isArray(sources) || !sources.every(x => text(x, HEX))) throw new AuthoritySnapshotError("authority_sources_missing", "source hashes are absent");
+  const generations = value.retained_generations; if (!Array.isArray(generations) || !generations.every((x, i) => integer(x) && (i === 0 || generations[i - 1] < x))) throw new AuthoritySnapshotError("authority_generations_missing", "retained generation coverage is absent or unsorted");
+  const coverage = value.coverage;
+  if (!isRecord(coverage) || !["ingest_seq", "structure_revision", "policy_revision"].every(k => integer(coverage[k]))) throw new AuthoritySnapshotError("authority_coverage_missing", "cutoff coverage is absent");
+  const links = value.physical_links; if (!Array.isArray(links) || !links.every(x => isRecord(x) && typeof x.id === "string" && typeof x.from === "string" && typeof x.to === "string" && (x.role === "DERIVED_FROM" || x.role === "ConductingArc"))) throw new AuthoritySnapshotError("authority_links_missing", "physical DERIVED_FROM/ConductingArc evidence is absent");
+  const invalidation = value.invalidation_evidence; if (!Array.isArray(invalidation) || !invalidation.every(x => isRecord(x) && typeof x.id === "string" && text(x.source_hash, HEX) && text(x.outcome_hash, HEX))) throw new AuthoritySnapshotError("authority_invalidation_missing", "invalidation evidence is absent or unhashed");
+  const sources = value.source_hashes; if (!Array.isArray(sources) || !sources.every(x => text(x, HEX))) throw new AuthoritySnapshotError("authority_sources_missing", "source hashes are absent");
   authoritySorted(sources as string[], "authority_sources_missing");
   return { members: members as string[], retained_generations: generations as number[], coverage: coverage as AuthoritySnapshot["coverage"], physical_links: links as AuthoritySnapshot["physical_links"], invalidation_evidence: invalidation as AuthoritySnapshot["invalidation_evidence"], source_hashes: sources as string[] };
 }
@@ -126,14 +125,17 @@ const memberLimit: Record<Role, number> = {
 function need(condition: unknown, code: ArchiveAdmissionCode, detail: string): asserts condition {
   if (!condition) throw new ArchiveAdmissionError(code, detail);
 }
-function record(value: unknown, keys: string[], code: ArchiveAdmissionCode): Record<string, unknown> {
-  need(value !== null && typeof value === "object" && !Array.isArray(value), code, "expected object");
-  const obj = value as Record<string, unknown>;
-  need(Object.keys(obj).length === keys.length && keys.every(k => Object.hasOwn(obj, k)), code, "unexpected or missing field");
-  return obj;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+function record(value: unknown, keys: string[], code: ArchiveAdmissionCode): Record<string, unknown> {
+  need(isRecord(value), code, "expected object");
+  need(Object.keys(value).length === keys.length && keys.every(k => Object.hasOwn(value, k)), code, "unexpected or missing field");
+  return value;
+}
+function safeInteger(value: unknown): value is number { return Number.isSafeInteger(value); }
 function integer(value: unknown, max = Number.MAX_SAFE_INTEGER, min = 0): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+  return safeInteger(value) && value >= min && value <= max;
 }
 function oneOf<T>(values: readonly T[], value: unknown): value is T { return (values as readonly unknown[]).includes(value); }
 const ROLES: readonly Role[] = ["database_dump", "dump_metadata", "config", "auth", "object_data", "object_sidecar"];
@@ -145,44 +147,46 @@ function array(value: unknown, max: number, code: ArchiveAdmissionCode): unknown
 }
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    return `{${Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(",")}}`;
-  }
+  if (isRecord(value)) return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
   return JSON.stringify(value);
 }
 export function sha256(bytes: string | Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
-/** Index of the quote closing the string opened at `open`, honouring backslash escapes (raw.length when unterminated). */
+/** Index of the quote closing the string opened at `open`, honouring backslash escapes; past the end when
+ * unterminated (charAt answers "" there, so no separate bound is needed). */
 function stringEnd(raw: string, open: number): number {
-  let i = open + 1;
-  while (i < raw.length && raw[i] !== '"') { if (raw[i] === "\\") i++; i++; }
-  return i;
+  for (let i = open + 1; ; i++) {
+    const c = raw.charAt(i);
+    if (c === "" || c === '"') return i;
+    if (c === "\\") i++;
+  }
 }
 /** A string is an object key when the next non-space character after it is a colon. */
 function isKey(raw: string, end: number): boolean {
-  let next = end + 1; while (/\s/.test(raw[next] ?? "x")) next++;
-  return raw[next] === ":";
+  let next = end + 1;
+  while (/\s/.test(raw.charAt(next))) next++;
+  return raw.charAt(next) === ":";
 }
-/** Rejects duplicate object keys and over-deep nesting before JSON.parse, which would silently keep the last key. */
+/** Rejects duplicate object keys and over-deep nesting before JSON.parse, which would silently keep the last key.
+ * Arrays open a key scope too: a key inside one is malformed JSON, which JSON.parse then reports. */
 function scanJson(raw: string, code: ArchiveAdmissionCode): void {
-  const stack: Array<Set<string> | null> = [];
+  const scopes: Set<string>[] = [];
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i];
     if (c === '"') {
       const start = i; i = stringEnd(raw, i);
       if (isKey(raw, i)) {
-        const key = JSON.parse(raw.slice(start, i + 1)) as string, keys = stack.at(-1);
+        const key = JSON.parse(raw.slice(start, i + 1)) as string, keys = scopes.at(-1);
         need(keys && !keys.has(key), code, "duplicate JSON key"); keys.add(key);
       }
     } else if (c === "{" || c === "[") {
-      stack.push(c === "{" ? new Set() : null); need(stack.length <= ARCHIVE_LIMITS.json_depth, code, "JSON depth limit");
-    } else if (c === "}" || c === "]") stack.pop();
+      scopes.push(new Set()); need(scopes.length <= ARCHIVE_LIMITS.json_depth, code, "JSON depth limit");
+    } else if (c === "}" || c === "]") scopes.pop();
   }
 }
 /** Duplicate keys must reject even for legacy ObjectStore sidecars, whose
  * insertion-ordered JSON is not the canonical manifest byte representation. */
 function decode(bytes: string | Uint8Array, max: number, code: ArchiveAdmissionCode, requireCanonical: boolean): unknown {
-  need((typeof bytes === "string" ? Buffer.byteLength(bytes) : bytes.byteLength) <= max, code, "JSON byte limit");
+  need(Buffer.byteLength(bytes) <= max, code, "JSON byte limit");
   let raw: string, value: unknown;
   try {
     raw = typeof bytes === "string" ? bytes : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
@@ -197,6 +201,11 @@ function decode(bytes: string | Uint8Array, max: number, code: ArchiveAdmissionC
 }
 function sortedUnique(keys: string[], code: ArchiveAdmissionCode): void {
   need(keys.every((k, i) => i === 0 || keys[i - 1]! < k), code, "identities must be unique and sorted");
+}
+/** Coverage partition identity whose string order is model, stream, then numeric generation: the
+ * generation is zero-padded to the 16 digits of Number.MAX_SAFE_INTEGER, never decimal-string order. */
+function partition(model: string, stream: string, generation: number): string {
+  return `${model}/${stream}/${String(generation).padStart(16, "0")}`;
 }
 
 /** Wire identity: sorted-key compact JSON, no BOM/newline/duplicate keys,
@@ -229,7 +238,7 @@ function parseProfiles(list: unknown, active: unknown, code: ArchiveAdmissionCod
   return { embedding_profile_id: p.embedding_profile_id, embedding_model_id: p.embedding_model_id, vector_index_id: p.vector_index_id };
   });
   sortedUnique(profiles.map(p => p.embedding_profile_id), code);
-  need(active === null || (typeof active === "string" && profiles.some(p => p.embedding_profile_id === active)), code, "unknown active profile");
+  need(active === null || profiles.some(p => p.embedding_profile_id === active), code, "unknown active profile");
   return { profiles, activeId: active as string | null };
 }
 function parseExtraction(value: unknown, code: ArchiveAdmissionCode): ArchiveManifest["models"]["extraction"] {
@@ -242,7 +251,7 @@ function parseExtraction(value: unknown, code: ArchiveAdmissionCode): ArchiveMan
 export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifest {
   const code = "invalid_manifest";
   const decoded = decode(bytes, ARCHIVE_LIMITS.manifest_bytes, code, true);
-  need(decoded !== null && typeof decoded === "object" && !Array.isArray(decoded), code, "expected object");
+  need(isRecord(decoded), code, "expected object");
   const m = record(decoded,
     Object.hasOwn(decoded, "authority") ? ["format", "operation_id", "cutoff", "compatibility", "configuration", "models", "objects", "members", "authority"] : ["format", "operation_id", "cutoff", "compatibility", "configuration", "models", "objects", "members"], code);
   need(m.format === "anamnesis.archive/1" && text(m.operation_id, UUID7), code, "unsupported format or operation identity");
@@ -253,25 +262,21 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
   const { profiles, activeId } = parseProfiles(models.embedding_profiles, models.active_embedding_profile_id, code);
   const extraction = parseExtraction(models.extraction, code);
   const extractionGeneration = extraction?.generation ?? null;
-  const modelIds = new Set(profiles.map(p => p.embedding_model_id)), coverageKeys = new Set<string>();
+  const modelIds = new Set(profiles.map(p => p.embedding_model_id));
   const coverages = array(models.embedding_coverages, ARCHIVE_LIMITS.embedding_coverages, code).map((value): ArchiveEmbeddingCoverage => {
     const c = record(value, ["embedding_model_id", "stream", "generation", "covered_ingest_seq", "health", "resolved_no_vector_count", "omission_digest"], code);
     need(text(c.embedding_model_id, HEX) && modelIds.has(c.embedding_model_id) && (c.stream === "episode" || c.stream === "extraction") &&
       integer(c.generation, Number.MAX_SAFE_INTEGER, c.stream === "episode" ? 0 : 1) && (c.stream !== "episode" || c.generation === 0) &&
       integer(c.covered_ingest_seq, cutoff.ingest_seq) && (c.health === "HEALTHY" || c.health === "BLOCKED") &&
       integer(c.resolved_no_vector_count) && text(c.omission_digest, HEX), code, "invalid model coverage");
-    const key = `${c.embedding_model_id}/${c.stream}/${c.generation}`;
-    need(!coverageKeys.has(key), code, "duplicate coverage partition"); coverageKeys.add(key);
     return { embedding_model_id: c.embedding_model_id, stream: c.stream, generation: c.generation, covered_ingest_seq: c.covered_ingest_seq, health: c.health, resolved_no_vector_count: c.resolved_no_vector_count, omission_digest: c.omission_digest };
   });
-  // Numeric generation ordering, not decimal-string ordering.
-  need(coverages.every((c, i) => {
-    const p = coverages[i - 1]; return !p || p.embedding_model_id < c.embedding_model_id ||
-      (p.embedding_model_id === c.embedding_model_id && (p.stream < c.stream || (p.stream === c.stream && p.generation < c.generation)));
-  }), code, "unsorted coverage partitions");
-  for (const id of modelIds) need(coverageKeys.has(`${id}/episode/0`), code, "missing model episode coverage");
+  const partitions = coverages.map(c => partition(c.embedding_model_id, c.stream, c.generation));
+  sortedUnique(partitions, code);
+  const coverageKeys = new Set(partitions);
+  for (const id of modelIds) need(coverageKeys.has(partition(id, "episode", 0)), code, "missing model episode coverage");
   const active = profiles.find(p => p.embedding_profile_id === activeId);
-  if (active && extractionGeneration !== null) need(coverageKeys.has(`${active.embedding_model_id}/extraction/${extractionGeneration}`), code, "missing active extraction coverage");
+  if (active && extractionGeneration !== null) need(coverageKeys.has(partition(active.embedding_model_id, "extraction", extractionGeneration)), code, "missing active extraction coverage");
   const expected = new Map(FIXED), objects = new Map<string, ArchiveObject>();
   for (const value of array(m.objects, ARCHIVE_LIMITS.objects, code)) {
     const obj = record(value, ["hash", "size", "media_type"], code);
@@ -283,7 +288,9 @@ export function parseArchiveManifest(bytes: string | Uint8Array): ArchiveManifes
   sortedUnique([...objects.keys()], code);
   const members = array(m.members, ARCHIVE_LIMITS.members, code).map((value): ArchiveMember => {
     const member = record(value, ["path", "role", "bytes", "sha256"], code);
-    need(typeof member.path === "string" && oneOf(ROLES, member.role) && expected.get(member.path) === member.role, code, "noncanonical, unknown or wrong-role member path");
+    need(typeof member.path === "string", code, "member path must be a string");
+    need(oneOf(ROLES, member.role), code, "unknown member role");
+    need(expected.get(member.path) === member.role, code, "noncanonical or wrong-role member path");
     need(integer(member.bytes, memberLimit[member.role], member.role === "object_data" ? 0 : 1) && text(member.sha256, HEX), code, "invalid member size/hash");
     if (member.role === "object_data") {
       const hash = member.path.slice(-64), obj = objects.get(hash)!;
@@ -318,33 +325,39 @@ function checkCompatibility(m: ArchiveManifest, accepted: ArchiveCompatibility):
   const c = m.compatibility;
   need(accepted.schema_versions.includes(c.schema_version) && accepted.neo4j_versions.includes(c.neo4j_version) && accepted.neo4j_image_digests.includes(c.neo4j_image_digest) && c.episode_digest_version_ceiling <= accepted.episode_digest_version_ceiling, code, "unsupported archive contract");
 }
-function sameStat(a: BigIntStats, b: BigIntStats): boolean {
+/** @public consumed by the .mjs harnesses through dynamic import */
+export function sameStat(a: BigIntStats, b: BigIntStats): boolean {
   return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.uid === b.uid && a.gid === b.gid &&
     a.nlink === b.nlink && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
 }
 async function directory(path: string): Promise<BigIntStats> {
   const info = await lstat(path, { bigint: true });
-  need(info.isDirectory() && !info.isSymbolicLink() && info.uid === BigInt(process.getuid!()) && (info.mode & 0o022n) === 0n, "archive_layout", "archive directories must be owned, non-writable by others, and not links");
+  need(info.isDirectory() && info.uid === BigInt(process.getuid!()) && (info.mode & 0o022n) === 0n, "archive_layout", "archive directories must be owned, non-writable by others, and not links");
   return info;
 }
-async function readMember(path: string, max: number, collect: boolean, expected?: ArchiveMember): Promise<{ hash: string; bytes: number; content: Buffer; stat: BigIntStats }> {
+/** Members returned whole for parsing; every other member (and the marker and manifest, which have no
+ * declared member) is only hashed, so a dump is never buffered. */
+const COLLECTED: readonly Role[] = ["object_sidecar", "dump_metadata"];
+/** @public consumed by the .mjs harnesses through dynamic import */
+export async function readMember(path: string, max: number, expected?: ArchiveMember): Promise<{ hash: string; bytes: number; content: Buffer; stat: BigIntStats }> {
   need(await realpath(dirname(path)) === dirname(path), "archive_layout", "linked parent directory");
   const before = await lstat(path, { bigint: true });
   need(before.isFile() && before.nlink === 1n, "archive_layout", "member must be a single-link regular file");
   need(before.size <= BigInt(max), "archive_limit", "file exceeds admission byte limit");
   if (expected) need(before.size === BigInt(expected.bytes), "member_mismatch", "member length mismatch");
+  const collect = !expected || COLLECTED.includes(expected.role);
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     need(sameStat(before, await file.stat({ bigint: true })), "archive_changed", "file replaced before open");
-    const digest = createHash("sha256"), chunks: Buffer[] = [];
-    const buffer = Buffer.alloc(Math.min(ARCHIVE_LIMITS.hash_chunk_bytes, max + 1));
+    const digest = createHash("sha256"), chunks: Buffer[] = [], buffer = Buffer.allocUnsafe(ARCHIVE_LIMITS.hash_chunk_bytes);
     let bytes = 0;
     while (true) {
-      const result = await file.read(buffer, 0, Math.min(buffer.length, max - bytes + 1), null);
-      if (result.bytesRead === 0) break;
-      bytes += result.bytesRead; need(bytes <= max, "archive_limit", "file grew beyond admission limit");
-      const chunk = buffer.subarray(0, result.bytesRead); digest.update(chunk); if (collect) chunks.push(Buffer.from(chunk));
+      const { bytesRead } = await file.read(buffer);
+      if (bytesRead === 0) break;
+      bytes += bytesRead; need(bytes <= max, "archive_limit", "file grew beyond admission limit");
+      const chunk = buffer.subarray(0, bytesRead); digest.update(chunk); if (collect) chunks.push(Buffer.from(chunk));
     }
+    // Timestamps are coarse: a same-size rewrite inside one tick leaves the stat unchanged, so the byte count is checked too.
     need(BigInt(bytes) === before.size && sameStat(before, await file.stat({ bigint: true })) && sameStat(before, await lstat(path, { bigint: true })), "archive_changed", "member changed during read");
     const hash = digest.digest("hex");
     if (expected) need(hash === expected.sha256, "member_mismatch", "member SHA-256 mismatch");
@@ -352,15 +365,14 @@ async function readMember(path: string, max: number, collect: boolean, expected?
   } finally { await file.close(); }
 }
 async function inventory(root: string, manifest: ArchiveManifest, stamps: Map<string, BigIntStats>): Promise<void> {
-  const files = new Set(["manifest.json", "backup.complete", ...manifest.members.map(m => m.path)]), dirs = new Set([""]);
+  const files = new Set(["manifest.json", "backup.complete", ...manifest.members.map(m => m.path)]), dirs = new Set<string>();
   for (const file of files) {
     let parent = dirname(file);
     while (parent !== ".") { dirs.add(parent); parent = dirname(parent); }
   }
   // Only the manifest-derived root/database/objects/2-hex directories can be
   // visited. Unknown entries reject immediately; opendir never collects an
-  // unbounded directory. The fixed grammar permits at most 259 directories.
-  need(dirs.size <= 259, "archive_limit", "directory limit");
+  // unbounded directory.
   const pending = [""], found = new Set<string>();
   for (let i = 0; i < pending.length; i++) {
     const relative = pending[i]!, path = join(root, relative), before = await directory(path);
@@ -370,14 +382,14 @@ async function inventory(root: string, manifest: ArchiveManifest, stamps: Map<st
       const name = relative ? `${relative}/${entry.name}` : entry.name;
       need(!found.has(name) && (files.has(name) || dirs.has(name)), "archive_layout", "extra archive entry"); found.add(name);
       const stat = await lstat(join(root, name), { bigint: true });
-      if (dirs.has(name)) { need(stat.isDirectory() && !stat.isSymbolicLink(), "archive_layout", "linked/non-directory parent"); pending.push(name); }
+      if (dirs.has(name)) { need(stat.isDirectory(), "archive_layout", "linked/non-directory parent"); pending.push(name); }
       else need(stat.isFile() && stat.nlink === 1n, "archive_layout", "non-regular, linked or directory member");
     }
     need(sameStat(before, await lstat(path, { bigint: true })), "archive_changed", "directory changed during listing");
     if (stamps.has(path)) need(sameStat(stamps.get(path)!, before), "archive_changed", "directory replaced");
     stamps.set(path, before);
   }
-  need(found.size === files.size + dirs.size - 1, "archive_layout", "missing archive member");
+  need(found.size === files.size + dirs.size, "archive_layout", "missing archive member");
 }
 function checkSidecar(bytes: Buffer, object: ArchiveObject): void {
   const code = "invalid_sidecar", sidecar = record(decode(bytes, ARCHIVE_LIMITS.sidecar_bytes, code, false), ["hash", "size", "mediaType"], code);
@@ -394,9 +406,9 @@ export async function preflightArchive(inputRoot: string, accepted: ArchiveCompa
     need(sameStat(rootStat, await directory(root)), "archive_changed", "root replaced");
     const stamps = new Map<string, BigIntStats>([[root, rootStat]]);
     // Marker first: a partial archive is never eligible for member hashing.
-    const completion = await readMember(join(root, "backup.complete"), ARCHIVE_LIMITS.completion_bytes, true);
+    const completion = await readMember(join(root, "backup.complete"), ARCHIVE_LIMITS.completion_bytes);
     const marker = parseArchiveCompletion(completion.content);
-    const raw = await readMember(join(root, "manifest.json"), ARCHIVE_LIMITS.manifest_bytes, true);
+    const raw = await readMember(join(root, "manifest.json"), ARCHIVE_LIMITS.manifest_bytes);
     const manifest = parseArchiveManifest(raw.content);
     need(marker.manifest_sha256 === raw.hash && marker.manifest_bytes === raw.bytes && marker.operation_id === manifest.operation_id, "completion_mismatch", "marker does not bind manifest bytes and operation");
     checkCompatibility(manifest, accepted);
@@ -405,8 +417,7 @@ export async function preflightArchive(inputRoot: string, accepted: ArchiveCompa
     const objects = new Map(manifest.objects.map(o => [o.hash, o]));
     let verifiedBytes = 0;
     for (const member of manifest.members) {
-      const collect = member.role === "object_sidecar" || member.role === "dump_metadata";
-      const result = await readMember(join(root, member.path), memberLimit[member.role], collect, member);
+      const result = await readMember(join(root, member.path), memberLimit[member.role], member);
       stamps.set(join(root, member.path), result.stat); verifiedBytes += result.bytes;
       if (member.role === "object_sidecar") checkSidecar(result.content, objects.get(member.path.slice(-69, -5))!);
       if (member.role === "dump_metadata") checkDumpMetadata(result.content, manifest);
@@ -415,7 +426,7 @@ export async function preflightArchive(inputRoot: string, accepted: ArchiveCompa
     need(sameStat(rootStat, await lstat(original, { bigint: true })), "archive_changed", "input root changed");
     return { status: "admitted", manifest, manifest_sha256: raw.hash, verified_members: manifest.members.length, verified_bytes: verifiedBytes };
   } catch (cause) {
-    if (cause instanceof Error && "code" in cause && ["ENOENT", "ENOTDIR", "ELOOP"].includes(String(cause.code))) {
+    if (isRecord(cause) && ["ENOENT", "ENOTDIR", "ELOOP"].includes(String(cause.code))) {
       throw new ArchiveAdmissionError("archive_layout", "missing or linked archive path", { cause });
     }
     throw cause;

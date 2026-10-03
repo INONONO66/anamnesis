@@ -261,7 +261,8 @@ test("metadata strings and UTF8/surrogate escapes spanning chunks hash exactly w
   expect(resource.maxAllocation).toBeLessThanOrEqual(64 * 1024);
   expect(resource.maxParse).toBeLessThanOrEqual(64 * 1024);
   expect(await doneValue(root)).toEqual({ version: 2, frontier: 2, completed: [4, 6] });
-});
+  // Streams ~230 KiB of multi-byte text through 64 KiB windows with every read and allocation spied: 0.5 s alone, several seconds on a loaded host.
+}, { timeout: 30_000 });
 
 for (const operation of ["status", "append", "complete", "page"] as const) {
   test(`${operation} validates corrupt metadata past the first chunk before truncation`, async () => {
