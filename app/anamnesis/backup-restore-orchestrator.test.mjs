@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { backupOwned } from "./backup-restore-orchestrator.ts";
 import { fixture } from "./archive-manifest.fixture.mjs";
+import { fixtureAuthority } from "./authority-adapter.fixture.ts";
 
 test("backup publishes an object store at the archive object paths", async t => {
   const f = await fixture(t);
@@ -14,14 +15,14 @@ test("backup publishes an object store at the archive object paths", async t => 
   const root = join(parent, "source"), destination = join(parent, "archive");
   await mkdir(root, { mode: 0o700 });
   const authority = {
-    members: ["episode-1"], retained_generations: [1],
+    ...fixtureAuthority(),
     coverage: { ingest_seq: 1, structure_revision: 1, policy_revision: 1 },
-    physical_links: [], invalidation_evidence: [], source_hashes: ["a".repeat(64)],
   };
   const manifest = { ...f.manifest, authority };
   const adapter = {
     revokeWriters: async () => ({ epoch: "1", cutoff: manifest.cutoff }),
     authoritySnapshot: async () => authority,
+    restoredAuthoritySnapshot: async () => authority,
     dumpOffline: async (path) => {
       await writeFile(path, Buffer.from("neo4j dump"), { mode: 0o600 });
       return { metadata: new Uint8Array(), neo4jVersion: "5.26.12", imageDigest: "sha256:" + "a".repeat(64) };

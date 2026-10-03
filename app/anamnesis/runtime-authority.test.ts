@@ -10,11 +10,12 @@ import { v7 as uuidv7 } from "uuid";
 import { Engine, type AuthoritySnapshot, type InstallationContext } from "@anamnesis/core";
 import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { NEO4J_IMAGE, NEO4J_VERSION, OwnedNeo4jAdapter } from "./owned-neo4j-adapter.ts";
+import { fixtureAuthority } from "./authority-adapter.fixture.ts";
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const cutoff = { ingest_seq: 7, structure_revision: 3, policy_revision: 2 };
 const authority: AuthoritySnapshot = {
-  members: [], retained_generations: [], coverage: cutoff, physical_links: [], invalidation_evidence: [], source_hashes: [],
+  ...fixtureAuthority(), retained_generations: [], coverage: cutoff,
 };
 
 async function writeObject(root: string, bytes: Uint8Array, mediaType: string): Promise<string> {
@@ -131,12 +132,13 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
     await withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: OWNED.container, ANAMNESIS_QA_OWNER: OWNED.owner, ANAMNESIS_NEO4J_URI: OWNED.uri }, async () => {
       const adapter = await createRuntimeAuthority(engine, installation, installationContext);
       await expect(adapter.authoritySnapshot("1")).rejects.toThrow("writer_fence_required");
+      await expect(adapter.restoredAuthoritySnapshot()).rejects.toThrow("restore_not_started");
       const fenced = await adapter.revokeWriters();
       expect(fenced.epoch).toMatch(/^\d+$/);
       expect(fenced.cutoff).toMatchObject({ ingest_seq: 1, policy_revision: 0 });
       expect(await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container])).toBe("false");
       const authority = await adapter.authoritySnapshot(fenced.epoch);
-      expect(authority.members).toEqual([episode.id]);
+      expect(authority.members).toEqual({ count: 1, sha256: sha256(JSON.stringify([episode.id])) });
       expect(authority.coverage).toEqual(fenced.cutoff);
       const dumpPath = join(archive, "database", "neo4j.dump");
       const dump = await adapter.dumpOffline(dumpPath, fenced.epoch);
@@ -159,8 +161,14 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
       const restarted = process.env["ANAMNESIS_NEO4J_URI"] ?? "";
       expect(restarted).toMatch(/^bolt:\/\/127\.0\.0\.1:\d+$/);
       expect(await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container])).toBe("true");
+      expect(await adapter.restoredAuthoritySnapshot()).toEqual(authority);
       const driver = neo4j.driver(restarted, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
-      try { expect((await driver.executeQuery("MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).records[0]!.get("n")).toBe(1); }
+      try {
+        expect((await driver.executeQuery("MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).records[0]!.get("n")).toBe(1);
+        const changed = uuidv7();
+        await driver.executeQuery("MATCH (e:Episode {id:$id}) SET e.id=$changed", { id: episode.id, changed });
+        expect((await adapter.restoredAuthoritySnapshot()).members).toEqual({ count: 1, sha256: sha256(JSON.stringify([changed])) });
+      }
       finally { await driver.close(); }
     });
   } finally {

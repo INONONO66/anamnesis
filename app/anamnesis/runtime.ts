@@ -610,6 +610,7 @@ export class Runtime {
     const cached: TrustedAuthorityAdapter = {
       revokeWriters: async () => fenced,
       authoritySnapshot: async () => authority,
+      restoredAuthoritySnapshot: this.authorityAdapter.restoredAuthoritySnapshot.bind(this.authorityAdapter),
       dumpOffline: this.authorityAdapter.dumpOffline.bind(this.authorityAdapter),
       materializeMembers: this.authorityAdapter.materializeMembers.bind(this.authorityAdapter),
       startAndReady: this.authorityAdapter.startAndReady.bind(this.authorityAdapter),

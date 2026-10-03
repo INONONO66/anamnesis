@@ -80,6 +80,8 @@ export const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT extraction_coverage_key IF NOT EXISTS FOR (c:ExtractionCoverage) REQUIRE c.key IS UNIQUE`,
   `CREATE INDEX invalidates_seek IF NOT EXISTS
    FOR ()-[l:INVALIDATES]-() ON (l.target_id, l.effective_time_utc, l.id)`,
+  `CREATE INDEX authority_invalidates_id IF NOT EXISTS
+   FOR ()-[l:INVALIDATES]-() ON (l.id)`,
 
   `CREATE FULLTEXT INDEX element_content IF NOT EXISTS
    FOR (e:Element) ON EACH [e.content]

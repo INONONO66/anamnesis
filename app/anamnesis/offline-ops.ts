@@ -7,7 +7,7 @@ import { Engine } from "@anamnesis/core";
 import { acquireInstallation } from "./config.ts";
 import { backupOwned, restoreOwned, type TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { preflightArchive, type ArchiveCompatibility, type ArchiveManifest } from "./archive-manifest.ts";
-import { createRuntimeAuthority, manifestTemplate, objectInventory } from "./runtime-authority.ts";
+import { createRuntimeAuthority, manifestTemplate, objectInventory, readRestoredAuthority } from "./runtime-authority.ts";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { InstallationContext } from "@anamnesis/core";
 
@@ -60,6 +60,7 @@ export async function offlineBackup(root: string, destination: string): Promise<
     const manifest = makeManifest(operationId, fenced.cutoff, authority, objects);
     const cached: TrustedAuthorityAdapter = {
       revokeWriters: async () => fenced, authoritySnapshot: async () => authority,
+      restoredAuthoritySnapshot: adapter.restoredAuthoritySnapshot.bind(adapter),
       dumpOffline: adapter.dumpOffline.bind(adapter), materializeMembers: adapter.materializeMembers.bind(adapter), startAndReady: adapter.startAndReady.bind(adapter), stop: adapter.stop.bind(adapter), restoreOffline: adapter.restoreOffline.bind(adapter), rebindSource: adapter.rebindSource.bind(adapter), verifyPhysicalLinks: adapter.verifyPhysicalLinks.bind(adapter), quarantine: adapter.quarantine.bind(adapter),
     };
     await backupOwned({ root, destination, operationId, compatibility, manifest, objectRoot: join(root, "objects") }, cached);
@@ -80,6 +81,7 @@ export async function offlineRestore(root: string, archive: string): Promise<{ o
   const authority = {
     revokeWriters: async () => ({ epoch: String(admitted.manifest.cutoff.ingest_seq), cutoff: admitted.manifest.cutoff }),
     authoritySnapshot: async () => admitted.manifest.authority!,
+    restoredAuthoritySnapshot: async () => readRestoredAuthority({ uri, user: "neo4j", password, database: "neo4j" }, context()),
     materializeMembers: async () => {},
     startAndReady: async (live: string, epoch: string) => {
       container = await execDocker(["run", "-d", "--label", `${OWNER_LABEL}=${owner}`, "-p", "127.0.0.1::7687", "-v", `${live}/database:/data`, "-e", `NEO4J_AUTH=neo4j/${password}`, NEO4J_IMAGE]);

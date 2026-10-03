@@ -12,7 +12,9 @@ export const FIXTURE_CONFIG = Buffer.from('{"fixture":true}\n');
 const FIXTURE_AUTH = Buffer.from("neo4j/fixture-not-a-live-secret\n");
 
 export function fixtureAuthority(): AuthoritySnapshot {
-  return { members: ["episode-1"], retained_generations: [1], coverage: { ...fixtureCutoff }, physical_links: [], invalidation_evidence: [], source_hashes: ["a".repeat(64)] };
+  return { members: { count: 1, sha256: sha256('["episode-1"]') }, retained_generations: [1], coverage: { ...fixtureCutoff },
+    physical_links: { count: 0, sha256: sha256("[]") }, invalidation_evidence: { count: 0, sha256: sha256("[]") },
+    source_hashes: { count: 1, sha256: sha256(JSON.stringify(["a".repeat(64)])) } };
 }
 
 type Recorder = (name: string) => void;
@@ -26,6 +28,7 @@ export function fakeAuthorityAdapter(sourceId: string, { overrides = noOverrides
   const adapter: TrustedAuthorityAdapter = {
     revokeWriters: async () => { record("revokeWriters"); return { epoch: "1", cutoff: { ...fixtureCutoff } }; },
     authoritySnapshot: async () => { record("authoritySnapshot"); return fixtureAuthority(); },
+    restoredAuthoritySnapshot: async () => { record("restoredAuthoritySnapshot"); return fixtureAuthority(); },
     dumpOffline: async destination => {
       record("dumpOffline");
       await writeFile(destination, Buffer.from("neo4j dump"), { flag: "wx", mode: 0o600 });

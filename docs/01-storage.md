@@ -1551,6 +1551,17 @@ different empty root and the parent activation lock.
 
 ### Backup
 
+The manifest's authority evidence stores per-collection `{count, sha256}`
+digests instead of inventories: Element IDs ordered by `e.id`, physical
+`{id, from, to, role}` links ordered by `l.id`, invalidation
+`{id, source_hash, outcome_hash}` evidence ordered by `l.id`, and Episode
+`e.digest` values ordered by Episode `e.id`. Each SHA-256 covers the canonical
+JSON array, including its brackets and commas; invalidation outcome hashes retain
+the existing `extractionBodyDigest` derivation. Keyset pages of 5,000 rows are
+streamed inside the same write transaction holding the receipt lock and writer
+fence. There is no authority collection size cap; the manifest keeps only counts,
+digests, the small sorted unique retained-generation list and cutoff coverage.
+
 Backup and restore share the atomic sibling
 `~/.anamnesis-operation.lock/`. Backup refuses when
 `~/.anamnesis-restore.state` exists; restore refuses while the live-root
@@ -1614,6 +1625,14 @@ resume while the journal is CUTOFF, STOPPING or DB_STOPPED. No incomplete
 destination contains `backup.complete`, whose body pins the manifest hash.
 
 ### Restore
+
+After the restored database is loaded and started, the trusted adapter recomputes
+the authority digests under the writer fence without running migrations or
+initialization that could rewrite the restored graph. Restore compares the
+snapshot, including retained generations and coverage, with the manifest before
+source rebind or rollback removal. A difference refuses with
+`authority_digest_mismatch`; opaque dump checksums alone do not establish
+restored authority.
 
 ```text
   anamnesis restore <backup>

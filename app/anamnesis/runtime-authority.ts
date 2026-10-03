@@ -7,13 +7,22 @@ import neo4j from "neo4j-driver";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import type { ArchiveManifest, AuthoritySnapshot } from "./archive-manifest.ts";
-import type { InstallationContext } from "@anamnesis/core";
+import { Store, type StoreOptions, type InstallationContext } from "@anamnesis/core";
 import type { Engine } from "@anamnesis/core";
 import type { Installation } from "./config.ts";
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const dockerExec = promisify(execFile);
 const dockerOutput = async (args: string[]) => (await dockerExec("docker", args)).stdout.trim();
+
+/** Read restored authority without init/migrations rewriting the restored graph. */
+export async function readRestoredAuthority(options: StoreOptions, context: InstallationContext): Promise<AuthoritySnapshot> {
+  const store = new Store(options);
+  try {
+    await store.claimWriterEpoch();
+    return await store.authoritySnapshot(context);
+  } finally { await store.close(); }
+}
 
 /** The lifecycle-owned adapter used by the runtime. It is intentionally built
  * per authenticated operation so the Store authority context cannot be lost. */
@@ -23,11 +32,11 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
   if (!container || !owner) throw Object.assign(new Error("backup_adapter_unavailable"), { code: "backup_adapter_unavailable" });
   let cutoff: ArchiveManifest["cutoff"] | undefined;
   let authorityEvidence: AuthoritySnapshot | undefined;
+  let restoredUri: string | undefined;
   const authority = {
     revokeWriters: async () => {
       const epoch = String(await engine.claimWriterEpoch());
-      // Bridge for #229: schema maximum. The inventory design itself does not scale; see the issue.
-      const snapshot = await engine.store.authoritySnapshot({ maxItems: 20000 }, context);
+      const snapshot = await engine.store.authoritySnapshot(context);
       cutoff = snapshot.coverage;
       authorityEvidence = snapshot;
       const running = await dockerOutput(["inspect", "--format", "{{.State.Running}}", container]);
@@ -37,6 +46,11 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
     authoritySnapshot: async (_epoch: string) => {
       if (!cutoff || !authorityEvidence) throw new Error("writer_fence_required");
       return authorityEvidence;
+    },
+    restoredAuthoritySnapshot: async () => {
+      if (!restoredUri) throw new Error("restore_not_started");
+      return readRestoredAuthority({ uri: restoredUri, user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j",
+        password: process.env["ANAMNESIS_NEO4J_PASSWORD"] ?? "", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }, context);
     },
     materializeMembers: async (root: string, manifest: ArchiveManifest) => {
       const config = Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
@@ -58,7 +72,7 @@ export async function createRuntimeAuthority(engine: Engine, installation: Insta
       try {
         const deadline = Date.now() + 90000;
         while (true) {
-          try { await driver.verifyConnectivity(); return { sourceId: installation.incarnation, epoch, ready: true }; }
+          try { await driver.verifyConnectivity(); restoredUri = uri; return { sourceId: installation.incarnation, epoch, ready: true }; }
           catch (error) { if (Date.now() >= deadline) throw error; }
         }
       } finally { await driver.close(); }
