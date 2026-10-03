@@ -1641,7 +1641,7 @@ adapter's quarantine removes the container that served the rejected tree.
 Quarantine runs even when that undo fails (`rollback_failed`); a removal that
 fails for any reason other than the container already being gone is reported as
 `quarantine_failed` beside the refusal, so a refused restore whose error names
-either code is followed by a check for leftover owner-labelled containers.
+either code is followed by `docker ps -a` for leftover owner-labelled containers.
 
 ```text
   anamnesis restore <backup>

@@ -205,7 +205,7 @@ it and compares it with the manifest before rebinding the source or removing
 rollback data; differences refuse with `authority_digest_mismatch`, return the
 rollback copy to the live name and remove the restored container. A removal
 that fails is reported as `quarantine_failed` beside the refusal (a failed undo
-as `rollback_failed`); after either, check `docker ps` for a leftover
+as `rollback_failed`); after either, check `docker ps -a` for a leftover
 `anamnesis.qa.owner`-labelled container. The fenced source container is never
 the verification target.
 
