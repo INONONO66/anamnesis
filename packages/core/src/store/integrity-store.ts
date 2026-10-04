@@ -138,7 +138,8 @@ export class IntegrityStore {
       .map(([id]) => id);
     // `$profile IS NULL OR v.profile_id=$profile` inside the EXISTS defeats the
     // (episode_id, profile_id) index: the planner falls back to a label scan of
-    // every EmbeddingVector per Episode (production: 133k x 126k, hours). The
+    // every EmbeddingVector per Episode (production: 133k x 126k, killed after
+    // 6 minutes; the ops client gives up at 30 s). The
     // profile branch seeks the composite index; without a provider the embedded
     // ids are collected once and anti-joined in memory.
     const pending = profile === null
