@@ -22,14 +22,14 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
 
 ## Migration: embedding ledgers out of Neo4j (#240)
 
-Run this one-shot migration as the `anamnesis` user from `/opt/anamnesis`. Stop the daemon first so no embedding attempt is in flight while its legacy ledgers are copied:
+Run this one-shot migration as the `anamnesis` user from `/opt/anamnesis`. The production host has only `node`; `bun run build:runtime` bundles the script to `dist/anamnesis-migrate-240.mjs` (in a dev checkout, `bun scripts/migrate-embedding-ledgers.ts` takes the same flags). Stop the daemon first so no embedding attempt is in flight while its legacy ledgers are copied:
 
 ```sh
 systemctl stop anamnesis
 cd /opt/anamnesis
 set -a; . /etc/anamnesis/anamnesis.env; set +a
-bun scripts/migrate-embedding-ledgers.ts --dry-run
-bun scripts/migrate-embedding-ledgers.ts
+node dist/anamnesis-migrate-240.mjs --dry-run
+node dist/anamnesis-migrate-240.mjs
 ```
 
 The script first reports its JSON step lines, then writes the new ledger atomically to `${ANAMNESIS_RUNTIME_ROOT:-~/.anamnesis}/embedding-state.json` (normally `/var/lib/anamnesis/runtime/embedding-state.json`), removes the legacy schema objects, and deletes `EmbeddingAttempt` and `Outbox` nodes. Do not proceed past the dry run unless its counts are expected.
