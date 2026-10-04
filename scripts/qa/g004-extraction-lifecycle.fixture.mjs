@@ -214,9 +214,9 @@ test('caught-up empty coverage activates without creating derived records', asyn
   try {
     const g = {...generation(),state:'catching_up'}; await f.store.createExtractionGeneration(g,context);
     for (const partition of ['episodes','active_extraction']) await f.store.recordExtractionCoverage({generation_id:g.id,partition,expected_covered_ingest_seq:0,covered_ingest_seq:0},context);
-    const indexes = await f.query('SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state', { names: ['conducting_arc_source_link','conducting_arc_coverage','extraction_coverage_key','extraction_generation_id','meta_key','fact_generation_id','entity_generation_key'] });
-    assert.equal(indexes.length, 7); assert.ok(indexes.every(index => index.state === 'ONLINE'));
-    assert.deepEqual(await f.query('MATCH (f:Element:Fact) OPTIONAL MATCH (w:EntityWitness) OPTIONAL MATCH ()-[i:INVALIDATES]->() RETURN count(DISTINCT f) AS facts,count(DISTINCT w) AS witnesses,count(DISTINCT i) AS invalidations'), [{ facts: 0, witnesses: 0, invalidations: 0 }]);
+    const indexes = await f.query('SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state', { names: ['conducting_arc_source_link','conducting_arc_coverage','extraction_coverage_key','extraction_generation_id','meta_key','fact_generation_id','entity_generation_key','entity_witness'] });
+    assert.equal(indexes.length, 8); assert.ok(indexes.every(index => index.state === 'ONLINE'));
+    assert.deepEqual(await f.query('MATCH (f:Element:Fact) OPTIONAL MATCH (e:Entity) OPTIONAL MATCH ()-[i:INVALIDATES]->() RETURN count(DISTINCT f) AS facts,count(DISTINCT e) AS entities,count(DISTINCT i) AS invalidations'), [{ facts: 0, entities: 0, invalidations: 0 }]);
     assert.deepEqual(await f.store.materializationState.list(), []);
     const active = await f.engine.cutoverExtractionGeneration({generation_id:g.id,expected_generation_id:null,expected_selector_version:0},context);
     assert.equal(active.state,'active');

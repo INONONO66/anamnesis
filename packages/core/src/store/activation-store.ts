@@ -40,9 +40,9 @@ type CoveredSource = Neo4jRecord<{ id: string; seq: number }>;
  * nonexistent generation-scoped derived indexes or an ordered query plan. */
 async function checkAccessIndexesTx(tx: ManagedTransaction): Promise<void> {
   const indexes = await tx.run(`SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state`, {
-    names: ["conducting_arc_source_link", "conducting_arc_coverage", "extraction_coverage_key", "extraction_generation_id", "meta_key", "fact_generation_id", "entity_generation_key"],
+    names: ["conducting_arc_source_link", "conducting_arc_coverage", "extraction_coverage_key", "extraction_generation_id", "meta_key", "fact_generation_id", "entity_generation_key", "entity_witness"],
   });
-  if (indexes.records.length !== 7 || indexes.records.some(index => index.get("state") !== "ONLINE")) throw new GraphAccessError("ordered_probe_unavailable");
+  if (indexes.records.length !== 8 || indexes.records.some(index => index.get("state") !== "ONLINE")) throw new GraphAccessError("ordered_probe_unavailable");
 }
 
 /** Every DERIVED_FROM link of the generation names its Fact, source and link id, within the bounded view. */
@@ -55,8 +55,10 @@ async function derivedLinksBadTx(tx: ManagedTransaction, generation: string, max
 /** Several Facts may mention one Entity; the witness requirement is per distinct entity at the current policy revision. */
 async function entityWitnessesBadTx(tx: ManagedTransaction, generation: string, policyRevision: number, maxDerived: number): Promise<boolean> {
   const entities = await tx.run(`MATCH (f:Element:Fact {generation:$generation}) UNWIND coalesce(f.entity_ids,[]) AS entity
-    WITH DISTINCT entity OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
-    RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation, policy: neo4j.int(policyRevision), limit: neo4j.int(maxDerived + 1) });
+    WITH DISTINCT entity LIMIT $limit
+    OPTIONAL MATCH (w:Entity {witness_generation:$generation,witness_policy_revision:$policy})
+    USING INDEX w:Entity(witness_generation,witness_policy_revision) WHERE w.id=entity
+    RETURN entity,count(w) AS witnesses`, { generation, policy: neo4j.int(policyRevision), limit: neo4j.int(maxDerived + 1) });
   return entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
 }
 

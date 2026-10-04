@@ -74,12 +74,10 @@ async function setup() {
     expect(rows).toHaveLength(1);
     return rows[0]!.p as Record<string, unknown>;
   };
-  const operations = async (sourceId: string): Promise<{ fact: string; result: Record<string, unknown> }[]> =>
+  const operations = async (sourceId: string): Promise<{ occurrence: string; result: Record<string, unknown> }[]> =>
     (await engine.store.materializationState.list()).filter(([, entry]) => entry.source_episode_id === sourceId)
-      .map(([, entry]) => ({ fact: "fact_id" in entry.result ? entry.result.fact_id
-        : "facts" in entry.result ? `${entry.result.created ? "custody" : "suppressed"}:${sourceId}` : entry.occurrence_key,
-      result: entry.result })).sort((a, b) => a.fact.localeCompare(b.fact));
-  const relations = async () => (await engine.store.extractionJournal.list()).flatMap(([, entry]) => entry.relations?.verdicts ?? []);
+      .map(([, entry]) => ({ occurrence: entry.occurrence_key, result: entry.result }));
+  const relations = async (taskId: string) => (await engine.store.extractionJournal.get(taskId))?.relations?.verdicts ?? [];
   return { engine, query, generation, ingest, factByContent, operations, relations, relationInputs, faults, driver, options,
     async close() { await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -94,7 +92,7 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(firstResult.state === "known" && firstResult.semantic_writes).toBe(true);
     expect(f.relationInputs).toHaveLength(0);
     const dark = await f.factByContent("Alice prefers dark mode");
-    expect((await f.relations()).map(verdict => verdict.context.candidates.length)).toEqual([0]);
+    expect((await f.relations(first.task.id)).map(verdict => verdict.context.candidates.length)).toEqual([0]);
 
     // E2: provider fails twice (transport, then a verdict bound to the wrong premise); the pipeline stays pending without writes.
     f.faults.push("throw", "digest");
@@ -105,7 +103,7 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
       expect(pending.state === "known" && pending.relation_judge).toBe("pending");
       expect(pending.state === "known" && pending.semantic_writes).toBe(false);
       expect(await f.query("MATCH (f:Fact) RETURN count(f) AS count")).toEqual([{ count: 1 }]);
-      expect((await f.relations()).filter(verdict => verdict.judgements !== null)).toHaveLength(0);
+      expect((await f.relations(second.task.id)).filter(verdict => verdict.judgements !== null)).toHaveLength(0);
     }
     expect(f.relationInputs).toHaveLength(2);
     expect((await f.engine.store.extractionJournal.get(second.task.id))?.relations?.verdicts)
@@ -118,6 +116,10 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(f.relationInputs[2]!.fact).toEqual({ text: "Alice prefers light mode", time: { value: "2026-09-02T00:00:00.000Z", precision: "day" as const } });
     expect(f.relationInputs[2]!.candidates).toEqual([{ id: dark.id as string, text: "Alice prefers dark mode", time: { value: "2026-09-01T00:00:00.000Z", precision: "day" } }]);
     const light = await f.factByContent("Alice prefers light mode");
+    expect((await f.relations(second.task.id)).map(verdict => ({
+      judgements: verdict.judgements, failures: verdict.failures, model: verdict.model, incarnation: verdict.model_incarnation,
+    }))).toEqual([{ judgements: [{ candidate_id: dark.id as string, relation: "invalidates", confidence: 0.9,
+      reason: "Alice prefers light mode vs Alice prefers dark mode" }], failures: 2, model, incarnation }]);
     // Backup must accept the judge's committed authority, not demand fields no writer persists.
     const snapshot = await f.engine.store.authoritySnapshot(context);
     const invalidations = await f.query("MATCH (a:Fact)-[l:INVALIDATES]->(b:Fact) RETURN a.id AS from, b.id AS to, l.target_id AS target, l.effective_time_utc AS effective, l.generation AS generation, l.id AS id");
@@ -129,16 +131,19 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
       .map(row => row.digest as string)));
     expect(snapshot.source_hashes.count).toBe(2);
     const secondOps = await f.operations(second.source.id);
-    // Operations sort by fact_id: the uuidv7 of the Fact precedes the `custody:` marker.
-    expect(secondOps.map(op => op.fact)).toEqual([light.id as string, `custody:${second.source.id}`]);
-    expect(secondOps[0]!.result).toEqual({ created: true, fact_id: light.id, link_id: expect.any(String),
+    expect(secondOps.map(op => op.occurrence)).toEqual(expect.arrayContaining([
+      extractionBodyDigest([f.generation.id, second.source.id]),
+      extractionBodyDigest([f.generation.id, second.source.id, completed.state === "known" && completed.judge_attempt?.id, 0]),
+    ]));
+    expect(secondOps).toHaveLength(2);
+    expect(secondOps.find(op => "fact_id" in op.result)!.result).toEqual({ created: true, fact_id: light.id as string, link_id: expect.any(String),
       relations: [{ candidate_id: dark.id, relation: "invalidates", confidence: 0.9, reason: "Alice prefers light mode vs Alice prefers dark mode", outcome: "linked", link_id: invalidations[0]!.id }] });
 
     // Retrying a finished pipeline changes nothing: no new verdicts, calls, links or operations.
     expect(await second.run()).toEqual(completed);
     expect(await f.engine.store.authoritySnapshot(context)).toEqual(snapshot);
     expect(f.relationInputs).toHaveLength(3);
-    expect((await f.relations()).filter(verdict => verdict.judgements !== null)).toHaveLength(1);
+    expect((await f.relations(second.task.id)).filter(verdict => verdict.judgements !== null)).toHaveLength(1);
     expect(await f.query("MATCH ()-[l:INVALIDATES]->() RETURN count(l) AS count")).toEqual([{ count: 1 }]);
     expect(await f.engine.store.materializationState.list()).toHaveLength(4);
 
@@ -149,7 +154,7 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(f.relationInputs.at(-1)!.candidates.map(candidate => candidate.id)).toEqual([light.id as string]);
     const again = await f.factByContent("Alice prefers dark mode again");
     expect(await f.query("MATCH ()-[l:INVALIDATES]->() RETURN count(l) AS count")).toEqual([{ count: 1 }]);
-    expect((await f.operations(third.source.id)).find(op => op.fact === again.id)!.result.relations).toEqual([
+    expect((await f.operations(third.source.id)).find(op => "fact_id" in op.result && op.result.fact_id === again.id)!.result.relations).toEqual([
       { candidate_id: light.id, relation: "invalidates", confidence: 0.95, reason: "Alice prefers dark mode again vs Alice prefers light mode", outcome: "chain_refused" }]);
 
     // E4: a duplicate writes no Fact but keeps per-claim and per-source custody.
@@ -159,18 +164,21 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(fourthResult.state === "known" && fourthResult.semantic_writes).toBe(false);
     expect(await f.query("MATCH (f:Fact) RETURN count(f) AS count")).toEqual([{ count: 3 }]);
     const fourthOps = await f.operations(fourth.source.id);
-    expect(fourthOps.map(op => op.fact.split(":")[0])).toEqual(["duplicate", "suppressed"]);
-    expect(fourthOps[0]!.result).toEqual({ created: false, duplicate_of: again.id, relations: expect.arrayContaining([
+    expect(fourthOps.map(op => op.occurrence)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^duplicate:/), extractionBodyDigest([f.generation.id, fourth.source.id]),
+    ]));
+    expect(fourthOps).toHaveLength(2);
+    expect(fourthOps.find(op => "duplicate_of" in op.result)!.result).toEqual({ created: false, duplicate_of: again.id, relations: expect.arrayContaining([
       expect.objectContaining({ candidate_id: again.id, relation: "duplicate", outcome: "duplicate" }),
       expect.objectContaining({ candidate_id: light.id, relation: "unrelated", outcome: "unrelated" })]) });
-    expect(fourthOps[1]!.result).toEqual({ created: false, facts: 0, refused: [], duplicates: [again.id] });
+    expect(fourthOps.find(op => "facts" in op.result)!.result).toEqual({ created: false, facts: 0, refused: [], duplicates: [again.id] });
 
     // E5: contrasts links both Facts symmetrically readable; low-confidence verdicts fall back to unrelated.
     const fifth = await f.ingest("Alice might prefer compact mode [2026-09-05].");
     await fifth.run();
     const compact = await f.factByContent("Alice might prefer compact mode");
     expect(await f.query("MATCH (a:Fact)-[l:CONTRASTS]->(b:Fact) RETURN a.id AS from, b.id AS to, l.generation AS generation")).toEqual([{ from: compact.id, to: again.id, generation: f.generation.id }]);
-    expect((await f.operations(fifth.source.id)).find(op => op.fact === compact.id)!.result.relations).toEqual(expect.arrayContaining([
+    expect((await f.operations(fifth.source.id)).find(op => "fact_id" in op.result && op.result.fact_id === compact.id)!.result.relations).toEqual(expect.arrayContaining([
       expect.objectContaining({ candidate_id: again.id, relation: "contrasts", outcome: "linked", link_id: expect.any(String) }),
       expect.objectContaining({ candidate_id: light.id, relation: "contrasts", confidence: 0.5, outcome: "low_confidence" })]));
     expect(await f.query("MATCH (:Fact)-[l:CONTRASTS|INVALIDATES]->(:Fact) RETURN count(l) AS count")).toEqual([{ count: 2 }]);
@@ -178,6 +186,8 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     // Every covered source carries custody, so the generation still activates.
     for (const partition of ["episodes", "active_extraction"] as const) await f.engine.store.recordExtractionCoverage({ generation_id: f.generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: 5 }, context);
     await f.engine.store.cutoverExtractionGeneration({ generation_id: f.generation.id, expected_generation_id: null, expected_selector_version: 0 }, context);
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+    expect(await f.engine.store.materializationState.list()).toEqual([]);
     expect(await f.query("MATCH (g:ExtractionGeneration) RETURN g.state AS state")).toEqual([{ state: "active" }]);
     expect((await f.engine.checkConductingArcs()).issues).toEqual([]);
   } finally { await f.close(); }

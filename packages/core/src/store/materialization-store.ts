@@ -329,7 +329,8 @@ export class MaterializationStore {
     }
     for (const [i, entity] of validated.identity.entity_ids.entries()) {
       await this.elements.mergeLinkTx(tx, MemoryLink.parse({ id: allocated.mention_ids[i], from: fact_id, to: entity, role: "MENTIONS", content: "semantic entity mention", weight: 1 }));
-      await tx.run(`MERGE (w:EntityWitness {entity_id:$entity,generation:$generation,policy_revision:$policy}) SET w.state='COMPLETE'`, { entity, generation, policy: neo4j.int(policy) });
+      await tx.run(`MATCH (e:Entity {id:$entity})
+        SET e.witness_generation=$generation,e.witness_policy_revision=$policy`, { entity, generation, policy: neo4j.int(policy) });
     }
     const result = MaterializationResult.parse({ created: true, fact_id, link_id, ...(relations ? { relations } : {}) });
     await this.recordMaterialization({ operationId, digest, occurrence, source, generation }, result, [fact_id]);

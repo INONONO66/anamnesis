@@ -107,6 +107,8 @@ test("judge-approved claims share validated Fact writes, real entities, time and
     expect(entities).toHaveLength(1);
     expect(entities[0]!.p.content).toBe("Alice");
     expect(JSON.parse(entities[0]!.p.properties).entity_kind).toBe("person");
+    expect(entities[0]!.p.witness_generation).toBe(f.generation.id);
+    expect(entities[0]!.p.witness_policy_revision).toBe(0);
     expect(facts.every(({ p }) => p.content !== entities[0]!.p.content)).toBe(true);
     expect(await f.query("MATCH (:Fact)-[l:MENTIONS]->(:Entity) RETURN count(l) AS count")).toEqual([{ count: 2 }]);
     expect(await f.query("MATCH (:Fact)-[l:CONTRASTS|INVALIDATES]->(:Fact) RETURN count(l) AS count")).toEqual([{ count: 0 }]);
@@ -177,4 +179,33 @@ test("completion replay survives restart and conflicting request versions stay r
     await expect(replacement.store.recordExtractionAttempt({ ...completion, expected_version: completion.expected_version + 1 }, context)).rejects.toThrow("attempt_conflict");
     await expect(f.engine.store.recordExtractionAttempt(completion, context)).rejects.toThrow("stale_writer_epoch");
   } finally { await replacement?.close(); await f.close(); }
+}, 120000);
+
+test("Entity witness generation and policy revision gate activation after coverage", async () => {
+  const f = await setup(true);
+  try {
+    await f.run();
+    for (const partition of ["episodes", "active_extraction"] as const)
+      await f.engine.store.recordExtractionCoverage({ generation_id: f.generation.id, partition,
+        expected_covered_ingest_seq: 0, covered_ingest_seq: 1 }, context);
+    const select = { generation_id: f.generation.id, expected_generation_id: null, expected_selector_version: 0 };
+    const witness = await f.query("MATCH (e:Entity) RETURN e.witness_generation AS generation,e.witness_policy_revision AS policy");
+    expect(witness).toEqual([{ generation: f.generation.id, policy: 0 }]);
+    const indexes = await f.query("SHOW INDEXES YIELD name,properties WHERE name='entity_witness' RETURN properties");
+    expect(indexes).toEqual([{ properties: ["witness_generation", "witness_policy_revision"] }]);
+
+    await f.query("MATCH (e:Entity) REMOVE e.witness_generation");
+    await expect(f.engine.store.cutoverExtractionGeneration(select, context)).rejects.toMatchObject({
+      prerequisites: expect.arrayContaining(["entity_witness_policy_coverage"]),
+    });
+    await f.query("MATCH (e:Entity) SET e.witness_generation=$generation,e.witness_policy_revision=1", { generation: f.generation.id });
+    await expect(f.engine.store.cutoverExtractionGeneration(select, context)).rejects.toMatchObject({
+      prerequisites: expect.arrayContaining(["entity_witness_policy_coverage"]),
+    });
+    await f.query("MATCH (e:Entity) SET e.witness_policy_revision=0");
+    expect((await f.engine.store.cutoverExtractionGeneration(select, context)).state).toBe("active");
+    const removed = ["MaterializationOperation", "FactRelationInput", "FactRelationVerdict", "EchoLineage", "OriginHead", "EntityWitness"];
+    expect(await f.query("CALL db.labels() YIELD label WHERE label IN $labels RETURN label", { labels: removed })).toEqual([]);
+    expect(await f.query("SHOW CONSTRAINTS YIELD labelsOrTypes WHERE any(label IN labelsOrTypes WHERE label IN $labels) RETURN labelsOrTypes", { labels: removed })).toEqual([]);
+  } finally { await f.close(); }
 }, 120000);

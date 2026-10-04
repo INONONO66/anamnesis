@@ -4,7 +4,6 @@ const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
 export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
 
 export const SCHEMA_STATEMENTS = [
-  `CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (l:EchoLineage) REQUIRE l.episode_id IS UNIQUE`,
   `CREATE CONSTRAINT embedding_vector_key IF NOT EXISTS FOR (v:EmbeddingVector) REQUIRE v.key IS UNIQUE`,
   `CREATE INDEX embedding_vector_episode_profile IF NOT EXISTS FOR (v:EmbeddingVector) ON (v.episode_id, v.profile_id)`,
   `CREATE CONSTRAINT embedding_profile_id IF NOT EXISTS FOR (p:EmbeddingProfile) REQUIRE p.id IS UNIQUE`,
@@ -40,8 +39,6 @@ export const SCHEMA_STATEMENTS = [
    FOR (e:Episode) REQUIRE e.revision_key IS UNIQUE`,
   `CREATE CONSTRAINT episode_ingest_seq IF NOT EXISTS
    FOR (e:Episode) REQUIRE e.ingest_seq IS UNIQUE`,
-  `CREATE CONSTRAINT origin_head_key IF NOT EXISTS
-   FOR (h:OriginHead) REQUIRE h.origin_key IS UNIQUE`,
   `CREATE CONSTRAINT payload_hash IF NOT EXISTS
    FOR (p:Payload) REQUIRE p.hash IS UNIQUE`,
   // Without it, remembers racing on a cold database each MERGE their own Meta
@@ -66,11 +63,10 @@ export const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT adjudication_review_id IF NOT EXISTS FOR (a:AdjudicationReview) REQUIRE a.review_id IS UNIQUE`,
   `CREATE CONSTRAINT adjudication_review_proposal IF NOT EXISTS FOR (a:AdjudicationReview) REQUIRE a.proposal_id IS UNIQUE`,
   `CREATE CONSTRAINT adjudication_consumption_id IF NOT EXISTS FOR (a:AdjudicationConsumption) REQUIRE a.proposal_id IS UNIQUE`,
-  `CREATE CONSTRAINT materialization_operation_id IF NOT EXISTS FOR (a:MaterializationOperation) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT materialization_occurrence IF NOT EXISTS FOR (a:MaterializationOperation) REQUIRE a.occurrence_key IS UNIQUE`,
   `CREATE INDEX fact_generation_id IF NOT EXISTS FOR (f:Fact) ON (f.generation,f.id)`,
   `CREATE CONSTRAINT fact_identity IF NOT EXISTS FOR (f:Fact) REQUIRE (f.generation,f.meaning_digest,f.primary_episode_id) IS UNIQUE`,
   `CREATE INDEX entity_generation_key IF NOT EXISTS FOR (e:Entity) ON (e.generation,e.entity_key)`,
+  `CREATE INDEX entity_witness IF NOT EXISTS FOR (e:Entity) ON (e.witness_generation,e.witness_policy_revision)`,
   `CREATE CONSTRAINT extraction_coverage_key IF NOT EXISTS FOR (c:ExtractionCoverage) REQUIRE c.key IS UNIQUE`,
   `CREATE INDEX invalidates_seek IF NOT EXISTS
    FOR ()-[l:INVALIDATES]-() ON (l.target_id, l.effective_time_utc, l.id)`,

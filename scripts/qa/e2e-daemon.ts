@@ -19,7 +19,7 @@ import { RpcRememberParams, type RpcStatusResult } from "../../packages/protocol
 import { maskSecrets } from "../../packages/backfill/src/secrets.ts";
 import { loadProviderConfig } from "../../app/anamnesis/config.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
-import { z } from "../../packages/protocol/node_modules/zod/index.js";
+import { ModelTask } from "../../packages/protocol/src/extraction.ts";
 
 const execute = promisify(execFile);
 const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
@@ -78,8 +78,10 @@ function lineStream(child: ChildProcess) {
     const event = typeof line["event"] === "string" ? line["event"] : "unknown";
     counts[event] = (counts[event] ?? 0) + 1;
     if (event === "extraction.pipeline.materialized") {
-      const value = z.object({ pipeline_id: z.uuidv7(), duplicates: z.number().int().nonnegative(), refused: z.number().int().nonnegative() }).parse(line);
-      materializations.set(value.pipeline_id, { duplicates: value.duplicates, refused: value.refused });
+      materializations.set(ModelTask.shape.id.parse(line["pipeline_id"]), {
+        duplicates: ModelTask.shape.attempts.parse(line["duplicates"]),
+        refused: ModelTask.shape.attempts.parse(line["refused"]),
+      });
     }
     const arrival = { line, at: Date.now() };
     for (const cursor of cursors) {
