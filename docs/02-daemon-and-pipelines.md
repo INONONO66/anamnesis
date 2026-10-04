@@ -604,8 +604,10 @@ pipeline whose judge attempt succeeded materializes exactly as described
 below; materialization is idempotent through custody occurrence keys and
 Fact digest uniqueness. Coverage seals a source only once its pipeline is
 terminal (custody written, or a content-free omission for a failed or
-cancelled stage); the sealed entry is then pruned from the journal and
-`extraction.audit.status` answers `unknown` for it. Every transition emits
+cancelled stage); the sealed entry is then pruned from the journal,
+`extraction.audit.status` answers `unknown` for it and a retry of one of
+its tasks fails with `unknown_ModelTask` ahead of the `coverage_frozen`
+fence. Every transition emits
 one structured audit line (`extraction.task.leased` before the provider
 call, `extraction.attempt.recorded`, `extraction.task.settled`,
 `extraction.pipeline.materialized`, `extraction.pipeline.pruned` and the

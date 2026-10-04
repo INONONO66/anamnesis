@@ -71,7 +71,9 @@ judge disabled, complete or omitted), or the pipeline is a sealed omission
 (failed or cancelled claim or judge). An entry whose relation judge is still
 pending stays until the verdict lands. A standalone task (`pipeline: false`)
 follows the same rule with a terminal attempt in place of custody. After an
-entry is pruned, `extraction.audit.status` answers `unknown` for it; the
+entry is pruned, `extraction.audit.status` answers `unknown` for it and a
+store transition on one of its tasks (retry, cancel, settle, lease) throws
+`unknown_ModelTask` instead of reaching the `coverage_frozen` fence; the
 audit log, not the file, is the durable record.
 
 Each transition writes one structured line to the daemon log (journald on the
