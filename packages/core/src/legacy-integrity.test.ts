@@ -71,10 +71,9 @@ beforeAll(async () => {
     });
   }
   await admin.executeQuery(`MATCH (e:Element {id:$id}) SET e:Episode, e.origin_key=$origin,e.revision_key=$revision,e.ingest_seq=1
-    CREATE (h:OriginHead {origin_key:$origin,revision_key:$revision})
     MERGE (m:Meta {key:'meta'}) SET m.ingest_seq=1`, { id: ids[0], origin: originKey, revision: revisionKey });
   await admin.executeQuery("MATCH (e:Element) WHERE e.id IN $ids SET e:Fact", { ids: ids.slice(1) });
-});
+}, 120000);
 afterAll(async () => {
   try { await engine.close(); } finally {
     try { await store.close(); } finally {

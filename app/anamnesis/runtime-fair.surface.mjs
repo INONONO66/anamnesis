@@ -142,7 +142,7 @@ try {
   for (const [receipt, reason] of blocked) assert.equal((await client.request('ingest.status', identity(receipt))).reason, reason);
   const verified = [];
   for (const receipt of success) { const result = await client.request('ingest.status', identity(receipt)); assert.equal(result.state, 'committed'); assert.deepEqual(identity(result), identity(receipt)); verified.push(result); }
-  const chain = await driver.executeQuery('MATCH (h:OriginHead {origin_key:$origin}) MATCH (e:Episode {revision_key:$child}) RETURN h.revision_key AS head, e.previous_revision_key AS predecessor', { origin: hash(['fair-page', 's', 'a', 'chain']), child: key(child) });
+  const chain = await driver.executeQuery('MATCH (head:Episode {origin_key:$origin}) WITH head ORDER BY head.ingest_seq DESC LIMIT 1 MATCH (e:Episode {revision_key:$child}) RETURN head.revision_key AS head, e.previous_revision_key AS predecessor', { origin: hash(['fair-page', 's', 'a', 'chain']), child: key(child) });
   assert.equal(chain.records[0].get('head'), key(child)); assert.equal(chain.records[0].get('predecessor'), key(parent));
   const doneBytes = await readFile(root + '/spool/spool.done'); const done = JSON.parse(JSON.parse(doneBytes.toString()).payload);
   assert.equal(done.frontier, 0); assert.deepEqual(done.completed, Array.from({ length: 100 }, (_, i) => i + 2));

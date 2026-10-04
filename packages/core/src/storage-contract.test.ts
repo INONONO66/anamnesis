@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableL
 const directory = await mkdtemp(join(tmpdir(), "storage-contract-"));
 const engine = new Engine({ uri, password, objectsRoot: directory });
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
+setDefaultTimeout(120_000);
 
 function input(record: string = randomUUID(), session: string = randomUUID(), minute = "00"): RememberInput {
   return { content: "Storage contract", time: { value: `2026-09-01T00:${minute}:00Z`, precision: "second" },
@@ -34,7 +35,7 @@ async function edges(session: string): Promise<string[][]> {
   return result.records.map((row) => [row.get("from"), row.get("to")]);
 }
 
-beforeAll(async () => { await engine.init(); });
+beforeAll(async () => { await engine.init(); }, 120000);
 afterAll(async () => {
   await driver.executeQuery("MATCH (e:Element {origin_source:'storage-contract'}) DETACH DELETE e");
   await engine.close();
@@ -99,18 +100,29 @@ test("stale predecessor fails atomically while a pinned exact retry remains idem
   await expect(engine.remember({ ...secondInput, expected_previous_revision_key: null })).rejects.toThrow("revision_conflict");
 });
 
-test("OriginHead uniqueness and concurrent first writers admit exactly one CAS winner", async () => {
+test("concurrent first and successor revisions admit exactly one CAS winner each", async () => {
   const base = input();
-  const results = await Promise.allSettled(["one", "two"].map((source_revision) =>
+  const key = hash(JSON.stringify([base.origin.source, base.origin.session, base.origin.actor, base.origin.record]));
+  const firstResults = await Promise.allSettled(["one", "two"].map((source_revision) =>
     engine.remember({ ...base, source_revision, expected_previous_revision_key: null })));
-  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-  const rejected = results.find((r) => r.status === "rejected");
-  expect(rejected?.status === "rejected" ? String(rejected.reason) : "missing").toContain("stale_revision");
-  const rows = await driver.executeQuery("MATCH (h:OriginHead) WHERE h.origin_key=$key RETURN count(h) AS n",
-    { key: hash(JSON.stringify([base.origin.source, base.origin.session, base.origin.actor, base.origin.record])) });
-  expect(rows.records[0]?.get("n")).toBe(1);
-  const constraints = await driver.executeQuery("SHOW CONSTRAINTS YIELD name RETURN name");
-  expect(constraints.records.map((r) => r.get("name"))).toContain("origin_head_key");
+  expect(firstResults.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  const firstRejected = firstResults.find((r) => r.status === "rejected");
+  expect(firstRejected?.status === "rejected" ? String(firstRejected.reason) : "missing").toContain("stale_revision");
+  const firstWinner = firstResults.find((r) => r.status === "fulfilled");
+  if (!firstWinner || firstWinner.status !== "fulfilled") throw new Error("Missing first revision winner");
+  const previous = await revision(firstWinner.value.id);
+  const successorResults = await Promise.allSettled(["three", "four"].map((source_revision) =>
+    engine.remember({ ...base, source_revision, expected_previous_revision_key: previous })));
+  expect(successorResults.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  const successorRejected = successorResults.find((r) => r.status === "rejected");
+  expect(successorRejected?.status === "rejected" ? String(successorRejected.reason) : "missing").toContain("stale_revision");
+  const successorWinner = successorResults.find((r) => r.status === "fulfilled");
+  if (!successorWinner || successorWinner.status !== "fulfilled") throw new Error("Missing successor revision winner");
+  const rows = await driver.executeQuery(
+    `MATCH (e:Episode {origin_key:$key}) RETURN e.revision_key AS revision, e.previous_revision_key AS previous
+     ORDER BY e.ingest_seq DESC`, { key });
+  expect(rows.records.map((row) => [row.get("revision"), row.get("previous")]))
+    .toEqual([[await revision(successorWinner.value.id), previous], [previous, null]]);
 });
 
 test("concurrent identical remembers converge on the original ID", async () => {

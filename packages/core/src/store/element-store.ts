@@ -117,16 +117,14 @@ export class ElementStore {
         const existing = await retry();
         if (existing) return existing;
         const head = await tx.run<{ revisionKey: string | null }>(
-          `MERGE (h:OriginHead { origin_key: $originKey })
-           SET h.revision_key = h.revision_key
-           RETURN h.revision_key AS revisionKey`,
+          `MATCH (head:Episode {origin_key:$originKey})
+           USING INDEX head:Episode(origin_key, ingest_seq)
+           WHERE head.ingest_seq IS NOT NULL
+           RETURN head.revision_key AS revisionKey
+           ORDER BY head.ingest_seq DESC LIMIT 1`,
           { originKey: key },
         );
-        const previousRevisionKey = head.records[0]!.get("revisionKey") ?? null;
-        // A contender may have committed this exact revision while we waited
-        // for the unique head's write lock. Recheck before attempting CREATE.
-        const raced = await retry();
-        if (raced) return raced;
+        const previousRevisionKey = head.records[0]?.get("revisionKey") ?? null;
         if (opts.expectedPreviousRevisionKey !== undefined &&
             opts.expectedPreviousRevisionKey !== previousRevisionKey) {
           throw new StorageContractError("stale_revision", revisionKey);
@@ -175,20 +173,16 @@ export class ElementStore {
           });
         }
         // Every remember contends for the single Meta node's write lock and
-        // Neo4j holds it until commit, so the increment rides on the last
-        // sequence-independent statement, after CREATE and originals links.
-        // Topology depends on this sequence and runs under the same lock.
-        // It stays inside this
-        // transaction, so an aborted remember consumes no number.
+        // Neo4j holds it until commit. That fence serializes the indexed head
+        // lookup, CAS, Episode creation, and sequence assignment. An aborted
+        // remember therefore cannot publish a head or consume a sequence.
         await tx.run(
-          `MATCH (h:OriginHead { origin_key: $originKey })
-           MATCH (e:Element:Episode { id: $id })
-           SET h.revision_key = $revisionKey
+          `MATCH (e:Element:Episode { id: $id })
            MERGE (m:Meta { key: 'meta' })
            ON CREATE SET m.ingest_seq = 0
            SET m.ingest_seq = m.ingest_seq + 1
            SET e.ingest_seq = m.ingest_seq`,
-          { originKey: key, revisionKey, id: el.id },
+          { id: el.id },
         );
         await this.spliceTopologyTx(tx, { id: el.id, sessionKey: sessionKey(el.origin) });
         if (lineage) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`);

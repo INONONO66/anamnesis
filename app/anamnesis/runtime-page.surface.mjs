@@ -92,7 +92,7 @@ try {
   for(const [receipt,reason] of blocked)assert.equal((await client.request('ingest.status',identity(receipt))).reason,reason);
   const committedChild=await client.request('ingest.status',identity(childReceipt));assert.equal(committedChild.state,'committed');
   const committedParent=await client.request('ingest.status',identity(parentReceipt));assert.equal(committedParent.state,'committed');
-  const verified=await driver.executeQuery('MATCH (h:OriginHead {origin_key:$origin}) MATCH (e:Episode {revision_key:$child}) RETURN h.revision_key AS head, e.previous_revision_key AS predecessor',{origin:sha(['page-db','s','a','chain']),child:key(child)});
+  const verified=await driver.executeQuery('MATCH (head:Episode {origin_key:$origin}) WITH head ORDER BY head.ingest_seq DESC LIMIT 1 MATCH (e:Episode {revision_key:$child}) RETURN head.revision_key AS head, e.previous_revision_key AS predecessor',{origin:sha(['page-db','s','a','chain']),child:key(child)});
   assert.equal(verified.records[0].get('head'),key(child));assert.equal(verified.records[0].get('predecessor'),key(parent));
   const beforeDone=await readFile(root+'/spool/spool.done');
   const done=JSON.parse(JSON.parse(beforeDone.toString()).payload);assert.equal(done.frontier,0);assert.deepEqual(done.completed,Array.from({length:100},(_,i)=>i+2));
@@ -103,7 +103,7 @@ try {
   // A post-drain control request proceeds; this is not a bound on total drain work.
   assert.equal((await client.request('shutdown',{})).state,'stopping');await client.close();client=undefined;
   assert.equal((await daemon.done).code,0);
-  results.push({status,committedChild,committedParent,blocked:blocked.map(([receipt,reason])=>({sequence:receipt.spool_seq,reason})),sameOriginHeadVerified:true,blockedCompletionAbsent:true,controlRequestCompleted:true});
+  results.push({status,committedChild,committedParent,blocked:blocked.map(([receipt,reason])=>({sequence:receipt.spool_seq,reason})),sameOriginRevisionVerified:true,blockedCompletionAbsent:true,controlRequestCompleted:true});
   await record('result.json',{ok:true,results});
 } catch(error) {failure=error;await record('result.json',{ok:false,error:String(error),stack:error.stack});}
 finally {

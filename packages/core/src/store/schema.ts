@@ -50,6 +50,8 @@ export const SCHEMA_STATEMENTS = [
    FOR (m:Meta) REQUIRE m.key IS UNIQUE`,
   `CREATE INDEX episode_origin IF NOT EXISTS
    FOR (e:Episode) ON (e.origin_key)`,
+  `CREATE INDEX episode_origin_head IF NOT EXISTS
+   FOR (e:Episode) ON (e.origin_key, e.ingest_seq)`,
   `CREATE INDEX episode_session_order IF NOT EXISTS
    FOR (e:Episode) ON (e.session_key, e.time_utc, e.ingest_seq)`,
   `CREATE INDEX element_time IF NOT EXISTS
