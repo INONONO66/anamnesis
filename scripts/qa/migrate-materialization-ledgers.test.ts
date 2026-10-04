@@ -86,7 +86,9 @@ describe.serial("materialization ledger migration", () => {
     expect(steps[0].constraints.sort()).toEqual([...legacyConstraints].sort());
     expect(steps[0].indexes).toContain("relation_input_occurrence");
     expect(steps[3].split).toEqual([]);
+    expect(steps[3].uncovered).toBe(0);
     expect(steps[4].count).toBe(0);
+    expect(steps[4].malformed_seals).toBe(0);
     expect(steps[4].terminal_zero_candidate).toBe(0);
     expect(steps[4].sealed_exhausted).toBe(0);
     expect(steps[4].pending).toBe(0);
@@ -137,6 +139,51 @@ describe.serial("materialization ledger migration", () => {
     expect(await count("MaterializationOperation")).toBe(2);
   }, 300000);
 
+  test.serial("refuses sealed custody whose source is beyond the coverage cursor without graph changes", async () => {
+    const generation = "018f0d8d-7b6a-7cc0-8b42-000000000011";
+    const occurrence = extractionBodyDigest([generation, lineage.episode_id]);
+    const result = { created: false, facts: 0, refused: [], omitted: "relation_judge_exhausted", failures: 4, occurrences: ["a".repeat(64)] };
+    await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:$relationOccurrence,candidates:1,generation:$generation,source_episode_id:$source})",
+      { generation, relationOccurrence: "a".repeat(64), source: lineage.episode_id });
+    await driver.executeQuery("CREATE (:MaterializationOperation {id:$id,digest:$digest,occurrence_key:$occurrence,result:$result,generation:$generation,source_episode_id:$source})",
+      { id: "018f0d8d-7b6a-7cc0-8b42-000000000012", digest: "b".repeat(64), occurrence, result: canonicalExtractionBody(result), generation, source: lineage.episode_id });
+    // The engine keeps this source's journal entry (source_ingest_seq > covered_ingest_seq), so deleting its custody would replay the judge.
+    await driver.executeQuery("MATCH (e:Episode {id:$id}) SET e.ingest_seq=11", { id: lineage.episode_id });
+    const before = await graphSnapshot();
+    const lines: string[] = [];
+    await expect(migrate({ output: line => lines.push(line) })).rejects.toThrow("coverage_gap");
+    const steps = lines.map(line => JSON.parse(line));
+    // The seeded legacy custody and the sealed operation share one source, so each label reports that source once.
+    expect(steps.find(step => step.step === "check_coverage")).toMatchObject({ split: [], uncovered: 2,
+      uncovered_sources: [`MaterializationOperation:${generation}:${lineage.episode_id}:seq=11:covered=10`, `FactRelationInput:${generation}:${lineage.episode_id}:seq=11:covered=10`] });
+    expect(steps.some(step => step.step === "check_inflight")).toBe(false);
+    expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
+  test.serial("refuses custody whose source Episode is missing", async () => {
+    await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:'orphan',candidates:0,generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',source_episode_id:'018f0d8d-7b6a-7cc0-8b42-0000000000ff'})");
+    const lines: string[] = [];
+    await expect(migrate({ args: ["--dry-run"], output: line => lines.push(line) })).rejects.toThrow("coverage_gap");
+    expect(lines.map(line => JSON.parse(line)).find(step => step.step === "check_coverage"))
+      .toMatchObject({ uncovered: 1, uncovered_sources: ["FactRelationInput:018f0d8d-7b6a-7cc0-8b42-000000000011:018f0d8d-7b6a-7cc0-8b42-0000000000ff:seq=null:covered=10"] });
+    expect(await count("FactRelationInput")).toBe(1);
+  }, 300000);
+
+  test.serial("refuses a malformed seal instead of skipping it", async () => {
+    const generation = "018f0d8d-7b6a-7cc0-8b42-000000000011";
+    await driver.executeQuery("CREATE (:FactRelationVerdict {occurrence_key:'c-verdict'})");
+    await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:'c-verdict',candidates:1,generation:$generation,source_episode_id:$source})", { generation, source: lineage.episode_id });
+    await driver.executeQuery("CREATE (:MaterializationOperation {id:$id,digest:$digest,occurrence_key:$occurrence,result:$result,generation:$generation,source_episode_id:$source})",
+      { id: "018f0d8d-7b6a-7cc0-8b42-000000000013", digest: "c".repeat(64), occurrence: extractionBodyDigest([generation, lineage.episode_id]),
+        result: '{"omitted":"relation_judge_exhausted",', generation, source: lineage.episode_id });
+    const before = await graphSnapshot();
+    const lines: string[] = [];
+    await expect(migrate({ output: line => lines.push(line) })).rejects.toThrow("malformed_seal");
+    expect(lines.map(line => JSON.parse(line)).find(step => step.step === "check_inflight"))
+      .toMatchObject({ count: 0, pending: 0, sealed_exhausted: 0, malformed_seals: 1, malformed: [`018f0d8d-7b6a-7cc0-8b42-000000000013:${generation}:${lineage.episode_id}`] });
+    expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
   test.serial("refuses a candidate-bearing input without verdict or seal", async () => {
     await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:'pending',candidates:1,generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',source_episode_id:$source})",
       { source: lineage.episode_id });
@@ -148,7 +195,7 @@ describe.serial("materialization ledger migration", () => {
     expect(await count("EchoLineage")).toBe(1);
   }, 300000);
 
-  test.serial("refuses corrupt lineage past the first thousand without graph changes", async () => {
+  test.serial("refuses corrupt lineage on a later validation page without graph changes", async () => {
     const entries = Array.from({ length: 1000 }, (_, offset) => {
       const id = `018f0d8d-7b6a-7cc0-8b42-${String(offset + 2).padStart(12, "0")}`;
       const body = { ...lineage, episode_id: id, root_episode_ids: [id] };
@@ -156,7 +203,8 @@ describe.serial("materialization ledger migration", () => {
     });
     await driver.executeQuery("UNWIND $entries AS entry CREATE (e:Episode {id:entry.id,ingest_seq:2}) CREATE (l:EchoLineage) SET l = entry.props", { entries });
     const before = await graphSnapshot();
-    await expect(migrate({ args: ["--dry-run"], output: () => undefined })).rejects.toThrow("copy_mismatch");
+    // 1001 rows at --batch 100 puts the corrupt row (highest episode_id) on the eleventh keyset page.
+    await expect(migrate({ args: ["--dry-run", "--batch", "100"], output: () => undefined })).rejects.toThrow("copy_mismatch");
     expect(await graphSnapshot()).toEqual(before);
   }, 300000);
 

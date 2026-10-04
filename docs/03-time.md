@@ -78,29 +78,32 @@ Community/profile/synthesis must be suppressed until rebuilt from allowed
 supports. Current policy gates endpoints and link content before conduction,
 even when structural caches are stale.
 
-The Entity witness is one more property comparison, not a per-request scan:
+The Entity witness is an activation prerequisite, not a per-request scan:
 
 ```text
-  witnessed(n, T) = n.generation = g_e
-                    && n.visible_from_utc <= T
-                    && n.witness_generation = g_e
-                    && n.witness_policy_revision = policy_revision
+  witnessed(n, g_e, policy_revision) = n.witness_generation = g_e
+                                     && n.witness_policy_revision = policy_revision
+  activate(g_e) requires witnessed(n, g_e, policy_revision)
+                for every distinct Entity n that g_e's Facts mention
+  visible(n, T)  = n.generation = g_e && n.visible_from_utc <= T
 ```
 
 The witness is stored on the Entity itself as the indexed marker
 `Entity.{witness_generation, witness_policy_revision}` (index `entity_witness`,
 docs/01 §7), set in the transaction that writes an allowed mention for
-the current generation and policy revision; activation requires the marker on
-every distinct Entity the generation's Facts mention
-(`entity_witness_policy_coverage`). The pinned generation and policy revision
-must match the stored marker; there is no separate witness row. Echo lineage
-adds nothing to this axis:
+the current generation and policy revision. Activation
+(`entity_witness_policy_coverage`) requires the marker on every distinct
+Entity the generation's Facts mention, at the pinned generation and policy
+revision; an absent or mismatched marker keeps that generation from
+activating and never falls back to `visible_from_utc` alone. There is no
+separate witness row. Request-time Entity queries run against the activated
+generation and compare only `visible_from_utc <= T`; they do not re-read the
+marker, because activation already proved it for every mentioned Entity.
+Echo lineage adds nothing to this axis:
 `echo_depth`, roots and receipt times are operational provenance and never
 supply or shift a Fact's event time or its visibility at `T` (D49). There is no cache keyed by an arbitrary
-request `T`; the request supplies `T` and compares `visible_from_utc`. An
-absent or mismatched marker excludes the Entity from candidates, seeds and
-conduction; it never falls back to `visible_from_utc` alone (docs/01 §3.2,
-§7).
+request `T`; the request supplies `T` and compares `visible_from_utc`
+(docs/01 §3.2, §7).
 
 ### The DERIVED_FROM exception — provenance only
 
@@ -342,10 +345,18 @@ LIMIT 64
 ```
 
 ```cypher
-// Entity temporal visibility plus the current-policy witness (docs/03 §3).
+// Entity witness coverage, checked once at activation per distinct mentioned Entity (docs/03 §3).
+MATCH (f:Fact {generation: $g_e}) UNWIND coalesce(f.entity_ids, []) AS entity
+WITH DISTINCT entity
+OPTIONAL MATCH (w:Entity {witness_generation: $g_e, witness_policy_revision: $policy_revision})
+WHERE w.id = entity
+RETURN entity, count(w) AS witnesses   // activation requires witnesses = 1 on every row
+```
+
+```cypher
+// Request-time Entity temporal visibility on the activated generation; the marker is not re-read here.
 MATCH (n:Entity {id: $entity_id})
 WHERE n.generation = $g_e AND n.visible_from_utc <= $T
-  AND n.witness_generation = $g_e AND n.witness_policy_revision = $policy_revision
 RETURN n.id
 ```
 

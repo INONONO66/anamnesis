@@ -463,9 +463,11 @@ by a deny stay unavailable until rebuilt from allowed inputs; Entity anchors
 need an allowed witness, not only a pre-policy visibility threshold. The
 witness is the indexed `Entity.{witness_generation, witness_policy_revision}`
 marker set when a validated Fact mentions it. Activation checks the marker
-for each distinct Entity at the pinned generation and policy revision. An
-absent or mismatched marker excludes the Entity rather than treating
-`visible_from_utc` alone as sufficient; no separate witness row or
+for each distinct Entity the generation's Facts mention, at the pinned
+generation and policy revision; an absent or mismatched marker blocks that
+generation's activation rather than treating `visible_from_utc` alone as
+sufficient. Request-time queries run against the activated generation and do
+not re-read the marker per Entity. No separate witness row or
 `earliest_allowed_from` property is written (docs/03 §3).
 
 Policy publication takes an immediate serving barrier (docs/02 §1), including

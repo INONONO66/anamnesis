@@ -70,6 +70,28 @@ export async function main(options: Options = {}) {
       return { generation: row.get("generation"), episodes: cursor("episodes"), active_extraction: cursor("active_extraction") };
     });
   };
+  // Once its ledger row is deleted, custody for a source beyond the coverage cursor is invisible to the new engine:
+  // the scheduler rediscovers the source, replays the relation judge and can write a second Fact. Refuse such custody
+  // (and custody whose source or coverage cannot be resolved) instead of deleting it.
+  const uncovered = async () => {
+    const custody = (label: string) => `MATCH (n:${label})
+      WITH DISTINCT n.generation AS generation,n.source_episode_id AS source
+      OPTIONAL MATCH (e:Episode {id:source})
+      OPTIONAL MATCH (c:ExtractionCoverage {generation_id:generation,partition:'episodes'})
+      WITH generation,source,e.ingest_seq AS seq,c.covered_ingest_seq AS covered
+      WHERE generation IS NULL OR source IS NULL OR seq IS NULL OR covered IS NULL OR seq > covered`;
+    const sources: string[] = [];
+    let count = 0;
+    for (const label of ["MaterializationOperation", "FactRelationInput"] as const) {
+      count += await number(`${custody(label)} RETURN count(*) AS count`);
+      if (sources.length >= 100) continue;
+      const rows = await session.run<{ generation: string | null; source: string | null; seq: number | null; covered: number | null }>(
+        `${custody(label)} RETURN generation,source,seq,covered ORDER BY generation,source LIMIT ${100 - sources.length}`);
+      for (const row of rows.records)
+        sources.push(`${label}:${row.get("generation")}:${row.get("source")}:seq=${row.get("seq")}:covered=${row.get("covered")}`);
+    }
+    return { count, sources };
+  };
   // Check destructive-cutover gates before the first copy write; emit them in the requested step order below.
   const inflight = async () => {
     const operations = (await session.run<{ id: string }>(`MATCH (o:MaterializationOperation)
@@ -79,15 +101,21 @@ export async function main(options: Options = {}) {
       WHERE o.result IS NULL OR o.occurrence_key IS NULL RETURN count(o) AS count`);
     const zeroCandidate = await number(`MATCH (i:FactRelationInput)
       WHERE i.candidates = 0 RETURN count(i) AS count`);
-    const sealed = new Set<string>();
-    const sealedRows = await session.run<{ generation: string; source: string; occurrence: string; result: string }>(
+    const sealed = new Set<string>(), malformed: string[] = [];
+    let malformedCount = 0;
+    const sealedRows = await session.run<{ id: string; generation: string; source: string; occurrence: string; result: string }>(
       `MATCH (o:MaterializationOperation)
        WHERE o.result CONTAINS '"omitted":"relation_judge_exhausted"' AND o.occurrence_key IS NOT NULL
          AND o.generation IS NOT NULL AND o.source_episode_id IS NOT NULL
-       RETURN o.generation AS generation,o.source_episode_id AS source,o.occurrence_key AS occurrence,o.result AS result`);
+       RETURN o.id AS id,o.generation AS generation,o.source_episode_id AS source,o.occurrence_key AS occurrence,o.result AS result`);
     for (const row of sealedRows.records) {
       let result: unknown;
-      try { result = JSON.parse(row.get("result")); } catch { continue; }
+      try { result = JSON.parse(row.get("result")); } catch {
+        // A seal that cannot be parsed is neither terminal nor pending; refuse instead of guessing.
+        malformedCount++;
+        if (malformed.length < 100) malformed.push(`${row.get("id")}:${row.get("generation")}:${row.get("source")}`);
+        continue;
+      }
       if (typeof result === "object" && result !== null && "omitted" in result
         && result.omitted === "relation_judge_exhausted"
         && row.get("occurrence") === extractionBodyDigest([row.get("generation"), row.get("source")]))
@@ -111,7 +139,7 @@ export async function main(options: Options = {}) {
     return {
       operations, inputs: pending, count: operationCount + pendingCount,
       terminal_zero_candidate: zeroCandidate, sealed_exhausted: sealedCount, pending: pendingCount,
-      sealed_inputs: sealedExhausted,
+      malformed_seals: malformedCount, sealed_inputs: sealedExhausted, malformed,
     };
   };
   try {
@@ -119,7 +147,7 @@ export async function main(options: Options = {}) {
     const facts = await number("MATCH (f:Fact) RETURN count(f) AS count");
     line("count_legacy", { counts: before, constraints: legacySchema.constraints.map(c => c.name), indexes: legacySchema.indexes.map(i => i.name), facts, dry_run: dryRun });
     const coverage = await cursors(), split = coverage.filter(row => row.episodes !== row.active_extraction);
-    const pending = await inflight();
+    const pending = await inflight(), gap = await uncovered();
     const duplicates = (await session.run<{ generation: string; meaning_digest: string; primary_episode_id: string; ids: string[] }>(
       `MATCH (f:Fact) WHERE f.generation IS NOT NULL AND f.meaning_digest IS NOT NULL AND f.primary_episode_id IS NOT NULL
        WITH f.generation AS generation,f.meaning_digest AS meaning_digest,f.primary_episode_id AS primary_episode_id,collect(f.id) AS ids
@@ -198,7 +226,7 @@ export async function main(options: Options = {}) {
       throw new Error(`copy_mismatch: EchoLineage has missing Episodes, conflicting properties or invalid bodies: ${JSON.stringify(ids)}`);
     }
     // All destructive-cutover gates are read before copying, without obscuring the ordered output.
-    const gatesPass = split.length === 0 && pending.count === 0 && duplicateCount === 0
+    const gatesPass = split.length === 0 && gap.count === 0 && pending.count === 0 && pending.malformed_seals === 0 && duplicateCount === 0
       && witnessMissing.length === 0 && witnessJoined === before.EntityWitness && existingWitness <= before.EntityWitness;
     if (!dryRun && gatesPass) {
       await session.run(`MATCH (l:EchoLineage) CALL (l) {
@@ -253,20 +281,24 @@ export async function main(options: Options = {}) {
       SET e.witness_generation=w.generation,e.witness_policy_revision=w.policy_revision
     } IN TRANSACTIONS OF ${batch} ROWS`);
     const witnessCount = dryRun || !gatesPass ? before.EntityWitness : await number("MATCH (e:Entity) WHERE e.witness_generation IS NOT NULL RETURN count(e) AS count");
-    const witnessSample = dryRun || !gatesPass ? [] : (await session.run<{ id: string }>(`MATCH (w:EntityWitness) MATCH (e:Entity) WHERE e.id = w.entity_id
-      WITH w,e ORDER BY w.entity_id LIMIT 1000
-      WHERE NOT coalesce(e.witness_generation = w.generation,false)
-         OR NOT coalesce(e.witness_policy_revision = w.policy_revision,false)
-      RETURN w.entity_id AS id`)).records.map(row => row.get("id"));
-    if (witnessCount !== before.EntityWitness || witnessSample.length) {
-      line("copy_mismatch", { label: "EntityWitness", count: witnessCount, expected: before.EntityWitness, ids: witnessSample });
-      throw new Error("copy_mismatch: Entity witness count differs");
+    // Every witness row is re-read against its Entity after the copy; the pre-copy gate already proved the join is complete.
+    const witnessMismatchQuery = `MATCH (w:EntityWitness) MATCH (e:Entity) WHERE e.id = w.entity_id
+        AND (NOT coalesce(e.witness_generation = w.generation,false)
+          OR NOT coalesce(e.witness_policy_revision = w.policy_revision,false))`;
+    const witnessMismatchCount = dryRun || !gatesPass ? 0 : await number(`${witnessMismatchQuery} RETURN count(w) AS count`);
+    const witnessMismatch = witnessMismatchCount === 0 ? [] : (await session.run<{ id: string }>(
+      `${witnessMismatchQuery} RETURN w.entity_id AS id ORDER BY id LIMIT 100`)).records.map(row => row.get("id"));
+    if (witnessCount !== before.EntityWitness || witnessMismatchCount) {
+      line("copy_mismatch", { label: "EntityWitness", count: witnessCount, expected: before.EntityWitness, mismatch: witnessMismatchCount, ids: witnessMismatch });
+      throw new Error("copy_mismatch: Entity witness count or copied properties differ");
     }
-    line("copy_witness", { count: witnessCount, mismatch: 0, sampled: dryRun ? 0 : Math.min(before.EntityWitness, 1000), dry_run: dryRun });
+    line("copy_witness", { count: witnessCount, verified: dryRun || !gatesPass ? 0 : witnessCount, mismatch: 0, dry_run: dryRun });
 
-    line("check_coverage", { coverage, split, dry_run: dryRun });
+    line("check_coverage", { coverage, split, uncovered: gap.count, uncovered_sources: gap.sources, dry_run: dryRun });
     if (split.length) throw new Error(`Extraction coverage partitions disagree: ${JSON.stringify(split)}`);
+    if (gap.count) throw new Error(`coverage_gap: ${gap.count} custody sources are beyond the coverage cursor or unresolved and would be replayed after cutover: ${JSON.stringify(gap.sources)}`);
     line("check_inflight", { ...pending, dry_run: dryRun });
+    if (pending.malformed_seals) throw new Error(`malformed_seal: ${pending.malformed_seals} sealed omissions could not be parsed: ${JSON.stringify(pending.malformed)}`);
     if (pending.count) throw new Error("In-flight materialization work remains");
     line("fact_duplicates", { duplicates, count: duplicateCount, dry_run: dryRun });
     if (duplicateCount) throw new Error("fact_duplicates: deduplicate Facts before creating fact_identity");
