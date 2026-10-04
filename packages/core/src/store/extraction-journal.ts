@@ -16,11 +16,18 @@ const Entry = z.strictObject({
   // Original requests cannot be reconstructed after provider adoption or a
   // server-rewritten outcome (policy denial, changed premises, judge mismatch).
   creation_digest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  // One digest per retained attempt: the 32 historical outcomes plus the pinned claim and judge attempts.
   request_digests: z.record(z.uuidv7(), z.string().regex(/^[0-9a-f]{64}$/))
-    .refine(digests => Object.keys(digests).length <= 32, "too many request digests").optional(),
+    .refine(digests => Object.keys(digests).length <= 34, "too many request digests").optional(),
   sealed_ingest_seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
 }).refine(entry => entry.work_key === `${entry.generation_id}:${entry.source_id}`, "invalid work key");
 export type ExtractionJournalEntry = z.infer<typeof Entry>;
+
+/** The attempt an entry still holds under `id`: the pinned claim and judge attempts outlive the bounded history. */
+export function journalAttempt(entry: ExtractionJournalEntry, id: string): ExtractionAttempt | undefined {
+  for (const attempt of [entry.claim_attempt, entry.judge_attempt, ...entry.attempts]) if (attempt?.id === id) return attempt;
+  return undefined;
+}
 
 const FileSchema = z.strictObject({
   version: z.literal(1),

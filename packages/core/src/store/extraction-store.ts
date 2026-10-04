@@ -11,7 +11,7 @@ import { receiptTime, receiptHash, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, type PolicyState, requireInstallation } from "./policy.ts";
 import type { StoreCore } from "./core.ts";
 import type { ConductingStore } from "./conducting-store.ts";
-import type { ExtractionJournalEntry } from "./extraction-journal.ts";
+import { journalAttempt, type ExtractionJournalEntry } from "./extraction-journal.ts";
 
 /** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
 const LeaseModelTaskWithProvider = LeaseModelTask.extend({ provider: z.strictObject({ model: ModelTask.shape.model, model_incarnation: ModelTask.shape.model_incarnation }).optional() });
@@ -197,7 +197,7 @@ export class ExtractionStore {
   private async saveExtractionTask(task: ModelTask): Promise<ModelTask> {
     const parsed = ModelTask.parse(task);
     const entry = await this.taskEntry(task.id);
-    const attempt = entry.attempts.find(attempt => attempt.id === task.attempt_id) ?? null;
+    const attempt = (task.attempt_id === null ? undefined : journalAttempt(entry, task.attempt_id)) ?? null;
     await this.core.extractionJournal.set(entry.claim.id, { ...entry,
       ...(entry.claim.id === task.id ? { claim: parsed, claim_attempt: attempt } : { judge: parsed, judge_attempt: attempt }) });
     return parsed;
@@ -271,13 +271,15 @@ export class ExtractionStore {
     }
     const attempts = [...entry.attempts, attempt].slice(-32);
     const requestDigests = { ...entry.request_digests, [attempt.id]: requestDigest };
-    // Bounded journal history; terminal audit lines outlive operational entries.
-    const next: ExtractionJournalEntry = { ...entry, attempts,
-      request_digests: Object.fromEntries(attempts.flatMap(value => {
-        const digest = requestDigests[value.id];
-        return digest === undefined ? [] : [[value.id, digest]];
-      })),
-      ...(entry.claim.id === task.id ? { claim: terminal, claim_attempt: attempt } : { judge: terminal, judge_attempt: attempt, decisions }) };
+    // Bounded journal history; terminal audit lines outlive operational entries. The pinned claim and judge
+    // attempts (and their replay digests) outlive the history: a judge retried past 32 outcomes still reads its claim.
+    const stages = entry.claim.id === task.id ? { claim: terminal, claim_attempt: attempt } : { judge: terminal, judge_attempt: attempt, decisions };
+    const retained = { ...entry, ...stages, attempts };
+    const next: ExtractionJournalEntry = { ...retained,
+      request_digests: Object.fromEntries([retained.claim_attempt, retained.judge_attempt, ...attempts].flatMap((value): [string, string][] => {
+        const digest = value ? requestDigests[value.id] : undefined;
+        return value && digest !== undefined ? [[value.id, digest]] : [];
+      })) };
     await this.core.extractionJournal.set(entry.claim.id, next);
     this.audit("extraction.attempt.recorded", next, terminal, { attempt_id: attempt.id, state: attempt.state, reason: attempt.reason,
       detail: attempt.detail ?? null, decisions: task.kind === "judge_claims" ? decisions.length : 0, body_digest: attempt.body_digest });
@@ -287,7 +289,7 @@ export class ExtractionStore {
   /** A replayed completion: the stored attempt for an identical request, re-authorized when it carries output. */
   private async replayedAttemptTx(tx: ManagedTransaction, request: CompleteExtractionAttempt, digest: string, policy: PolicyState): Promise<ExtractionAttempt | null> {
     const entry = await this.core.extractionJournal.byAttempt(request.id);
-    const attempt = entry?.attempts.find(attempt => attempt.id === request.id);
+    const attempt = entry && journalAttempt(entry, request.id);
     if (!attempt) return null;
     if (entry?.request_digests?.[request.id] !== digest) throw new Error("attempt_conflict");
     if (attempt.output) await this.core.authorizeEpisodesTx(tx, [attempt.source_id], policy);

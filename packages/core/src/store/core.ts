@@ -12,7 +12,7 @@ import { receiptTime, RecallReceipt, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, PolicyEvent, policySelector, policyBody, type PolicyState, requireInstallation } from "./policy.ts";
 import { type QueryParameters, recordsToObjects } from "./records.ts";
 import { EmbeddingLedger } from "./embedding-ledger.ts";
-import { ExtractionJournal } from "./extraction-journal.ts";
+import { ExtractionJournal, journalAttempt } from "./extraction-journal.ts";
 
 export interface StoreOptions {
   uri: string;
@@ -212,7 +212,7 @@ export class StoreCore {
   }
   async extractionAttempt(id: string): Promise<ExtractionAttempt> {
     const entry = await this.extractionJournal.byAttempt(id);
-    const attempt = entry?.attempts.find(attempt => attempt.id === id);
+    const attempt = entry && journalAttempt(entry, id);
     if (!attempt) throw new Error("unknown_ExtractionAttempt");
     return attempt;
   }

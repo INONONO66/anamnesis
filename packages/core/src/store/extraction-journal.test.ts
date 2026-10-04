@@ -3,7 +3,7 @@ import { mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExtractionAttempt, ModelTask } from "@anamnesis/protocol";
-import { ExtractionJournal, type ExtractionJournalEntry } from "./extraction-journal.ts";
+import { ExtractionJournal, journalAttempt, type ExtractionJournalEntry } from "./extraction-journal.ts";
 
 const generation = "018f5b5e-7b1e-7abc-8def-123456789010";
 const source = "018f5b5e-7b1e-7abc-8def-123456789011";
@@ -168,6 +168,24 @@ test("set isolates the journal from caller and reader mutations", async () => {
 
   // Then the validated internal record is untouched.
   expect((await journal.get(pipeline))?.claim.model).toBe("fixture");
+});
+
+test("journalAttempt resolves the pinned claim and judge attempts after the bounded history evicted them", () => {
+  // Given 32 later outcomes that pushed the pinned claim attempt out of attempts[].
+  const pinned = failedAttempt();
+  const judgeAttemptId = "018f5b5e-7b1e-7abc-8def-123456789018";
+  const judgeAttempt = ExtractionAttempt.parse({ ...failedAttempt(), id: judgeAttemptId, task_id: judgeId });
+  const history = Array.from({ length: 32 }, (_, index) => ExtractionAttempt.parse({ ...failedAttempt(), id: `018f5b5e-7b1e-7abc-8def-1234567891${index.toString(16).padStart(2, "0")}`, task_id: judgeId }));
+  const record: ExtractionJournalEntry = { ...entry(), claim: ModelTask.parse({ ...task(claimId), state: "failed", attempt_id: attemptId, attempts: 1 }),
+    claim_attempt: pinned, judge: task(judgeId, "judge"), judge_attempt: judgeAttempt, attempts: history };
+
+  // When the pinned, a historical and an unknown attempt are looked up.
+  // Then the pinned attempts resolve although attempts[] no longer holds them.
+  expect(record.attempts.some(attempt => attempt.id === attemptId)).toBe(false);
+  expect(journalAttempt(record, attemptId)).toEqual(pinned);
+  expect(journalAttempt(record, judgeAttemptId)).toEqual(judgeAttempt);
+  expect(journalAttempt(record, history[5]!.id)).toEqual(history[5]!);
+  expect(journalAttempt(record, source)).toBeUndefined();
 });
 
 test("rejects malformed file envelopes, nested records, and overlong arrays", async () => {

@@ -186,3 +186,30 @@ test("a pipeline that succeeds on the last attempt of every stage completes inst
     expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(2);
   } finally { await f.close(); }
 }, 60000);
+
+test("a judge retried past the 32-outcome history still reads its claim attempt and the pipeline completes", async () => {
+  // One succeeded claim plus 33 failed judge outcomes exceeds the bounded attempt history. Every judge lease re-reads
+  // the claim attempt by id (claim context), so the pinned claim and judge attempts must outlive the evicted history.
+  let judgeFailuresLeft = 33;
+  const f = await setup((input, calls, clock) => {
+    if (input.task === "judge_claims" && judgeFailuresLeft > 0) { judgeFailuresLeft--; throw new ExtractionProviderError("provider_unavailable"); }
+    return answer(input, calls, clock);
+  }, { maxAttempts: 35 });
+  try {
+    await f.remember("Alice likes dark mode");
+    const status = await f.settle(1, 120);
+    expect(status).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
+    expect(judgeFailuresLeft).toBe(0);
+    expect((await f.query("MATCH (f:Fact) RETURN f.content AS content")).map(row => row.content)).toEqual(["Alice likes dark mode"]);
+    const recorded = f.audit.filter(({ event }) => event === "extraction.attempt.recorded").map(({ fields }) => fields);
+    expect(recorded.filter(fields => fields["state"] === "failed")).toHaveLength(33);
+    expect(recorded.filter(fields => fields["state"] === "succeeded")).toHaveLength(2);
+    // The last snapshot before pruning: history bounded at 32, the claim attempt pinned outside it with its replay digest.
+    const [entry] = [...f.snapshots.values()];
+    expect(entry!.attempts).toHaveLength(32);
+    expect(entry!.attempts.some(attempt => attempt.id === entry!.claim_attempt!.id)).toBe(false);
+    expect(entry!.claim_attempt!.state).toBe("succeeded");
+    expect(Object.keys(entry!.request_digests ?? {})).toContain(entry!.claim_attempt!.id);
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+  } finally { await f.close(); }
+}, 120000);
