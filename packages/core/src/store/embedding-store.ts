@@ -92,6 +92,16 @@ export class EmbeddingStore {
       return prior;
     }
     const previous = await this.core.embeddingLedger.get(request.episode_id);
+    const held = await this.core.run<VectorRow>(
+      `MATCH (v:EmbeddingVector {episode_id:$id,profile_id:$profile}) ${VECTOR_RETURN}`, { id: request.episode_id, profile: profileId });
+    if (held[0]) {
+      // The Episode already holds this profile's vector: the attempt that wrote it is the answer. The provider
+      // is not called and the submitted id, having done no work, is recorded nowhere; a replay returns the same
+      // attempt and the id's status stays unknown. A lingering ledger entry is stale and goes with it.
+      if (previous) await this.core.embeddingLedger.delete(request.episode_id);
+      return this.vectorAttempt(held[0]);
+    }
+    // Another profile's entry lends no deferral budget: the first attempt under this profile replaces it.
     const deferrals = previous?.profile_id === profileId && previous.state === "deferred" ? previous.deferrals : 0;
     const outcome = await this.embedInput(prepared.content);
     if (outcome.reason === "provider_unavailable" && !operator && deferrals >= EMBEDDING_MAX_DEFERRALS)
@@ -201,7 +211,16 @@ export class EmbeddingStore {
     if (!provider) return { drained: 0, reason: "embeddings_disabled" };
     const profileId = embeddingProfileId(provider.profile);
     const entries = await this.core.embeddingLedger.list();
-    const excluded = entries.map(([id]) => id);
+    // An entry whose Episode already holds this profile's vector is stale: a process loss between the vector
+    // commit and the entry's deletion, or a seeded ledger. Quarantined, it would hide the Episode from the scan
+    // below and never be visited by `due`, so every drain first reconciles the ledger against the graph.
+    const stale = new Set((await this.core.run<{ id: string }>(
+      `UNWIND $ids AS id MATCH (:EmbeddingVector {episode_id:id,profile_id:$profile}) RETURN DISTINCT id`,
+      { ids: entries.map(([id]) => id), profile: profileId })).map(row => row.id));
+    for (const id of stale) await this.core.embeddingLedger.delete(id);
+    // Only this profile's recorded failures hide an Episode from the scan; another profile's entry is
+    // superseded by the first attempt under this one.
+    const excluded = entries.flatMap(([id, entry]) => entry.profile_id === profileId && !stale.has(id) ? [id] : []);
     const fresh = await this.core.run<{ id: string }>(
       `MATCH (e:Element:Episode)
        WHERE NOT EXISTS { MATCH (:EmbeddingVector {episode_id: e.id, profile_id: $profile}) }

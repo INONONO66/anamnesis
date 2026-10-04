@@ -50,10 +50,16 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
   the configured profile; that missing-vector scan is the only work queue.
   A ledger entry exists only while an Episode has no vector, and a success
   deletes it, including the Episode's earlier failed attempts: those operation
-  IDs then answer `unknown` and are free to reuse. A failed `embedding.recover`
-  of an Episode that already holds a vector is reported to the caller but
-  writes no entry. A process interrupted mid-attempt leaves no trace; the scan
-  finds the Episode again.
+  IDs then answer `unknown` and are free to reuse. An Episode that already
+  holds the profile's vector is never sent to the provider again:
+  `embedding.recover` under any further operation ID answers with the attempt
+  that wrote the vector, the submitted ID did no work and is recorded nowhere,
+  and a lingering entry for that Episode is deleted. Every lane drain first
+  drops entries whose Episode already holds a vector (a process lost between
+  the vector commit and the entry's deletion, or a seeded ledger), and only
+  the configured profile's entries hide an Episode from the scan: another
+  profile's entry is superseded by the first attempt under this one. A process
+  interrupted mid-attempt leaves no trace; the scan finds the Episode again.
 - Reusing a completed operation ID is a no-op that returns the recorded
   attempt, or one synthesized from the vector that carries that
   `operation_id`. The same ID bound to a different Episode or profile is an

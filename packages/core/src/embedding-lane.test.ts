@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j, { type RecordShape } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { Engine } from "./engine.ts";
-import { EmbeddingError, EmbeddingProfile, type EmbeddingProvider } from "./embedding.ts";
+import { EmbeddingError, EmbeddingProfile, type EmbeddingProvider, embeddingProfileId } from "./embedding.ts";
 
 const uri = process.env["ANAMNESIS_TEST_NEO4J_URI"];
 const user = process.env["ANAMNESIS_TEST_NEO4J_USER"] ?? "neo4j";
@@ -148,5 +148,75 @@ describe.serial("embedding lane on isolated Neo4j", () => {
     });
     const unknown = uuidv7();
     expect(await engine.embeddingStatus(unknown, context)).toEqual({ state: "unknown", operation_id: unknown });
+  });
+
+  test("a recover under a fresh id for an embedded Episode answers with the vector's attempt and no provider call", async () => {
+    // Given an Episode whose vector was written by the lane under its own operation id.
+    state.mode = "ok";
+    const id = await episode("already-embedded");
+    expect(await engine.drainEmbeddingOutbox(100)).toMatchObject({ drained: 1 });
+    const [vector] = await query<{ operation_id: string }>(
+      "MATCH (v:EmbeddingVector {episode_id:$id}) RETURN v.operation_id AS operation_id", { id });
+    if (!vector) throw new Error("drained Episode has no vector");
+    const calls = state.calls;
+
+    // When an operator recovers it twice under one fresh operation id.
+    const fresh = uuidv7();
+    const first = await engine.recoverEmbedding({ episode_id: id, operation_id: fresh }, context);
+    const replay = await engine.recoverEmbedding({ episode_id: id, operation_id: fresh }, context);
+
+    // Then both answers are the attempt that wrote the vector, the provider stays idle,
+    // the Episode still holds one vector, and the fresh id did no work.
+    expect(first).toMatchObject({ state: "succeeded", operation_id: vector.operation_id, episode_id: id });
+    expect(replay).toEqual(first);
+    expect(state.calls).toBe(calls);
+    const count = await query<{ count: number }>("MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS count", { id });
+    expect(count[0]?.count).toBe(1);
+    expect(await engine.embeddingStatus(fresh, context)).toEqual({ state: "unknown", operation_id: fresh });
+  });
+
+  test("a drain drops a ledger entry whose Episode holds a vector and embeds past another profile's entry", async () => {
+    // Given an embedded Episode and an unembedded one, and a ledger - as a process loss between the vector
+    // commit and the entry's deletion, or a seeded migration, leaves it - that quarantines the embedded one
+    // under this profile and the unembedded one under another profile.
+    state.mode = "ok";
+    const embedded = await episode("ledger-stale");
+    expect(await engine.drainEmbeddingOutbox(100)).toMatchObject({ drained: 1 });
+    const unembedded = await episode("ledger-foreign");
+    const profileId = embeddingProfileId(profile), otherProfile = "f".repeat(64);
+    const quarantine = (episodeId: string, profile_id: string) => ({
+      profile_id, state: "quarantined", deferrals: 0, retry_after: null,
+      attempts: [{
+        operation_id: uuidv7(), episode_id: episodeId, profile_id,
+        model: profile.model, model_incarnation: profile.model_incarnation, dimensions: profile.dimensions,
+        input_revision: "a".repeat(64), input_digest: "b".repeat(64), created_at: state.now, completed_at: state.now,
+        state: "quarantined", reason: "provider_rejected", detail: null,
+      }],
+    });
+    const episodes = { [embedded]: quarantine(embedded, profileId), [unembedded]: quarantine(unembedded, otherProfile) };
+    const staleOperation = episodes[embedded]!.attempts[0]!.operation_id;
+    const seededPath = join(root, "seeded-embedding-state.json");
+    await writeFile(seededPath, JSON.stringify({ version: 1, episodes }));
+    const seeded = new Engine({ uri, user, password, objectsRoot: root, embeddingLedgerPath: seededPath,
+      embeddingProvider: provider, clock: () => state.now });
+    try {
+      await seeded.init();
+      expect(await seeded.embeddingStatus(staleOperation, context)).toMatchObject({ state: "quarantined", episode_id: embedded });
+
+      // When the engine holding that ledger drains once.
+      const result = await seeded.drainEmbeddingOutbox(100);
+
+      // Then the other profile's entry did not hide its Episode, the stale entry is gone without a provider
+      // call for its Episode, and the stale operation id is no longer reported.
+      expect(result).toMatchObject({ drained: 1, quarantined: 0, deferred: 0 });
+      const vectors = await query<{ id: string }>(
+        "MATCH (v:EmbeddingVector {profile_id:$profile}) WHERE v.episode_id IN [$a,$b] RETURN v.episode_id AS id ORDER BY id",
+        { profile: profileId, a: embedded, b: unembedded });
+      expect(vectors.map(row => row.id)).toEqual([embedded, unembedded].sort());
+      expect(JSON.parse(await readFile(seededPath, "utf8"))).toEqual({ version: 1, episodes: {} });
+      expect(await seeded.embeddingStatus(staleOperation, context)).toEqual({ state: "unknown", operation_id: staleOperation });
+    } finally {
+      await seeded.close();
+    }
   });
 });

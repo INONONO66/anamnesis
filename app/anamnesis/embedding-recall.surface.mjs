@@ -132,18 +132,28 @@ try {
   assert.equal(recovered.state, 'succeeded'); assert.equal(recovered.input_revision, a.revision_key);
   assert.equal(recovered.input_digest, (await query('MATCH (e:Episode {id:$id}) RETURN e.digest AS digest', { id: a.id }))[0].digest);
   assert.equal((await ledger())[a.id], undefined, 'a success deletes the ledger entry');
-  await client.request('embedding.recover', { episode_id: b.id, operation_id: uuid() });
+  // A provider answer that fails validation quarantines the still unembedded b and writes no vector.
   const validVectors = await query('MATCH (v:EmbeddingVector) RETURN properties(v) AS p ORDER BY v.key');
+  const recordedForB = ((await ledger())[b.id]?.attempts ?? []).length;
   for (const [failure, reason] of [['dimension','invalid_vector'], ['norm','invalid_vector'], ['model','profile_mismatch'], ['incarnation','profile_mismatch']]) {
     mode = failure;
-    const attempt = await client.request('embedding.recover', { episode_id: a.id, operation_id: uuid() });
+    const attempt = await client.request('embedding.recover', { episode_id: b.id, operation_id: uuid() });
     assert.equal(attempt.state, 'quarantined'); assert.equal(attempt.reason, reason);
     assert.deepEqual(await query('MATCH (v:EmbeddingVector) RETURN properties(v) AS p ORDER BY v.key'), validVectors);
   }
+  assert.equal((await ledger())[b.id].attempts.length, recordedForB + 4);
+  mode = 'ok';
+  await client.request('embedding.recover', { episode_id: b.id, operation_id: uuid() });
+  assert.equal((await ledger())[b.id], undefined);
+  // An embedded Episode answers every later recover, under any id, with the attempt that wrote its vector:
+  // the provider is not asked again, so a provider fault cannot even be reported for it.
+  mode = 'dimension'; const settled = calls;
+  const again = await client.request('embedding.recover', { episode_id: a.id, operation_id: uuid() });
+  assert.equal(again.state, 'succeeded'); assert.equal(again.operation_id, recovered.operation_id); assert.equal(calls, settled);
+  mode = 'ok';
   // a's success deleted its ledger entry, so the vector is now the only record of an operation on a; reusing its
   // operation id for another Episode still conflicts.
   await assert.rejects(client.request('embedding.recover', { episode_id: b.id, operation_id: recovered.operation_id }), { code: 'idempotency_conflict' });
-  mode = 'ok';
   const request = { query: 'needle', session: { source: root, session: 'small' }, limit: 2, budget: { unit: 'utf8_bytes', limit: 65536 } };
   const hybrid = await client.request('recall', request);
   assert.deepEqual(hybrid.results.map(item => item.id), [a.id, b.id]);
@@ -213,9 +223,16 @@ try {
   assert.ok(Buffer.byteLength(JSON.stringify(oversized)) < 1048576);
   for (const item of oversized.results) assert.equal(item.content.length, 63006);
   // An in-flight attempt is never persisted: kill at the exact HTTP request event, restart, and the operation is
-  // unknown until the same operation ID is resumed.
-  const pendingRequest = { episode_id: b.id, operation_id: uuid() }; mode = 'hold';
-  const requested = providerRequest('document: unrelated original');
+  // unknown until the same operation ID is resumed. The Episode is a fresh one the lane has already quarantined:
+  // an embedded Episode is never sent to the provider again, so only an unembedded one has an in-flight attempt.
+  let pendingId; const pendingKnown = new Promise(resolve => { pendingId = resolve; });
+  const pendingSettled = idleWhen(async () => (await ledger())[await pendingKnown]?.state === 'quarantined');
+  const pendingAsked = providerRequest('document: pending original');
+  const p = await remember('p', 'pending original', 'small');
+  pendingId(p.id);
+  await pendingAsked; await pendingSettled;
+  const pendingRequest = { episode_id: p.id, operation_id: uuid() }; mode = 'hold';
+  const requested = providerRequest('document: pending original');
   const pendingReply = client.request('embedding.recover', pendingRequest).catch(error => error);
   await requested;
   assert.ok(!(await ledgerAttempts()).some(item => item.operation_id === pendingRequest.operation_id));
@@ -224,7 +241,8 @@ try {
   mode = 'ok'; await start();
   assert.deepEqual(await client.request('embedding.status', { operation_id: pendingRequest.operation_id }), { state: 'unknown', operation_id: pendingRequest.operation_id });
   assert.equal((await client.request('embedding.recover', pendingRequest)).state, 'succeeded');
-  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: b.id }))[0].n, 1);
+  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: p.id }))[0].n, 1);
+  assert.equal((await ledger())[p.id], undefined, 'the resumed success deletes the quarantine entry');
   // The status of a vector-backed operation is synthesized from its EmbeddingVector and still honors the policy.
   await assert.rejects(client.request('embedding.status', { operation_id: recovered.operation_id }), { code: 'policy_denied' });
   // a's first failure was dropped from the ledger by its later success; no attempt row survives in the graph.
