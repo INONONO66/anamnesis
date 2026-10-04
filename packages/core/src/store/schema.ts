@@ -69,6 +69,7 @@ export const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT materialization_operation_id IF NOT EXISTS FOR (a:MaterializationOperation) REQUIRE a.id IS UNIQUE`,
   `CREATE CONSTRAINT materialization_occurrence IF NOT EXISTS FOR (a:MaterializationOperation) REQUIRE a.occurrence_key IS UNIQUE`,
   `CREATE INDEX fact_generation_id IF NOT EXISTS FOR (f:Fact) ON (f.generation,f.id)`,
+  `CREATE CONSTRAINT fact_identity IF NOT EXISTS FOR (f:Fact) REQUIRE (f.generation,f.meaning_digest,f.primary_episode_id) IS UNIQUE`,
   `CREATE INDEX entity_generation_key IF NOT EXISTS FOR (e:Entity) ON (e.generation,e.entity_key)`,
   `CREATE CONSTRAINT extraction_coverage_key IF NOT EXISTS FOR (c:ExtractionCoverage) REQUIRE c.key IS UNIQUE`,
   `CREATE INDEX invalidates_seek IF NOT EXISTS

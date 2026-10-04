@@ -20,7 +20,8 @@ const generation = () => ({ id: uuid(), stream: 'extraction', incarnation, state
 async function setup() {
   const root = await mkdtemp('/tmp/g004-life-');
   let now = 100;
-  const engine = new Engine({ ...options, objectsRoot: root, extractionJournalPath: root + '/extraction-state.json', clock: () => now });
+  const engine = new Engine({ ...options, objectsRoot: root, extractionJournalPath: root + '/extraction-state.json',
+    materializationStatePath: root + '/materialization-state.json', clock: () => now });
   const driver = neo4j.driver(options.uri, neo4j.auth.basic('neo4j', options.password), { disableLosslessIntegers: true });
   const query = async (cypher, params = {}) => (await driver.executeQuery(cypher, params)).records.map(r => r.toObject());
   await query('MATCH (n) DETACH DELETE n');
@@ -127,7 +128,8 @@ test('task CAS fences concurrent acquisition, expiry, cancellation, worker loss 
     await assert.rejects(f.store.retryModelTask({ task_id: task.id, expected_version: cancelled.version }, context), /invalid_transition/);
     const other = await queued(f, await f.source()); const lost = await acquire(f, other.task);
     await assert.rejects(f.store.settleModelTask({ task_id: lost.id, expected_version: lost.version, lease_epoch: lost.lease.epoch, reason: 'worker_lost' }, context), /worker_still_owned/);
-    const replacement = new Engine({ ...options, objectsRoot: f.root, extractionJournalPath: f.root + '/extraction-state.json', clock: () => 110 });
+    const replacement = new Engine({ ...options, objectsRoot: f.root, extractionJournalPath: f.root + '/extraction-state.json',
+      materializationStatePath: f.root + '/materialization-state.json', clock: () => 110 });
     try {
       await replacement.claimWriterEpoch();
       await assert.rejects(f.store.recordExtractionAttempt(completion(lost), context), /stale_writer_epoch/);
@@ -215,10 +217,10 @@ test('caught-up empty coverage activates without creating derived records', asyn
     const indexes = await f.query('SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state', { names: ['conducting_arc_source_link','conducting_arc_coverage','extraction_coverage_key','extraction_generation_id','meta_key','fact_generation_id','entity_generation_key'] });
     assert.equal(indexes.length, 7); assert.ok(indexes.every(index => index.state === 'ONLINE'));
     assert.deepEqual(await f.query('MATCH (f:Element:Fact) OPTIONAL MATCH (w:EntityWitness) OPTIONAL MATCH ()-[i:INVALIDATES]->() RETURN count(DISTINCT f) AS facts,count(DISTINCT w) AS witnesses,count(DISTINCT i) AS invalidations'), [{ facts: 0, witnesses: 0, invalidations: 0 }]);
-    assert.deepEqual(await f.query('MATCH (o:MaterializationOperation) RETURN count(o) AS count'), [{ count: 0 }]);
+    assert.deepEqual(await f.store.materializationState.list(), []);
     const active = await f.engine.cutoverExtractionGeneration({generation_id:g.id,expected_generation_id:null,expected_selector_version:0},context);
     assert.equal(active.state,'active');
-    assert.deepEqual(await f.query('MATCH (o:MaterializationOperation) RETURN count(o) AS count'),[{count:0}]);
+    assert.deepEqual(await f.store.materializationState.list(), []);
     console.log(JSON.stringify({checkpoint:'empty-coverage-activation',generation_id:active.id}));
   } finally { await f.close(); }
 });

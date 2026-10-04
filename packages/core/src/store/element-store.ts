@@ -269,7 +269,7 @@ export class ElementStore {
     tx: ManagedTransaction,
     el: MemoryElement,
     payload: { hash: string; size: number; mediaType: string } | null,
-    opts: { previous?: string },
+    opts: { previous?: string; existingFact?: boolean },
     revision?: ElementRevision,
   ): Promise<void> {
     if (payload) {
@@ -282,7 +282,8 @@ export class ElementStore {
     const isEpisode = celestialOf(el.schema) === "Episode";
     const time = carriesTime(el.schema) ? el.time ?? null : null;
     await tx.run(
-      `CREATE (e:${labelClause(el.schema)} {
+      `${opts.existingFact ? "MATCH (e:Fact {id:$id}) SET e:Element" : `CREATE (e:${labelClause(el.schema)})`}
+       SET e += {
          id: $id, schema: $schema,
          time_value: $timeValue, time_utc: $timeUtc,
          time_precision: $timePrecision,
@@ -297,7 +298,7 @@ export class ElementStore {
          source_revision: $sourceRevision, revision_key: $revisionKey,
          previous_revision_key: $previousRevisionKey,
          ingest_seq: null, ingested_at: $ingestedAt
-       })`,
+       }`,
       {
         originKey: originKey(el.origin),
         sessionKey: isEpisode ? sessionKey(el.origin) : null,

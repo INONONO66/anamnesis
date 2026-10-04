@@ -137,7 +137,7 @@ export class ExtractionStore {
   async extractionHeadTx(tx: ManagedTransaction, sourceId: string): Promise<string> {
     const rows = await tx.run(`MATCH (e:Element:Episode {id:$id}) MATCH (head:Episode {origin_key:e.origin_key})
       USING INDEX head:Episode(origin_key, ingest_seq) WHERE head.ingest_seq IS NOT NULL
-      RETURN head.revision_key AS head ORDER BY head.ingest_seq DESC LIMIT 1`, {id:sourceId});
+      WITH head ORDER BY head.ingest_seq DESC LIMIT 1 RETURN head.revision_key AS head`, {id:sourceId});
     return receiptHash.parse(rows.records[0]?.get('head'));
   }
   private async extractionClaimContextTx(tx: ManagedTransaction, id: string): Promise<ExtractionClaimContext> {

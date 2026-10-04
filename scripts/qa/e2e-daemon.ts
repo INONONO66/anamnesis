@@ -19,6 +19,7 @@ import { RpcRememberParams, type RpcStatusResult } from "../../packages/protocol
 import { maskSecrets } from "../../packages/backfill/src/secrets.ts";
 import { loadProviderConfig } from "../../app/anamnesis/config.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
+import { MaterializationState } from "../../packages/core/src/store/materialization-state.ts";
 
 const execute = promisify(execFile);
 const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
@@ -318,12 +319,22 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     const quarantined = Object.values(ledger.episodes).filter(entry => entry.state === "quarantined").length;
     summary.vectors = vectors; summary.embedding = { vectors, quarantined, lane: final.workers.embedding };
     assert.equal(vectors, count, "vectors_not_equal_episodes");
-    // Relation links are the relation judge's verdicts: CONTRASTS/INVALIDATES Fact->Fact links plus duplicate custody operations
-    // (a "duplicate" verdict suppresses the Fact and leaves a content-free MaterializationOperation keyed duplicate:<occurrence>).
+    // Relation links are the relation judge's verdicts: CONTRASTS/INVALIDATES Fact->Fact links plus duplicate custody entries.
     const byType = Object.fromEntries((await driver.executeQuery("MATCH (:Fact)-[l]->(:Fact) RETURN type(l) AS type, count(l) AS n")).records.map(row => [String(row.get("type")), Number(row.get("n"))]));
     const contrasts = byType["CONTRASTS"] ?? 0, invalidates = byType["INVALIDATES"] ?? 0;
-    const duplicates = await countQuery("MATCH (o:MaterializationOperation) WHERE o.occurrence_key STARTS WITH 'duplicate:' RETURN count(o) AS count");
-    const refused = await countQuery("MATCH (o:MaterializationOperation) WHERE o.occurrence_key STARTS WITH 'refused:' RETURN count(o) AS count");
+    const operations = await new MaterializationState(join(root, "materialization-state.json")).list();
+    // Covered sources have already had custody pruned; relation verdicts retain the duplicate decision.
+    const duplicateKeys = new Set(operations.filter(([, entry]) => entry.occurrence_key.startsWith("duplicate:") && entry.fact_ids.length === 0
+      && "duplicate_of" in entry.result).map(([, entry]) => entry.occurrence_key.slice("duplicate:".length)));
+    const verdicts = await driver.executeQuery("MATCH (v:FactRelationVerdict) RETURN v.occurrence_key AS key,v.judgements AS judgements");
+    for (const row of verdicts.records) {
+      const judgements: unknown = JSON.parse(String(row.get("judgements")));
+      if (Array.isArray(judgements) && judgements.some(value => value !== null && typeof value === "object" && "relation" in value && value.relation === "duplicate"))
+        duplicateKeys.add(String(row.get("key")));
+    }
+    const duplicates = duplicateKeys.size;
+    const refused = operations.filter(([, entry]) => entry.occurrence_key.startsWith("refused:") && entry.fact_ids.length === 0
+      && "refused" in entry.result).length;
     summary.relation_links = { contrasts, invalidates, duplicates, total: contrasts + invalidates + duplicates, fact_links_by_type: byType, refused_claims: refused };
     summary.extraction_lane = { completed_total: extraction.completed_total, failed_total: extraction.failed_total, last_error: extraction.last_error };
     summary.workers = { status: final.workers, idle_events: idleEvents, trail_tail: trail.slice(-8) };
