@@ -49,7 +49,7 @@ derived layer, no PPR.
 | security | 0700/0600 modes, UDS capability token, length-prefixed frame and global resource caps, bolt on 127.0.0.1 only, per-install random password | 02 §10 |
 | spool | fsync-before-ack, `.done` after commit, drain, retention, cold-start wait | 02 §4, §9 |
 | provenance | authenticated `origin_role` / `lineage_mode`, `EchoLineage` control row written in the Episode transaction, bounded parent receipts, roots and depth, `unknown` lineage never presumed independent | 01 §3.3, D49 |
-| embedding | `embed_episode` Outbox worker, bounded batches, three-part embedding identity (`embedding_model_id`, `vector_index_id`, `embedding_profile_id`), per-entry state machine with bounded retry, terminal-prefix coverage, authenticated retry/skip/cancel and append-only resolution records | 01 §4, 02 §3, D51 |
+| embedding | `embed_episode` worker driven by a missing-vector scan (Episodes with no `EmbeddingVector` for the active profile) with attempt/quarantine state in the `embedding-state.json` ledger, bounded batches, three-part embedding identity (`embedding_model_id`, `vector_index_id`, `embedding_profile_id`), per-entry state machine with bounded retry, terminal-prefix coverage, and authenticated operator control through `embedding.recover`, `embedding.requeue` and `embedding.status` (D54) | 01 §4, 02 §3, D51, D54 |
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
@@ -91,13 +91,15 @@ reading):
   roots and depth match its parents, overflow past 16 roots or depth 8 sets
   `complete=false` and `unknown`, and an echoed claim leaves `S`, `m`, utility
   and ranking bit-identical to the no-echo case.
-- embedding failure: a deterministic failure (`context_overflow`,
-  `wrong_dimension`, `malformed_response`, `client_error`) blocks the head
-  immediately, a lost worker lease closes its attempt `worker_lost`, three transient failures block
-  it after the fixed `[1000, 10000]` ms delays, the coverage cursor does not
-  move past the hole, and no later entry publishes a vector across it; an
-  authenticated retry or skip is the only way forward and each writes its
-  resolution record.
+- embedding failure (D54): a deterministic failure (`provider_rejected`,
+  `input_too_large`, `profile_mismatch`, `invalid_vector`, `stale_input`)
+  quarantines the Episode on its first attempt with one terminal record in
+  `embedding-state.json`; a transient failure defers with bounded backoff and
+  the ninth in a row quarantines as `provider_unavailable_exhausted`; a
+  quarantined Episode is never re-sent by the drain, and an authenticated
+  `embedding.recover` or `embedding.requeue` is the only way forward. The
+  generation-scoped head/cursor rule (`worker_lost`, terminal-prefix
+  coverage) is the design in 01 §4 and applies once that lane ships.
 
 ## v0.2 — derived layer, time, local PPR
 

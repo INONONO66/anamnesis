@@ -69,9 +69,8 @@ test('claim-only pipeline cannot advance audit coverage; decisions are atomic wi
   await assert.rejects(advance('active_extraction'),/extraction_audit_incomplete/);
   const result=await f.run(task);await advance('active_extraction');await advance('episodes');
   assert.equal((await f.store.getExtractionGeneration(f.g.id,context)).covered_ingest_seq,1);
-  const outbox=await f.query('MATCH (o:Outbox) RETURN o.processed_at AS processed');assert.ok(outbox.every(o=>o.processed===null));
   await assert.rejects(f.store.cutoverExtractionGeneration({generation_id:f.g.id,expected_generation_id:null,expected_selector_version:0},context),{code:'activation_prerequisite_unavailable'});
-  audit('audit-only-coverage',{result,outbox});
+  audit('audit-only-coverage',{result});
  }finally{await f.close();}
 });
 

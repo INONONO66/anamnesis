@@ -98,7 +98,7 @@ test("a concurrent epoch claim cannot overtake a validated write or consume stal
     const counts = await store.counts();
     armed = true;
     writing = store.putElement({ ...input, id: uuidv7(), schema: "anamnesis.original-message/1",
-      origin: { ...input.origin, record: tag } }, { enqueue: true });
+      origin: { ...input.origin, record: tag } });
     await validated;
     const transactions = await admin.executeQuery(
       `SHOW TRANSACTIONS YIELD metaData, activeLockCount
@@ -124,7 +124,7 @@ test("a concurrent epoch claim cannot overtake a validated write or consume stal
     expect(locks).toBeGreaterThan(readLocks);
     expect(await store.counts()).toEqual({ ...counts, elements: counts.elements + 1, pending: counts.pending + 1 });
     await expect(store.putElement({ ...input, id: uuidv7(), schema: "anamnesis.original-message/1",
-      origin: { ...input.origin, record: `${tag}-stale` } }, { enqueue: true })).rejects.toThrow("stale_writer_epoch");
+      origin: { ...input.origin, record: `${tag}-stale` } })).rejects.toThrow("stale_writer_epoch");
     expect(await sequence()).toBe(after);
     expect(await store.counts()).toEqual({ ...counts, elements: counts.elements + 1, pending: counts.pending + 1 });
   } finally {
@@ -170,8 +170,6 @@ test("all claimed mutation paths reject stale epochs while legacy callers remain
       () => oldEngine.remember(input),
       () => oldEngine.put({ ...input, id: uuidv7(), schema: "anamnesis.claim/1" }),
       () => oldEngine.link({ id: uuidv7(), from: saved.id, to: uuidv7(), role: "NEXT_EPISODE", content: "fenced" }),
-      () => oldEngine.store.markProcessed([saved.id]),
-      () => oldEngine.requeueEpisodes(),
       () => oldEngine.store.rebuildTopology(),
     ];
     for (const mutate of mutations) {

@@ -152,10 +152,8 @@ test("built Node Slack snapshots: real UDS commit, revision identity, payload, l
       expect(properties).toEqual(p.episode.properties);
       expect(await client.request("ingest.status", identity(p, status.data_incarnation))).toMatchObject({ state: "committed", id: row.id, ingest_seq: row.ingest_seq });
     }
-    const effects = (await driver.executeQuery("MATCH (e:Episode {origin_source:'slack'}) OPTIONAL MATCH (o:Outbox {element_id:e.id}) WITH e, count(o) AS effects RETURN e.id AS id, effects ORDER BY e.ingest_seq")).records.map(r => r.toObject());
-    expect(effects).toEqual(rows.map(e => ({ id: e.id, effects: 1 })));
     expect((await client.request("status", {})).outbox_pending).toBe(4);
-    await record("acceptance.json", { cursor, params, replies, rows, effects, payload: { hash: hash(payload), bytes: payload.length }, requests: observe.requests.map(r => ({ method: r.method, ...(r.method === "object.chunk" ? { seq: r.params.seq } : { params: r.params }) })) });
+    await record("acceptance.json", { cursor, params, replies, rows, payload: { hash: hash(payload), bytes: payload.length }, requests: observe.requests.map(r => ({ method: r.method, ...(r.method === "object.chunk" ? { seq: r.params.seq } : { params: r.params }) })) });
 
     // Modify the producer-sealed file only after the gate observes real COMMIT,
     // then release the reply. The cursor must not acknowledge the changed source.

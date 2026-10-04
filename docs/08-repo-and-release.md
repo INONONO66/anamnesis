@@ -71,7 +71,7 @@ records: EchoLineage;
          AdjudicationConsumption, AdjudicationCorrection,
          AdjudicationCorrectionMap;
          TranslationMapping;
-         EmbeddingCoverage, EmbeddingWork, EmbeddingAttempt,
+         EmbeddingCoverage, EmbeddingWork,
          EmbeddingResolution, EmbeddingQualification, EmbeddingBuild,
          EmbeddingBuildSource
 RPCs:    adjudication.review, adjudication.correct, embedding.retry,

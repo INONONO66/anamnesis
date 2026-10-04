@@ -112,8 +112,8 @@ export type RpcRecallParams = z.infer<typeof RpcRecallParams>;
 export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), episode_id: z.uuidv7() });
 export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams>;
 export const RpcEmbeddingStatusParams = z.strictObject({ operation_id: z.uuidv7() });
-/** provider_unavailable is transient: the attempt is `deferred` and the Episode stays queued until the outbox's
- * retry budget is spent, which quarantines it as provider_unavailable_exhausted. Every other reason quarantines at once. */
+/** provider_unavailable is transient: the ledger defers the Episode until its retry
+ * budget is spent, then quarantines it as provider_unavailable_exhausted. Every other reason quarantines at once. */
 const RpcEmbeddingAttemptReason = z.enum(["provider_unavailable", "provider_unavailable_exhausted", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "stale_input"]);
 export const RpcEmbeddingAttempt = z.strictObject({
   operation_id: z.uuidv7(), episode_id: z.uuidv7(), profile_id: RpcHash,

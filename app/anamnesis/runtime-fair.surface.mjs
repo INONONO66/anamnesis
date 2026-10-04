@@ -84,11 +84,11 @@ async function recover(client) {
   await settled; return client.request('status', {});
 }
 async function verifyRows(source, receipts) {
-  const result = await driver.executeQuery('MATCH (e:Episode {origin_source:$source}) OPTIONAL MATCH (o:Outbox {element_id:e.id}) RETURN e.revision_key AS revision, e.id AS id, e.ingest_seq AS sequence, count(o) AS outbox', { source });
+  const result = await driver.executeQuery('MATCH (e:Episode {origin_source:$source}) RETURN e.revision_key AS revision, e.id AS id, e.ingest_seq AS sequence', { source });
   const rows = result.records.map(row => row.toObject()); assert.equal(rows.length, receipts.length);
   assert.deepEqual(rows.map(row => row.revision).sort(), receipts.map(row => row.revision_key).sort());
   assert.equal(new Set(rows.map(row => row.id)).size, receipts.length); assert.equal(new Set(rows.map(row => row.sequence)).size, receipts.length);
-  for (const row of rows) assert.equal(row.outbox, 1); return rows;
+  return rows;
 }
 try {
   await newRoot(); attempted = true;
@@ -150,7 +150,7 @@ try {
   await assert.rejects(client.request('remember', input('chain', 'bad', key(parent))), { code: 'stale_revision' });
   const absent = await driver.executeQuery('MATCH (e:Episode) WHERE e.revision_key IN $keys RETURN count(e) AS count', { keys: blocked.map(([receipt]) => receipt.revision_key) }); assert.equal(absent.records[0].get('count'), 0);
   await record('page-result.json', { initial, boundary, heldDone, interleaved, status, blocked, verified, rows: await verifyRows('fair-page', success), done });
-  await stop(client); await record('result.json', { ok: true, exact50: true, crossPage: true, serializedControlBeforeCohort: true, shutdownRestart: true, exactIdentitiesOutboxCAS: true });
+  await stop(client); await record('result.json', { ok: true, exact50: true, crossPage: true, serializedControlBeforeCohort: true, shutdownRestart: true, exactIdentitiesCAS: true });
 } catch (error) { failure = error; await record('result.json', { ok: false, error: String(error), stack: error.stack }); }
 finally {
   const cleanup = [];

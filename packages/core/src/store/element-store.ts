@@ -272,7 +272,7 @@ export class ElementStore {
     tx: ManagedTransaction,
     el: MemoryElement,
     payload: { hash: string; size: number; mediaType: string } | null,
-    opts: { enqueue?: boolean; previous?: string },
+    opts: { previous?: string },
     revision?: ElementRevision,
   ): Promise<void> {
     if (payload) {
@@ -325,14 +325,6 @@ export class ElementStore {
         `MATCH (e:Element:Episode { id: $id }), (p:Payload { hash: $hash })
          MERGE (e)-[:HAS_PAYLOAD]->(p)`,
         { id: el.id, hash: payload.hash },
-      );
-    }
-    if (opts.enqueue) {
-      await tx.run(
-        `MATCH (e:Element { id: $id })
-         CREATE (o:Outbox { element_id: $id, enqueued_at: $now,
-                            processed_at: null })-[:OF]->(e)`,
-        { id: el.id, now: new Date().toISOString() },
       );
     }
   }

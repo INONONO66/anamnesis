@@ -84,7 +84,9 @@ spread across three physical DBs, making deployment heavy, and its ontology
 validation line runs opposite to our natural-language minimalism.
 
 **Memobase — an operational pattern borrowed.** Its buffer → flush cold-path
-batching is the prototype of our Outbox consumption.
+batching is the prototype of our extraction Outbox consumption; the embedding
+lane instead rediscovers work by scanning for Episodes that lack a vector for
+the active profile.
 
 ## Where anamnesis is positioned
 

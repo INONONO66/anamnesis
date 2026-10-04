@@ -8,6 +8,7 @@ import { type ElementProperties, type ElementNode, nodeProps, StoredHash, decode
 import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ElementStore } from "./element-store.ts";
+import { embeddingProfileId } from "../embedding.ts";
 
 export interface IntegrityIssue {
   elementId: string;
@@ -131,6 +132,10 @@ export class IntegrityStore {
     links: number;
     pending: number;
   }> {
+    const profile = this.core.embeddingProvider ? embeddingProfileId(this.core.embeddingProvider.profile) : null;
+    const quarantined = (await this.core.embeddingLedger.list())
+      .filter(([, entry]) => entry.state === "quarantined" && (profile === null || entry.profile_id === profile))
+      .map(([id]) => id);
     const rows = await this.core.run<{
       elements: number;
       links: number;
@@ -138,9 +143,15 @@ export class IntegrityStore {
     }>(
       `CALL () { MATCH (e:Element) RETURN count(e) AS elements }
        CALL () { MATCH (:Element)-[l]->(:Element) RETURN count(l) AS links }
-       CALL () { MATCH (o:Outbox) WHERE o.processed_at IS NULL
-                 RETURN count(o) AS pending }
+       CALL () { MATCH (e:Element:Episode)
+                 WHERE NOT e.id IN $quarantined
+                   AND NOT EXISTS {
+                     MATCH (v:EmbeddingVector {episode_id:e.id})
+                     WHERE $profile IS NULL OR v.profile_id=$profile
+                   }
+                 RETURN count(e) AS pending }
        RETURN elements, links, pending`,
+      { profile, quarantined },
     );
     const r = rows[0]!;
     return {

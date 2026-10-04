@@ -254,7 +254,7 @@ describe.serial("Engine storage lifecycle", () => {
     const indexes = [
       "element_time",
       "element_schema",
-      "outbox_pending",
+      "embedding_vector_episode_profile",
       "invalidates_seek",
       "element_content",
     ];
@@ -338,7 +338,7 @@ describe.serial("Engine storage lifecycle", () => {
     await store.close();
   });
 
-  test.serial("remember, digest, and recall round trip", async () => {
+  test.serial("remember and recall round trip", async () => {
     const later = await engine.remember(
       msg("m1", "Ino prefers dark mode", "2026-08-21T14:00:00+09:00"),
     );
@@ -349,85 +349,9 @@ describe.serial("Engine storage lifecycle", () => {
     expect(await nextEpisodeProps(later.id, earlier.id)).toEqual({});
     expect((await engine.status()).pendingOutbox).toBe(2);
 
-    const processed = await engine.digest(async (episode, store) => {
-      const claim = await store.putElement({
-        id: uuidv7(),
-        schema: "anamnesis.claim/1",
-        time: episode.time,
-        content: `[claim] ${episode.content}`,
-        origin: {
-          ...episode.origin,
-          actor: "extractor",
-          record: `claim:${episode.origin.record}`,
-        },
-      });
-      await store.putLink({
-        id: uuidv7(),
-        from: claim.id,
-        to: episode.id,
-        role: "DERIVED_FROM",
-        content: "This claim was extracted from the source message",
-      });
-    }, 1);
-    expect(processed).toBe(2);
-    expect(await engine.status()).toMatchObject({
-      elements: 4,
-      links: 3,
-      pendingOutbox: 0,
-    });
-
     const hits = await engine.recall("dark mode", { at: AFTER_FIXTURES });
     expect(hits.length).toBeGreaterThanOrEqual(1);
     expect(hits[0]!.element.content).toContain("dark mode");
-  });
-
-  test.serial("digest skips an outbox entry whose element was removed", async () => {
-    const removed = await engine.remember(
-      msg("removed-1", "Removed episode", "2026-08-22T12:45:00+09:00"),
-    );
-    await runAdmin("MATCH (e:Element { id: $id }) DETACH DELETE e", {
-      id: removed.id,
-    });
-    let handled = 0;
-
-    expect(
-      await engine.digest(() => {
-        handled += 1;
-      }),
-    ).toBe(1);
-    expect(handled).toBe(0);
-  });
-
-  test.serial("requeueEpisodes uses the original-message schema by default", async () => {
-    await engine.remember(
-      msg("requeue-default", "Default requeue", "2026-08-22T12:50:00+09:00"),
-    );
-    await engine.digest(() => {});
-    const requeued = await engine.requeueEpisodes();
-    expect(requeued).toBeGreaterThan(0);
-    expect(await engine.digest(() => {})).toBe(requeued);
-  });
-
-  test.serial("requeueEpisodes makes processed episodes available to digest again", async () => {
-    const schema = "anamnesis.requeue-test/1";
-    await engine.remember({
-      ...msg(
-        "requeue-1",
-        "Episode to process twice",
-        "2026-08-22T13:00:00+09:00",
-      ),
-      schema,
-    });
-    const processedIds: string[] = [];
-    const handler = (episode: { id: string }) => {
-      processedIds.push(episode.id);
-    };
-
-    expect(await engine.digest(handler)).toBe(1);
-    expect(await engine.requeueEpisodes(schema)).toBe(1);
-    expect(await engine.digest(handler)).toBe(1);
-    expect(processedIds).toHaveLength(2);
-    expect(processedIds[1]).toBe(processedIds[0]);
   });
 
   test.serial("NEXT_EPISODE links episodes in event-time order", async () => {

@@ -348,24 +348,8 @@ export class Engine {
       sourceRevision: sourceRevision ?? element.origin.record,
       ...(expectedPreviousRevisionKey !== undefined ? { expectedPreviousRevisionKey } : {}),
       ...(previous ? { previous } : {}),
-      enqueue: true,
       ...(admission ? { admission } : {}),
     });
-  }
-
-  /** Failed handlers leave their whole fetched batch pending for retry. */
-  async digest(
-    handler: (episode: MemoryElement, store: Store) => Promise<void> | void,
-    batchSize = 200,
-  ): Promise<number> {
-    const batch = await this.store.pending(batchSize);
-    if (batch.length === 0) return 0;
-    for (const id of batch) {
-      const episode = await this.store.getElement(id);
-      if (episode) await handler(episode, this.store);
-    }
-    await this.store.markProcessed(batch);
-    return batch.length + (await this.digest(handler, batchSize));
   }
 
   async recall(
@@ -385,13 +369,6 @@ export class Engine {
 
   async link(link: MemoryLinkInput): Promise<MemoryLink> {
     return this.store.putLink(link);
-  }
-
-  /** Re-extraction rewinds only the mutable cursor, never memory data. */
-  async requeueEpisodes(
-    schema: string = SCHEMA_ID.ORIGINAL_MESSAGE,
-  ): Promise<number> {
-    return this.store.requeue(schema);
   }
 
   async verify(): Promise<IntegrityIssue[]> {

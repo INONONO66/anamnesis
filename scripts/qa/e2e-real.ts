@@ -69,7 +69,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     "ops extract is capability admission only; extraction uses Engine after ops down.",
     "verify/status RPC has no Episode/Fact/generation counters; committed ingest receipts and read-only owned-DB snapshots supplement verify health.",
     "Attempt 4 was cleaned before a recall probe could run; its second response was not recorded. Queries now use full Fact text and top-20 results; ranking code was not changed without evidence.",
-    "Original-message Outbox completion uses Engine.digest only after coverage and cutover accept every successful outcome or terminal omission.",
+    "Pipeline outcomes are checked after coverage and cutover: every pipeline ends in a successful outcome or terminal omission.",
   ];
   const llmMinIntervalMs = Number(process.env.ANAMNESIS_QA_LLM_MIN_INTERVAL_MS ?? "3000");
   const pacer = createLlmPacer(llmMinIntervalMs);
@@ -232,7 +232,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     // Engine's environment loader requires a password even with explicit options.
     process.env.ANAMNESIS_NEO4J_PASSWORD = password;
     delete process.env.ANAMNESIS_EMBEDDING_CONFIG; delete process.env.ANAMNESIS_EXTRACTION_CONFIG;
-    engine = new Engine({ uri: env.ANAMNESIS_NEO4J_URI, user: "neo4j", password, objectsRoot: join(root, "objects"), extractionProvider: provider, ...(embeddingProvider ? { embeddingProvider } : {}) });
+    engine = new Engine({ uri: env.ANAMNESIS_NEO4J_URI, user: "neo4j", password, objectsRoot: join(root, "objects"), extractionProvider: provider, embeddingLedgerPath: join(root, "embedding-state.json"), ...(embeddingProvider ? { embeddingProvider } : {}) });
     // Pacing must precede lease acquisition, not consume the task's 30s lease.
     // runExtractionPipeline dispatches both claim and judge through this method.
     const runTask = engine.runExtractionTask.bind(engine);
@@ -281,7 +281,10 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
       let drainedTotal = 0;
       for (;;) { const step = await engine.drainEmbeddingOutbox(1000); drainedTotal += step.drained; if (step.drained === 0) break; }
       const vectors = Number((await driver.executeQuery("MATCH (v:EmbeddingVector) RETURN count(v) AS count")).records[0]!.get("count"));
-      const quarantined = Number((await driver.executeQuery("MATCH (a:EmbeddingAttempt {state:'quarantined'}) RETURN count(a) AS count")).records[0]!.get("count"));
+      // Attempt state lives in the embedding ledger file, not the graph; no file means no failed attempt was recorded.
+      const ledger = await readFile(join(root, "embedding-state.json"), "utf8").then(text => JSON.parse(text) as { episodes: Record<string, { state: string }> },
+        (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return { episodes: {} }; throw error; });
+      const quarantined = Object.values(ledger.episodes).filter(entry => entry.state === "quarantined").length;
       durations.embedding_ms = Date.now() - embedStart;
       summary.vectors = vectors; summary.embedding_drain = { pending_before: pendingBefore, drained: drainedTotal, vectors, quarantined };
       await log("embedding_drain", summary.embedding_drain);
@@ -292,18 +295,15 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     summary.stage = "cutover";
     await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context);
     const active = await snapshot(); summary.facts_active = active.facts_active; assert.ok(Number(active.facts_active) >= 50);
-    // Acknowledge the original-message queue only after Store coverage/cutover
-    // has accepted each outcome. This is distinct from the disabled vector queue.
-    summary.stage = "outbox_drain";
-    const activeEngine = engine, outboxBefore = (await engine.status()).pendingOutbox;
-    const drained = await activeEngine.digest(async episode => {
-      const taskId = pipelines.get(episode.id); assert.ok(taskId);
-      const pipeline = await activeEngine.store.readExtractionPipeline(taskId, context);
+    // Store coverage/cutover accepted each outcome: every pipeline is a success or a terminal omission.
+    summary.stage = "pipeline_outcomes";
+    for (const taskId of pipelines.values()) {
+      const pipeline = await engine.store.readExtractionPipeline(taskId, context);
       assert.equal(pipeline.state, "known"); if (pipeline.state !== "known") throw new Error("pipeline_unknown");
       assert.ok(["failed", "cancelled"].includes(pipeline.claim.state) || (pipeline.claim.state === "succeeded" && pipeline.judge && ["succeeded", "failed", "cancelled"].includes(pipeline.judge.state)));
-    });
-    assert.equal(drained, outboxBefore); assert.equal((await engine.status()).pendingOutbox, 0);
-    summary.outbox_drain = { before: outboxBefore, drained, after: 0 }; await log("outbox_drain", summary.outbox_drain);
+    }
+    // pendingOutbox counts Episodes lacking a vector: zero after the embedding drain, every Episode when embeddings are disabled.
+    assert.equal((await engine.status()).pendingOutbox, embeddingProvider ? 0 : count);
     durations.extraction_ms = Date.now() - extractStart;
     const facts = await driver.executeQuery("MATCH (f:Fact {generation:$generation}) RETURN f.content AS content ORDER BY f.id LIMIT 64", { generation: generation.id });
     const queries = [...new Set(facts.records.map(row => String(row.get("content"))))].slice(0, 5);
@@ -358,7 +358,8 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
       assert.equal(settled_status.spool.blocked, 0); assert.equal(settled_status.spool.quarantined, 0);
     } finally { await client.close(); }
     const afterVerify = await verify(), after = await snapshot(); assert.deepEqual(after, before);
-    assert.equal(beforeVerify.status.outbox_pending, 0); assert.equal(afterVerify.status.outbox_pending, 0);
+    const vectorless = embeddingEnabled ? 0 : Number(after.episodes);
+    assert.equal(beforeVerify.status.outbox_pending, vectorless); assert.equal(afterVerify.status.outbox_pending, vectorless);
     summary.crash_drain = { before, after, equal: true, before_verify: beforeVerify, after_verify: afterVerify, wake_status, settled_status, settle_latency_ms, replay: "existing delivery idempotently spooled and drained", refused_code: "storage_unavailable" };
     summary.status = "passed"; summary.stage = "complete"; summary.reported_model = provider.reportedModelIncarnation;
   } catch (error) {

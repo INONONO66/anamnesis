@@ -312,7 +312,10 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     assert.equal(active.generation_id, extraction.generation_id, "selector_generation_mismatch");
     assert.ok(Number(active.facts_active) >= 50, "facts_active_below_50");
     const vectors = await countQuery("MATCH (v:EmbeddingVector) RETURN count(v) AS count");
-    const quarantined = await countQuery("MATCH (a:EmbeddingAttempt {state:'quarantined'}) RETURN count(a) AS count");
+    // Attempt state lives in the daemon's embedding ledger file under the runtime root, not the graph.
+    const ledger = await readFile(join(root, "embedding-state.json"), "utf8").then(text => JSON.parse(text) as { episodes: Record<string, { state: string }> },
+      (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return { episodes: {} }; throw error; });
+    const quarantined = Object.values(ledger.episodes).filter(entry => entry.state === "quarantined").length;
     summary.vectors = vectors; summary.embedding = { vectors, quarantined, lane: final.workers.embedding };
     assert.equal(vectors, count, "vectors_not_equal_episodes");
     // Relation links are the relation judge's verdicts: CONTRASTS/INVALIDATES Fact->Fact links plus duplicate custody operations

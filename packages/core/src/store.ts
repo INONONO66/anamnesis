@@ -233,17 +233,12 @@ export class Store {
     return this.elements.getPayload(hash);
   }
 
-  /** One explicit retry operation per Episode. Reusing a completed operation is
-   * a no-op; retry a quarantined or deferred attempt with a new operation ID. Pending
-   * rows can resume after process loss. Provider work never runs in a retried DB tx.
-   * An operator-driven recover never exhausts: transient failures always defer. A terminal
-   * outcome retires the Episode's queued outbox entry, so the worker has nothing left to do. */
+  /** Explicit operator retry; an unfinished operation is rediscovered from its missing vector. */
   recoverEmbedding(input: RpcEmbeddingRecoverParams, context: InstallationContext): Promise<RpcEmbeddingAttempt> {
     return this.embeddings.recoverEmbedding(input, context);
   }
 
-  /** Returns quarantined Episodes of the configured profile to the outbox as fresh entries (retry budget reset);
-   * their attempt rows stay for audit. Episodes that already hold a vector or an unprocessed entry are skipped. */
+  /** Remove quarantines so eligible Episodes are rediscovered by the vector scan. */
   requeueQuarantinedEmbeddings(input: RpcEmbeddingRequeueParams, context: InstallationContext): Promise<RpcEmbeddingRequeueResult> {
     return this.embeddings.requeueQuarantinedEmbeddings(input, context);
   }
@@ -292,24 +287,9 @@ export class Store {
     return this.elements.isValidAt(id, at);
   }
 
-  pending(limit?: number): Promise<string[]> {
-    return this.embeddings.pending(limit);
-  }
-
-  /** A transient provider failure defers the entry: it stays in the outbox with exponential backoff and a per-entry
-   * budget of EMBEDDING_MAX_DEFERRALS; the transient failure after that quarantines it as provider_unavailable_exhausted.
-   * Deterministic failures quarantine at once. Retries happen on later passes, never in a loop of their own.
-   * A terminal attempt retires its entry itself (see attemptEmbedding). */
+  /** Drain missing vectors and due deferrals within a bounded batch. */
   drainEmbeddingOutbox(limit?: number, context?: InstallationContext): Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
     return this.embeddings.drainEmbeddingOutbox(limit, context);
-  }
-
-  markProcessed(elementIds: string[]): Promise<void> {
-    return this.embeddings.markProcessed(elementIds);
-  }
-
-  requeue(schema: string): Promise<number> {
-    return this.embeddings.requeue(schema);
   }
 
   verify(): Promise<IntegrityIssue[]> {

@@ -43,13 +43,13 @@ test("digest then full-content top-20 recall preserves the fence and includes ma
     expect(await engine.drainEmbeddingOutbox(1000)).toEqual({ drained: 0, reason: "embeddings_disabled" });
     const selection = await engine.readExtractionSelection(context);
     await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context);
+    // No provider: every Episode still lacks a vector.
     expect((await engine.status()).pendingOutbox).toBe(20);
-    expect(await engine.digest(async episode => {
-      const pipeline = await engine.store.readExtractionPipeline(pipelines.get(episode.id)!, context);
+    for (const task_id of pipelines.values()) {
+      const pipeline = await engine.store.readExtractionPipeline(task_id, context);
       if (pipeline.state !== "known") throw new Error("pipeline_unknown");
       expect(pipeline.claim.state).toBe("succeeded"); expect(pipeline.judge?.state).toBe("succeeded");
-    })).toBe(20);
-    expect((await engine.status()).pendingOutbox).toBe(0);
+    }
     const rows = await driver.executeQuery("MATCH (f:Fact)-[:DERIVED_FROM]->(e:Episode) RETURN f.id AS id,f.content AS content,e.id AS source ORDER BY f.id");
     const visible = rows.records.filter(row => row.get("source") === sources[0]).map(row => String(row.get("id")));
     const hidden = String(rows.records.find(row => row.get("source") === sources[1])!.get("id"));

@@ -13,7 +13,9 @@ permits a different kind of write.
              rebuild's explicit old/new target mappings; originals alone do not suffice (§4)
              Fact · Entity · Community · derived links · embedding
   caches     SET allowed. Can be dropped and regenerated at any time
-             hit/utility cache · active policy · EntityWitness · session topology · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · Outbox · OriginHead · selectors
+             hit/utility cache · active policy · EntityWitness · session topology · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · OriginHead · selectors
+             (embedding attempt/quarantine state is not a graph layer at all; it lives in the
+             regenerable `embedding-state.json` ledger beside the runtime root, §4)
   control    append-only RecallReceipt impressions and feedback acceptance records;
              durable until explicit receipt retention expiry, not semantic Episodes
              append-only InvalidationEvidence metadata, retained while its
@@ -959,12 +961,18 @@ with `generation=0` only for `episode`. `EmbeddingWork` is unique by
 (`Episode=0`, `Fact=1`, `Entity=2`, `RELATES_TO=3`, sentinel `=4`), and stores
 `source_id?`, `input_digest`, state, `attempts_in_cycle`, `attempts_total`,
 `retry_cycle` and `next_retry_at`. `input_digest` is SHA-256 of the exact
-UTF-8 string presented as that endpoint input before JSON escaping. Each
-immutable `EmbeddingAttempt {attempt_id, embedding_model_id, stream,
-generation, ingest_seq, item_ordinal, source_id?, input_digest,
-attempt_ordinal, started_at, finished_at, outcome, error_code, error_digest}`
-carries no source text; `attempt_id` is SHA-256 of the canonical work key plus
-`attempt_ordinal`. Outcome is `succeeded | no_vector_required |
+UTF-8 string presented as that endpoint input before JSON escaping. Attempt
+records are not graph nodes. In the shipped v0.1 lane each failed attempt is
+an `RpcEmbeddingAttempt` (`operation_id`, `episode_id`, `profile_id`,
+`input_revision`, `input_digest`, model identity, timestamps, `state`,
+`reason`, bounded `detail`) appended to the Episode's entry in the embedding
+ledger (`embedding-state.json`, D54), keyed by Episode and carrying no source
+text; the work-item shape below is the design for the generation-scoped lane.
+Each immutable attempt `{attempt_id, embedding_model_id, stream, generation,
+ingest_seq, item_ordinal, source_id?, input_digest, attempt_ordinal,
+started_at, finished_at, outcome, error_code, error_digest}` is appended to
+that item's ledger entry; `attempt_id` is SHA-256 of the canonical work key
+plus `attempt_ordinal`. Outcome is `succeeded | no_vector_required |
 transient_failure | permanent_failure | worker_lost | cancelled`, and error
 code is one of `unavailable | timeout | rate_limited | server_error |
 invalid_input | context_overflow | zero_norm | nonfinite | wrong_dimension |
@@ -1031,13 +1039,17 @@ RPCs; there is no skip, cancel or free-form resolution record in v0.1.
   Episode under a fresh UUIDv7 operation. Reusing a completed operation is a
   no-op; a quarantined or deferred attempt is retried with a new operation ID.
   Provider work never runs inside the retried transaction, an operator retry
-  never exhausts (transient failure defers again), and a terminal outcome
-  retires the Episode's queued outbox entry. It cannot alter source text or
-  profile identity.
-- `embedding.requeue {limit<=1000, reasons?}` returns quarantined Episodes
-  (optionally filtered by attempt reason) to the outbox and wakes the lane at
-  once, which also retries any deferred entry whose backoff has elapsed.
-- `embedding.status {operation_id}` reports one operation's attempt.
+  never exhausts (transient failure defers again), and a successful outcome
+  deletes the Episode's ledger entry while a quarantine marks it. It cannot
+  alter source text or profile identity.
+- `embedding.requeue {limit<=1000, reasons?}` deletes quarantined ledger
+  entries of the active profile (optionally filtered by the latest attempt's
+  reason) so the missing-vector scan finds those Episodes again, and wakes
+  the lane at once, which also retries any deferred entry whose backoff has
+  elapsed. Calling it again with nothing left returns `{requeued: 0}`.
+- `embedding.status {operation_id}` reports one operation's attempt, from the
+  ledger or synthesized from the `EmbeddingVector` that carries that
+  `operation_id`.
 
 Input transformation, meaning a larger context, deterministic chunking, a
 changed prefix, tokenizer or pooling, or a corrected artifact, requires a
@@ -1332,7 +1344,7 @@ unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_
           · Outbox(stage, target_generation, ingest_seq, model_key)
           · EmbeddingCoverage(stream, generation, embedding_model_id)
           · EmbeddingWork(embedding_model_id, stream, generation, ingest_seq, item_ordinal)
-          · EmbeddingAttempt.attempt_id · EmbeddingResolution.operation_id
+          · EmbeddingResolution.operation_id
           · EmbeddingQualification.qualification_id
           · EmbeddingBuild.embedding_profile_id
           · EmbeddingBuildSource(embedding_model_id, stream, generation)
@@ -1341,6 +1353,7 @@ range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Elemen
           composite Episode(session_key, time_utc, ingest_seq)
           composite Fact(generation, primary_episode_id, time_utc, id)
           composite HubArc(hub_id, rank) · Outbox.processed_at
+          composite EmbeddingVector(episode_id, profile_id) (missing-vector discovery, §4)
           composite ConductingArc(source_id, link_id)
           composite Fact-INVALIDATES(target_id, generation, effective_time_utc, id)
           composite Episode-INVALIDATES(target_id, effective_time_utc, id)

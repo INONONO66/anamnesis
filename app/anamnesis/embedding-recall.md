@@ -38,36 +38,60 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
 ## RPC and durability
 
 - `embedding.recover {operation_id, episode_id}` processes one original Episode
-  with the configured profile. Input revision/digest and pending status commit
-  before the provider call. Completion persists `succeeded`, `quarantined` or
-  `deferred`. Only `provider_unavailable` (timeout, 5xx, refused socket) defers;
-  every other reason quarantines. The row's `detail` names the failing branch
-  (`http 503`, `timeout 30000ms`, a socket code, `8193 bytes > 8192`).
-- Reusing a completed operation is a durable no-op. Retry a quarantined or
-  deferred attempt with a new operation ID; reuse a pending ID after process
-  interruption.
-- A terminal outcome (`succeeded` or `quarantined`) retires the Episode's
-  queued outbox entry in the same transaction, whether the daemon's embedding
-  lane or an explicit `embedding.recover` produced it: an explicit quarantine
-  leaves nothing for the worker and the Episode is eligible for requeue. A
-  deferral leaves the entry, and its retry budget, untouched.
-- The outbox drain keeps a deferred Episode queued with exponential backoff
+  with the configured profile. Input revision/digest are checked before the
+  provider call; nothing "pending" is written down. Completion records
+  `succeeded`, `quarantined` or `deferred`. Only `provider_unavailable`
+  (timeout, 408/425/429/5xx, dead socket) defers; every other reason
+  quarantines on the first attempt. The attempt's `detail` names the failing
+  branch (`http 503`, `timeout 30000ms`, a socket code, `8193 bytes > 8192`).
+- Attempt and quarantine state lives in `embedding-state.json` under the
+  runtime root, not in Neo4j. Neo4j holds the Episode and, once it exists,
+  the `EmbeddingVector`. An Episode needs embedding when it has no vector for
+  the configured profile; that missing-vector scan is the only work queue.
+  A ledger entry exists only while an Episode has no vector, and a success
+  deletes it, including the Episode's earlier failed attempts: those operation
+  IDs then answer `unknown` and are free to reuse. An Episode that already
+  holds the profile's vector is never sent to the provider again:
+  `embedding.recover` under any further operation ID answers with the attempt
+  that wrote the vector, the submitted ID did no work and is recorded nowhere,
+  and a lingering entry for that Episode is deleted. Every lane drain first
+  drops entries whose Episode already holds a vector (a process lost between
+  the vector commit and the entry's deletion, or a seeded ledger), and only
+  the configured profile's entries hide an Episode from the scan: another
+  profile's entry is superseded by the first attempt under this one. A process
+  interrupted mid-attempt leaves no trace; the scan finds the Episode again.
+- Reusing a completed operation ID is a no-op that returns the recorded
+  attempt, or one synthesized from the vector that carries that
+  `operation_id`. The same ID bound to a different Episode or profile is an
+  `idempotency_conflict`. Retry a quarantined or deferred attempt with a new
+  operation ID.
+- An explicit quarantine from `embedding.recover` and one from the daemon's
+  lane are the same ledger state: the worker skips the Episode and it's
+  eligible for requeue. A deferral keeps the entry and its retry budget.
+- The lane drain defers a transiently failing Episode with exponential backoff
   (30 s doubling, capped at 1 h) for at most 8 deferrals; the next transient
-  failure quarantines it as `provider_unavailable_exhausted`. Never-deferred
-  entries are served before retries.
-- `embedding.requeue {limit?, reasons?}` returns quarantined Episodes of the
-  configured profile to the outbox as fresh entries (budget reset, earlier
-  attempt rows kept for audit), skipping Episodes that already hold a vector or
-  a queued entry, and wakes the embedding lane. `anamnesis-ops embed-requeue
-  [--limit N]` is the operator entry point.
-- `embedding.status {operation_id}` returns durable attempt state. Status and
+  failure quarantines it as `provider_unavailable_exhausted`. An operator
+  `embedding.recover` never exhausts: a transient failure defers again.
+  Episodes with no ledger entry are served before deferred ones whose backoff
+  has elapsed.
+- `embedding.requeue {limit?, reasons?}` deletes quarantined ledger entries
+  of the configured profile (filtered by the latest attempt's reason when
+  `reasons` is given, ordered by Episode ID, up to `limit`) so the
+  missing-vector scan discovers those Episodes again, then wakes the lane.
+  Entries whose Episode already holds a vector are dropped without being
+  counted; a second call with nothing left returns `{requeued: 0}`.
+  `anamnesis-ops embed-requeue [--limit N]` is the operator entry point.
+- `embedding.status {operation_id}` answers from the ledger when some entry
+  holds that attempt; otherwise it looks up the `EmbeddingVector` with that
+  `operation_id` and synthesizes a `succeeded` attempt (model, incarnation,
+  dimensions and timestamps from the vector); otherwise `unknown`. Status and
   recovery revalidate current Episode/source policy. A denied Episode does not
   become visible through its status record.
 - Model/dimension/norm mismatch is quarantined. The first valid vector for an
   immutable Episode/profile is preserved. Different profiles have separate
   digest-named Neo4j vector indexes and cannot overwrite one another.
-- Recovery is explicit and bounded, not an automatic ingestion worker or an
-  outbox/spool consumer. It does not claim contiguous embedding coverage.
+- Recovery is explicit and bounded, not an automatic ingestion worker or a
+  spool consumer. It does not claim contiguous embedding coverage.
 
 `recall {query, session?: {source,session}, T?, limit?, budget?}` uses at most
 one exact Episode-ID identity hit, 64 fulltext hits, 64 vector hits, and the

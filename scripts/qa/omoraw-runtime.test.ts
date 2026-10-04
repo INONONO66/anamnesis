@@ -47,8 +47,6 @@ for (const failAfterIngest of [false, true]) test(`OMO raw private Node daemon/o
         const rows = (await driver.executeQuery("MATCH (e:Episode {origin_source:'omo'}) RETURN e.origin_record AS record,e.origin_session AS session,e.content AS content,e.source_revision AS revision,e.ingest_seq AS seq ORDER BY e.ingest_seq")).records.map(r => r.toObject());
         expect(rows).toHaveLength(2);
         expect(rows.map(r => r.record)).toEqual(["native-a", "native-c"]);
-        const effects = (await driver.executeQuery("MATCH (e:Episode {origin_source:'omo'}) OPTIONAL MATCH (o:Outbox {element_id:e.id}) RETURN count(o) AS effects")).records[0]!.get("effects");
-        expect(Number(effects)).toBe(2);
         await writeFile(join(evidence, "result.json"), JSON.stringify({ ok: true, rows, checkpoint, duplicate_noop: true }, null, 2));
       } finally { await driver.close(); }
     } finally {
