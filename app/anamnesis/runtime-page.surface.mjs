@@ -87,7 +87,11 @@ try {
   blocked.push([await client.request('remember',stale),'stale_revision']);
   const settled=once(daemon.signals,'drain_settled',{signal:AbortSignal.timeout(120000)});
   targetPort=dbPort;
-  assert.equal((await client.request('status',{})).storage,'available');await settled;
+  assert.equal((await client.request('status',{})).storage,'available');
+  // Drain completion is a process event, not traffic on this connection. The
+  // daemon may enforce its idle deadline while the database drains the cohort.
+  await client.close();client=undefined;await settled;
+  client=await RpcClient.connect(root+'/anamnesis.sock',token);
   const status=await client.request('status',{});assert.equal(status.storage,'available');assert.equal(status.spool.pending,108);assert.equal(status.spool.blocked,8);
   for(const [receipt,reason] of blocked)assert.equal((await client.request('ingest.status',identity(receipt))).reason,reason);
   const committedChild=await client.request('ingest.status',identity(childReceipt));assert.equal(committedChild.state,'committed');
