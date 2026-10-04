@@ -274,9 +274,9 @@ dbTest("lineage metadata needs authenticated custody and is re-verified from the
   expect(await runtime.remember(v2, receiptContext)).toEqual({ ...committed, created: false });
   const identity = identityOf(v2, installation.incarnation);
   expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
-  await query("MATCH (l:EchoLineage {episode_id:$id}) SET l.digest = $digest", { id: committed.id, digest: "f".repeat(64) });
+  await query("MATCH (e:Episode {id:$id}) SET e.context_digests = [$digest]", { id: committed.id, digest: "f".repeat(64) });
   await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_mismatch" });
-  await query("MATCH (l:EchoLineage {episode_id:$id}) DETACH DELETE l", { id: committed.id });
+  await query("MATCH (e:Episode {id:$id}) REMOVE e.lineage_mode", { id: committed.id });
   await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_unavailable" });
 });
 

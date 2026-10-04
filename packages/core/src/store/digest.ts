@@ -110,6 +110,20 @@ export function verifyLineageRetry(input: unknown, role: string | null, lineage:
     throw new StorageContractError("revision_conflict", lineage.episode_id);
 }
 
+/** Decode the original Episode's lineage, including Episodes that have no Facts.
+ * The v2 Episode digest binds lineage_digest; no second graph record is authority. */
+export function verifyEpisodeLineage(episodeId: string, digest: string | null, props: Record<string, unknown>): EchoLineage {
+  if (props["lineage_mode"] == null) throw new EpisodeLineageError("lineage_unavailable");
+  const parsed = EchoLineage.safeParse({
+    episode_id: episodeId, lineage_mode: props["lineage_mode"], parent_recall_ids: props["parent_recall_ids"],
+    context_digests: props["context_digests"], root_episode_ids: props["root_episode_ids"],
+    echo_depth: props["echo_depth"], complete: props["lineage_complete"],
+  });
+  if (!parsed.success || props["lineage_digest"] !== digest || sha256(canonicalExtractionBody(parsed.data)) !== digest)
+    throw new EpisodeLineageError("lineage_mismatch");
+  return parsed.data;
+}
+
 export function tupleHash(parts: readonly string[]): string {
   return sha256(JSON.stringify(parts));
 }

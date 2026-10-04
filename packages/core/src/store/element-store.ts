@@ -2,7 +2,7 @@ import neo4j, { type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { LINK_LATTICE, MemoryElement, MemoryLink, type MemoryElementInput, type MemoryLinkInput, type LinkRole, type TimePoint } from "@anamnesis/protocol";
 import { EchoLineage, EpisodeLineageError, parseEpisodeLineage, type EpisodeLineageInput } from "@anamnesis/protocol";
-import { canonicalExtractionBody, extractionBodyDigest } from "@anamnesis/protocol";
+import { extractionBodyDigest } from "@anamnesis/protocol";
 import { type TopologyRow, TOPOLOGY_QUERY, topologyExpectations } from "./conducting.ts";
 import { CONDUCTING_ROLES, celestialOf, carriesTime, labelClause, toUtc } from "./schema.ts";
 import { sha256, END_OF_TIME, CANONICAL_DIGEST, StorageContractError, elementDigest, verifyLineageRetry, tupleHash, originKey, sessionKey, linkIdemKey } from "./digest.ts";
@@ -158,9 +158,12 @@ export class ElementStore {
           digest: elementDigest(el, { payloadHash, previousRevisionKey,
             ...(metadata ? { format: "episode-rfc8785-v2", episodeDigestVersion: 2, originRole: metadata.origin_role, lineageDigest } : {}) }),
         });
-        if (lineage) await tx.run(`CREATE (l:EchoLineage $props)`, {
-          props: { ...lineage, body: canonicalExtractionBody(lineage), digest: lineageDigest },
-        });
+        if (lineage) {
+          const { episode_id, complete, ...properties } = lineage;
+          await tx.run(`MATCH (e:Episode {id:$id}) SET e += $props`, {
+            id: episode_id, props: { ...properties, lineage_complete: complete },
+          });
+        }
         if (previousId) {
           await this.mergeLinkTx(tx, {
             id: uuidv7(),

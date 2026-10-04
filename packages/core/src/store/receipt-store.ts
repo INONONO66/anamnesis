@@ -9,7 +9,7 @@ import { z } from "zod";
 import { attributeOutcome } from "../dynamics/ranking.ts";
 import { canonicalContext } from "../recall.ts";
 import { receiptBodyDigestInput, canonicalReceiptJson } from "../receipt-digest.ts";
-import { sha256, StorageContractError, canonicalJson, elementDigest, tupleHash } from "./digest.ts";
+import { sha256, StorageContractError, canonicalJson, elementDigest, tupleHash, verifyEpisodeLineage } from "./digest.ts";
 import { receiptTime, receiptHash, IssueReceiptInput, RecallReceipt, RecallTransportInput, RecallTransport, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, PolicyEvent, policyBody, type PolicyState, requireInstallation } from "./policy.ts";
 import { type CacheEvidence, CACHE_EVIDENCE, cacheExpectations, cacheMatches } from "./hit-cache.ts";
@@ -88,16 +88,11 @@ export class ReceiptStore {
       return receipt;
   }
   async lineageTx(tx: ManagedTransaction, episodeId: string, digest: string | null): Promise<EchoLineage> {
-    const rows = await tx.run<{ body: string; props: Record<string, unknown> }>(
-      `MATCH (l:EchoLineage {episode_id:$id}) RETURN l.body AS body,properties(l) AS props`, { id: episodeId });
+    const rows = await tx.run<{ props: Record<string, unknown> }>(
+      `MATCH (e:Episode {id:$id}) RETURN properties(e) AS props`, { id: episodeId });
     const row = rows.records[0];
     if (!row) throw new EpisodeLineageError("lineage_unavailable");
-    const body = row.get("body"), { body: ignored, digest: retainedDigest, ...props } = row.get("props");
-    const lineage = EchoLineage.parse(JSON.parse(body));
-    if (lineage.episode_id !== episodeId || extractionBodyDigest(lineage) !== digest || retainedDigest !== digest
-      || canonicalExtractionBody(props) !== body || canonicalExtractionBody(lineage) !== body)
-      throw new EpisodeLineageError("lineage_mismatch");
-    return lineage;
+    return verifyEpisodeLineage(episodeId, digest, row.get("props"));
   }
   private async lineageSelectionTx(tx: ManagedTransaction, ids: string[]): Promise<z.infer<typeof RecallLineageSelection>> {
     const items: z.infer<typeof RecallLineageSelection> = [];
