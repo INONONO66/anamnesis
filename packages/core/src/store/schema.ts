@@ -58,13 +58,6 @@ export const SCHEMA_STATEMENTS = [
    FOR (e:Element) ON (e.schema)`,
   // valid(T) seeks invalidators by target instead of expanding adjacency.
   `CREATE CONSTRAINT extraction_generation_id IF NOT EXISTS FOR (g:ExtractionGeneration) REQUIRE g.id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_attempt_id IF NOT EXISTS FOR (a:ExtractionAttempt) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT model_task_id IF NOT EXISTS FOR (t:ModelTask) REQUIRE t.id IS UNIQUE`,
-  `CREATE CONSTRAINT model_task_work_key IF NOT EXISTS FOR (t:ModelTask) REQUIRE t.work_key IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_pipeline_id IF NOT EXISTS FOR (p:ExtractionPipeline) REQUIRE p.id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_pipeline_judge IF NOT EXISTS FOR (p:ExtractionPipeline) REQUIRE p.judge_task_id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_judge_input_id IF NOT EXISTS FOR (p:ExtractionJudgeInput) REQUIRE p.id IS UNIQUE`,
-  `CREATE CONSTRAINT extraction_disposition_key IF NOT EXISTS FOR (d:ExtractionDisposition) REQUIRE (d.judge_attempt_id,d.claim_index) IS UNIQUE`,
   `CREATE CONSTRAINT adjudication_input_id IF NOT EXISTS FOR (a:AdjudicationInput) REQUIRE a.id IS UNIQUE`,
   `CREATE CONSTRAINT adjudication_attempt_id IF NOT EXISTS FOR (a:AdjudicationAttempt) REQUIRE a.id IS UNIQUE`,
   `CREATE CONSTRAINT adjudication_proposal_id IF NOT EXISTS FOR (a:AdjudicationProposal) REQUIRE a.id IS UNIQUE`,

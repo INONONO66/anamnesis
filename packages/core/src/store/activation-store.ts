@@ -8,7 +8,8 @@ import { GraphAccessError } from "./conducting.ts";
 import { receiptTime } from "./receipts.ts";
 import { type InstallationContext, type PolicyState, requireInstallation } from "./policy.ts";
 import type { StoreCore } from "./core.ts";
-import type { MaterializationStore } from "./materialization-store.ts";
+import { extractionEntryOmission, type MaterializationStore } from "./materialization-store.ts";
+import type { ExtractionJournalEntry } from "./extraction-journal.ts";
 import type { ExtractionStore } from "./extraction-store.ts";
 import type { ConductingStore } from "./conducting-store.ts";
 import { GenerationReadinessError } from "./extraction-store.ts";
@@ -20,21 +21,20 @@ function checkCoverageAdvance(request: AdvanceExtractionCoverage, covered: numbe
   if (request.covered_ingest_seq - covered > 256) throw new Error("coverage_batch_too_large");
 }
 
-type CoveredRow = Neo4jRecord<{ source: string; seq: number; task: string | null; attempt: string | null }>;
+type CoveredRow = Neo4jRecord<{ source: string; seq: number }>;
 
 /** The task and attempt a covered Episode row must carry: the expected sequence, a terminal task, and an attempt that is the task's own. */
-function coveredRow(row: CoveredRow, seq: number, generationId: string): { task: ModelTask; attempt: ExtractionAttempt } {
-  if (row.get("seq") !== seq || !row.get("task")) throw new Error("coverage_hole");
-  const task = ModelTask.parse(JSON.parse(row.get("task")!));
-  if (task.pipeline && (task.state === "queued" || task.state === "leased" || !row.get("attempt"))) throw new ExtractionAuditError("extraction_audit_incomplete");
-  if (!row.get("attempt")) throw new Error("coverage_hole");
-  const attempt = ExtractionAttempt.parse(JSON.parse(row.get("attempt")!));
+function coveredRow(row: CoveredRow, seq: number, generationId: string, entry: ExtractionJournalEntry | undefined): { task: ModelTask; attempt: ExtractionAttempt } {
+  if (row.get("seq") !== seq || !entry) throw new Error("coverage_hole");
+  const { claim: task, claim_attempt: attempt } = entry;
+  if (task.pipeline && (task.state === "queued" || task.state === "leased" || !attempt)) throw new ExtractionAuditError("extraction_audit_incomplete");
+  if (!attempt) throw new Error("coverage_hole");
   if (task.state === "queued" || task.state === "leased" || attempt.state !== task.state || attempt.id !== task.attempt_id
     || attempt.task_id !== task.id || attempt.source_id !== row.get("source") || attempt.source_ingest_seq !== row.get("seq") || attempt.generation_id !== generationId) throw new Error("coverage_hole");
   return { task, attempt };
 }
 
-type CoveredSource = Neo4jRecord<{ id: string; operations: number; task: string | null }>;
+type CoveredSource = Neo4jRecord<{ id: string; seq: number; operations: number }>;
 
 /** The existing access-index prerequisites must be online; this does not certify
  * nonexistent generation-scoped derived indexes or an ordered query plan. */
@@ -72,11 +72,13 @@ export class ActivationStore {
   constructor(private readonly core: StoreCore, private readonly materialization: MaterializationStore, private readonly extraction: ExtractionStore, private readonly conducting: ConductingStore) {}
 
   async readExtractionPipeline(id: string, context: InstallationContext): Promise<ExtractionPipeline> {
-    return this.core.extractionTx(context,async(tx,policy)=>{
+    const result = await this.core.extractionTx(context,async(tx,policy)=>{
       const value = await this.materialization.readExtractionPipelineTx(tx,z.uuidv7().parse(id));
       if (value.state === 'known') await this.core.authorizeEpisodesTx(tx,[value.claim.source_id],policy);
       return value;
     });
+    if (result.state === "known") await this.materialization.pruneExtractionJournal(context, { pipeline_id: id });
+    return result;
   }
   /** Only immutable failed/cancelled attempts can justify a content-free omission.
    * A lost or expired lease is unresolved work, not an extraction outcome. */
@@ -115,7 +117,7 @@ export class ActivationStore {
   async recordExtractionCoverage(input: AdvanceExtractionCoverage, context: InstallationContext): Promise<Coverage> {
     requireInstallation(context);
     const request = AdvanceExtractionCoverage.parse(input);
-    return this.core.extractionTx(context, async tx => {
+    const result = await this.core.extractionTx(context, async tx => {
       const generation = await this.core.writableExtractionGenerationTx(tx, request.generation_id);
       const key = `${generation.id}:${request.partition}`;
       const rows = await tx.run<{ body: string }>(`MATCH (c:ExtractionCoverage {key:$key}) RETURN c.body AS body`, { key });
@@ -125,16 +127,15 @@ export class ActivationStore {
       const meta = await tx.run<{ seq: number }>(`MATCH (m:Meta {key:'meta'}) RETURN m.ingest_seq AS seq`);
       const required = receiptTime.parse(meta.records[0]?.get("seq"));
       if (request.covered_ingest_seq > required) throw new Error("coverage_exceeds_required");
-      const prefix = await tx.run<{ source: string; seq: number; task: string | null; attempt: string | null }>(
+      const prefix = await tx.run<{ source: string; seq: number }>(
         `MATCH (e:Element:Episode) WHERE e.ingest_seq > $from AND e.ingest_seq <= $to
-         OPTIONAL MATCH (t:ModelTask {work_key:$generation+':'+e.id})
-         OPTIONAL MATCH (a:ExtractionAttempt {id:t.attempt_id})
-         RETURN e.id AS source,e.ingest_seq AS seq,t.body AS task,a.body AS attempt ORDER BY seq LIMIT $limit`,
+         RETURN e.id AS source,e.ingest_seq AS seq ORDER BY seq LIMIT $limit`,
         { generation: generation.id, from: covered, to: request.covered_ingest_seq, limit: neo4j.int(256) });
       if (prefix.records.length !== request.covered_ingest_seq - covered) throw new Error("coverage_hole");
       let omissionDigest = prior?.omission_digest ?? extractionBodyDigest([]);
       for (const [index, row] of prefix.records.entries()) {
-        const { task, attempt } = coveredRow(row, covered + index + 1, generation.id);
+        const { task, attempt } = coveredRow(row, covered + index + 1, generation.id,
+          await this.core.extractionJournal.byWorkKey(`${generation.id}:${row.get("source")}`));
         omissionDigest = await this.coverageOmissionTx(tx, task, attempt, omissionDigest);
       }
       const now = Math.max(generation.updated_at, prior?.updated_at ?? 0, receiptTime.parse(this.core.clock()));
@@ -148,6 +149,9 @@ export class ActivationStore {
       await tx.run(`MATCH (g:ExtractionGeneration {id:$id}) SET g.covered_ingest_seq=$covered,g.body=$body`, { id: generation.id, covered: cursor, body: canonicalExtractionBody(next) });
       return value;
     });
+    // Prune only after commit: the minimum cursor seals BOTH audit partitions.
+    await this.materialization.pruneExtractionJournal(context, { generation_id: request.generation_id });
+    return result;
   }
   private async checkExtractionSelectionTx(tx: ManagedTransaction, request: SelectExtractionGeneration): Promise<ExtractionSelection> {
     const selection = await this.extraction.extractionSelectionTx(tx);
@@ -176,8 +180,7 @@ export class ActivationStore {
     const row = meta.records[0]!, live = receiptTime.parse(row.get("seq"));
     const watermark = receiptTime.safeParse(row.get("watermark"));
     if (!watermark.success) throw new GenerationReadinessError("generation_watermark_unavailable");
-    const pending = await tx.run(`MATCH (t:ModelTask {generation_id:$id}) WHERE t.state IN ['queued','leased'] RETURN t.id LIMIT 1`, { id: target.id });
-    if (pending.records.length) throw new GenerationReadinessError("generation_work_in_flight");
+    if ((await this.core.extractionJournal.pending(target.id)).length) throw new GenerationReadinessError("generation_work_in_flight");
     if (target.covered_ingest_seq !== live || row.get("covered") !== live || watermark.data > live
       || values.some(value => value.covered_ingest_seq !== live || value.required_ingest_seq !== live)) throw new GenerationReadinessError("coverage_incomplete");
     return live;
@@ -192,15 +195,16 @@ export class ActivationStore {
     if (retained.report.truncated || retained.report.issues.length) throw new GraphAccessError("degree_probe_unavailable");
   }
   /** Every covered source carries materialization custody or an explicitly sealed omission, within the bounded custody view. */
-  private async derivedCustodyBadTx(tx: ManagedTransaction, generation: string, sources: CoveredSource[], maxDerived: number): Promise<boolean> {
+  private async derivedCustodyBadTx(tx: ManagedTransaction, target: Generation, sources: CoveredSource[], maxDerived: number): Promise<boolean> {
     const operationRows = await tx.run(`MATCH (o:MaterializationOperation {generation:$generation})
-      RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT $limit`, { generation, limit: neo4j.int(maxDerived + 1) });
+      RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
     let missing = false;
     for (const source of sources) if (source.get("operations") === 0) {
-      // Both coverage partitions above pin this terminal attempt. Retrying it
-      // is forbidden after sealing, so no fabricated materialization is needed.
-      const task = source.get("task");
-      if (!task || !this.extractionPipelineOmission(await this.materialization.readExtractionPipelineTx(tx, task))) missing = true;
+      const entry = await this.core.extractionJournal.byWorkKey(`${target.id}:${source.get("id")}`);
+      // Readiness invariant: sealing admits only terminal pipelines and success
+      // writes custody in that transaction. A pruned covered source without
+      // custody therefore denotes a sealed omission, not missing work.
+      if (entry ? !extractionEntryOmission(entry) : source.get("seq") > target.covered_ingest_seq) missing = true;
     }
     const overflow = sources.length > 256 || operationRows.records.length > maxDerived;
     const malformed = operationRows.records.some(row => typeof row.get("source") !== "string" || typeof row.get("fact") !== "string" || typeof row.get("link") !== "string");
@@ -213,14 +217,13 @@ export class ActivationStore {
    * derived link and entity witness must be in order, and the selected
    * embedding profile must cover every source. Returns the unmet prerequisites. */
   private async activationCausesTx(tx: ManagedTransaction, target: Generation, policy: PolicyState, live: number): Promise<string[]> {
-    const sources = await tx.run<{ id: string; operations: number; task: string | null }>(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
+    const sources = await tx.run<{ id: string; seq: number; operations: number }>(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
       OPTIONAL MATCH (o:MaterializationOperation {generation:$generation,source_episode_id:e.id})
-      OPTIONAL MATCH (t:ModelTask {work_key:$generation+':'+e.id})
-      RETURN e.id AS id,count(o) AS operations,t.id AS task LIMIT 257`, { seq: live, generation: target.id });
+      RETURN e.id AS id,e.ingest_seq AS seq,count(o) AS operations LIMIT 257`, { seq: live, generation: target.id });
     // The source partition is bounded at 256, but each source can retain up to
     // 64 claims. Derived custody rows use their own bounded overflow sentinel.
     const maxDerived = 256 * 64;
-    const custodyBad = await this.derivedCustodyBadTx(tx, target.id, sources.records, maxDerived);
+    const custodyBad = await this.derivedCustodyBadTx(tx, target, sources.records, maxDerived);
     const linkBad = await derivedLinksBadTx(tx, target.id, maxDerived);
     const witnessBad = await entityWitnessesBadTx(tx, target.id, policy.policy_revision, maxDerived);
     const embeddingCoverageBad = this.core.embeddingProvider ? await embeddingCoverageBadTx(tx, embeddingProfileId(this.core.embeddingProvider.profile), sources.records) : false;

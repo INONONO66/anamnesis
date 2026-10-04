@@ -2,7 +2,7 @@ import { isEpisodeSchema } from "@anamnesis/protocol";
 import neo4j, { Driver, type ManagedTransaction, type RecordShape } from "neo4j-driver";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Generation } from "@anamnesis/protocol";
+import { Generation, type ModelTask, type ExtractionAttempt, type ExtractionJudgeInput } from "@anamnesis/protocol";
 import { ObjectStore } from "../objects.ts";
 import { z } from "zod";
 import { type EmbeddingProvider } from "../embedding.ts";
@@ -12,6 +12,7 @@ import { receiptTime, RecallReceipt, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, PolicyEvent, policySelector, policyBody, type PolicyState, requireInstallation } from "./policy.ts";
 import { type QueryParameters, recordsToObjects } from "./records.ts";
 import { EmbeddingLedger } from "./embedding-ledger.ts";
+import { ExtractionJournal } from "./extraction-journal.ts";
 
 export interface StoreOptions {
   uri: string;
@@ -23,6 +24,8 @@ export interface StoreOptions {
   clock?: () => number;
   embeddingProvider?: EmbeddingProvider;
   embeddingLedgerPath?: string;
+  extractionJournalPath?: string;
+  audit?: (event: string, fields: Record<string, unknown>) => void;
   tokenizers?: Tokenizers;
   recallDefaultBytes?: number;
   /** Trusted runtime injection only; never loaded from an RPC or arbitrary command. */
@@ -68,6 +71,8 @@ export class StoreCore {
   readonly clock: () => number;
   readonly embeddingProvider: EmbeddingProvider | undefined;
   readonly embeddingLedger: EmbeddingLedger;
+  readonly extractionJournal: ExtractionJournal;
+  readonly audit: (event: string, fields: Record<string, unknown>) => void;
   readonly tokenizers: Tokenizers;
   readonly recallDefaultBytes: number;
   readonly relationJudge: boolean;
@@ -76,6 +81,8 @@ export class StoreCore {
     this.relationJudge = opts.relationJudge ?? false;
     this.embeddingProvider = opts.embeddingProvider;
     this.embeddingLedger = new EmbeddingLedger(opts.embeddingLedgerPath);
+    this.extractionJournal = new ExtractionJournal(opts.extractionJournalPath);
+    this.audit = opts.audit ?? (() => {});
     this.tokenizers = opts.tokenizers ?? new Map();
     this.recallDefaultBytes = z.number().int().min(0).max(1024 * 1024).parse(opts.recallDefaultBytes ?? 65536);
     this.driver =
@@ -192,10 +199,27 @@ export class StoreCore {
     if (this.writerEpoch === undefined) throw new Error("writer_epoch_required");
     return this.withWriteTx(async tx => work(tx, await this.receiptLockTx(tx)));
   }
-  async extractionRecordTx<T>(tx: ManagedTransaction, label: "ExtractionGeneration" | "ExtractionAttempt" | "ModelTask" | "ExtractionJudgeInput", id: string, schema: z.ZodType<T>): Promise<T> {
+  async extractionRecordTx<T>(tx: ManagedTransaction, label: "ExtractionGeneration", id: string, schema: z.ZodType<T>): Promise<T> {
     const rows = await tx.run<{ body: string }>(`MATCH (n:${label} {id:$id}) RETURN n.body AS body`, { id });
     if (!rows.records[0]) throw new Error(`unknown_${label}`);
     return schema.parse(JSON.parse(rows.records[0].get("body")));
+  }
+  async extractionTask(id: string): Promise<ModelTask> {
+    const entry = await this.extractionJournal.byTask(id);
+    const task = entry?.claim.id === id ? entry.claim : entry?.judge;
+    if (!task) throw new Error("unknown_ModelTask");
+    return task;
+  }
+  async extractionAttempt(id: string): Promise<ExtractionAttempt> {
+    const entry = await this.extractionJournal.byAttempt(id);
+    const attempt = entry?.attempts.find(attempt => attempt.id === id);
+    if (!attempt) throw new Error("unknown_ExtractionAttempt");
+    return attempt;
+  }
+  async extractionJudgeInput(id: string): Promise<ExtractionJudgeInput> {
+    const premise = (await this.extractionJournal.byAttempt(id))?.judge_input;
+    if (!premise || premise.attempt_id !== id) throw new Error("unknown_ExtractionJudgeInput");
+    return premise;
   }
   async writableExtractionGenerationTx(tx: ManagedTransaction, id: string): Promise<Generation> {
     const generation = await this.extractionRecordTx(tx, "ExtractionGeneration", id, Generation);

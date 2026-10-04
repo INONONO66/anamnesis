@@ -23,6 +23,7 @@ import { RECOVERY_PROBE_MS, RecoveryProbe, nodeTimers } from "./recovery-probe.t
 import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { fencedAdapter, manifestTemplate, objectInventory } from "./runtime-authority.ts";
+import { logEvent } from "./log.ts";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: false, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -134,7 +135,8 @@ export class Runtime {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
     // Attempt/quarantine state is an operational ledger beside the spool, never graph rows; Neo4j holds only memory.
-    this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json") });
+    this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json"),
+      extractionJournalPath: join(installation.root, "extraction-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });

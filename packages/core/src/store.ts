@@ -67,6 +67,10 @@ export class Store {
     return this.core.database;
   }
 
+  get extractionJournal() {
+    return this.core.extractionJournal;
+  }
+
   claimWriterEpoch(): Promise<number> {
     return this.core.claimWriterEpoch();
   }
@@ -318,6 +322,10 @@ export class Store {
 
   getExtractionTask(id: string, context: InstallationContext): Promise<ModelTask> {
     return this.extraction.getExtractionTask(id, context);
+  }
+
+  getExtractionTaskByWorkKey(workKey: string, context: InstallationContext): Promise<ModelTask | null> {
+    return this.extraction.getExtractionTaskByWorkKey(workKey, context);
   }
 
   getExtractionAttempt(id: string, context: InstallationContext): Promise<ExtractionAttempt> {

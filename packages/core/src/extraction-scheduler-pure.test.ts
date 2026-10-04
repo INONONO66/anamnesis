@@ -79,6 +79,12 @@ class Harness {
       },
       store: {
         getExtractionGeneration: async id => { record(`generation:${id}`); const found = this.generations.get(id); if (!found) throw new Error("unknown generation"); return found; },
+        getExtractionTaskByWorkKey: async workKey => {
+          const episode = this.episodes.find(e => `${GEN}:${e.id}` === workKey);
+          if (!episode?.task) return null;
+          const pipeline = this.pipelines.get(episode.task.id);
+          return pipeline?.state === "known" ? pipeline.claim : episode.task;
+        },
         createExtractionGeneration: async input => { record(`createGeneration:${input.state}:${input.created_at}`); this.generations.set(input.id, input); return input; },
         recordExtractionCoverage: async input => {
           record(`cover:${input.partition}:${input.expected_covered_ingest_seq}->${input.covered_ingest_seq}`);
@@ -133,8 +139,8 @@ class Harness {
     else {
       const from = Number(params.from);
       rows = this.episodes.filter(e => e.seq > from && e.seq <= this.live).sort((a, b) => a.seq - b.seq).slice(0, WINDOW)
-        .map(e => ({ live: this.live, id: e.id, seq: e.seq, task: e.task ? JSON.stringify(e.task) : null }));
-      if (rows.length === 0) rows = [{ live: this.live, id: null, seq: null, task: null }];
+        .map(e => ({ live: this.live, id: e.id, seq: e.seq }));
+      if (rows.length === 0) rows = [{ live: this.live, id: null, seq: null }];
     }
     // The daemon's reader is generic over the row shape; the scripted rows carry exactly the columns each query names.
     return rows as Row[];
