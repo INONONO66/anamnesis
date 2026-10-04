@@ -47,9 +47,10 @@ test("persisted receipt projections retain exact bytes across serialization, not
 
 test("embedding recovery and hybrid recall have real core and wire entry points", () => {
   expect(typeof Reflect.get(Store.prototype, "recoverEmbedding")).toBe("function");
-  expect(typeof Reflect.get(Store.prototype, "recall")).toBe("function");
-  expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 1, method: "recall", params: { query: "A\né🙂", budget: { unit: "unicode_scalars", limit: 8 } } }).success).toBe(true);
+  expect(typeof Reflect.get(Store.prototype, "embeddingStatus")).toBe("function");
   expect(typeof Reflect.get(Store.prototype, "requeueQuarantinedEmbeddings")).toBe("function");
+  expect(typeof Reflect.get(Store.prototype, "drainEmbeddingOutbox")).toBe("function");
+  expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 1, method: "recall", params: { query: "A\né🙂", budget: { unit: "unicode_scalars", limit: 8 } } }).success).toBe(true);
   expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 2, method: "embedding.requeue", params: { limit: 5, reasons: ["provider_unavailable_exhausted"] } }).success).toBe(true);
   expect(RpcRequest.safeParse({ jsonrpc: "2.0", id: 3, method: "embedding.requeue", params: { limit: 0 } }).success).toBe(false);
 });

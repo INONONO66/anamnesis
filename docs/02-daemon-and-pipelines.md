@@ -93,7 +93,8 @@ A single integer on `(:Meta {key: 'meta', structure_revision})`.
 
 **Not incremented on:** Hit or RecallReceipt CREATE, policy control Episode
 CREATE (uses `policy_revision`), hit/utility-cache / `m_cache` / shortlist SET,
-hidden-generation embedding backfill, Outbox cursor,
+hidden-generation embedding backfill, extraction Outbox cursor, embedding
+ledger (`embedding-state.json`) writes,
 BUILDING/CATCHING_UP generation writes, or
 GC of hidden RETIRED generations. These do not change the *serving structure*
 recall sees, so recall's consistency check must not trip on them. The
@@ -183,7 +184,7 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `embedding.retry {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Move the exact BLOCKED head back to PENDING (docs/01 §4) |
 | `embedding.skip {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Resolve one BLOCKED head as `RESOLVED_NO_VECTOR`; permanent vector exclusion for that source |
 | `embedding.cancel {operation_id, embedding_profile_id, reason}` | resolution record | Cancel a non-active target build under the write-queue barrier |
-| `status` | — | Neo4j connection, revision, active selectors, spool length, Outbox backlog, blocked embedding heads |
+| `status` | — | Neo4j connection, revision, active selectors, spool length, embedding backlog (Episodes without a vector for the active profile, minus quarantined ledger entries), blocked embedding heads |
 | `verify {scope}` | — | Digests, Payloads, orphan Facts, ledger ↔ cache agreement |
 | `gen {stream, action: build\|status\|activate\|rollback\|retire\|qualify}` | selector, qualification record | Lifecycle operations; activate/rollback enforce the catch-up barrier, `qualify` appends an `EmbeddingQualification` and activates nothing by itself (docs/01 §4) |
 | `maintain` | caches | Run the maintenance job now (§6) |
@@ -814,8 +815,10 @@ transient_failure | permanent_failure | worker_lost | cancelled`, and
 `client_error` is the exact name for a deterministic 4xx response and
 `malformed_response` for output that is not a valid embedding payload; neither
 is a transient class, and "4xx" is not itself a state. Every attempt leaves
-one durable terminal `EmbeddingAttempt` row with a bounded error code and
-digest and no source text. A blocked head freezes that model's cursor and
+one terminal record in the Episode's `embedding-state.json` ledger entry
+(D54), with a bounded error code and digest and no source text; the graph
+holds only the resulting `EmbeddingVector`, and a successful attempt deletes
+the entry outright. A blocked head freezes that model's cursor and
 leaves later entries unpublished, so no vector ever appears across a hole; the
 active profile keeps serving its prior prefix while BM25, session and PPR
 recall continue. Nothing is truncated, chunked, zero-filled or silently
@@ -1202,7 +1205,7 @@ fallback; recall itself remains LLM-free.
 
 | Operation | Transactions | revision |
 |---|---|---|
-| remember | 1 (Episode, Payload, revision INVALIDATES, session topology, cache init, Outbox) | +1 |
+| remember | 1 (Episode, Payload, revision INVALIDATES, session topology, cache init) | +1 |
 | extract (one Episode) | read tx + write tx (re-validated) | +1 only when ACTIVE structural output is created |
 | embed backfill | 1 per bounded batch, terminal-prefix coverage cursor; the committed prefix stops at the first failure | +1 only for ACTIVE coverage |
 | adjudication.review / adjudication.correct | 1 bounded append-only control tx (review or correction, operator Episode, replacement Fact) | +1 only when a correction creates ACTIVE structural output |

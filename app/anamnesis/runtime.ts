@@ -133,7 +133,8 @@ export class Runtime {
     const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
-    this.engine = new Engine({ ...config, driver: writer });
+    // Attempt/quarantine state is an operational ledger beside the spool, never graph rows; Neo4j holds only memory.
+    this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json") });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
@@ -371,7 +372,7 @@ export class Runtime {
     this.embedding.requested = true;
     if (this.available && !this.drainStopped) this.scheduleDrain("embedding");
   }
-  /** One outbox entry per turn; called only by the daemon's serial owner, never from a second writer. The owner
+  /** One Episode per turn; called only by the daemon's serial owner, never from a second writer. The owner
    * alternates a background turn with a queued request, so the turn's length is the bound on RPC latency during a
    * backlog: one provider call, not a batch of up to 100 (a requeue on the production daemon held `status` past the
    * client deadline). */
@@ -390,10 +391,10 @@ export class Runtime {
       this.embedding.drained_total += batch.drained;
       if ("reason" in batch) return "idle";
       this.embedding.quarantined_total += batch.quarantined;
-      // A deferred entry is a provider-side failure that stays in the outbox with a retry_after in the future, so the
-      // next turn moves on to the other due entries and the deferred one is retried on a later wake, never in a loop
-      // of its own. The turn is "more" either way: the lane only rests once nothing is due.
-      this.embedding.last_error = batch.deferred ? `${batch.deferred} outbox entries deferred: ${batch.deferral_reason}` : null;
+      // A deferred Episode is a provider-side failure recorded in the embedding ledger with a retry_after in the
+      // future, so the next turn moves on to the other Episodes lacking a vector and the deferred one is retried on a
+      // later wake, never in a loop of its own. The turn is "more" either way: the lane only rests once nothing is due.
+      this.embedding.last_error = batch.deferred ? `${batch.deferred} embeddings deferred: ${batch.deferral_reason}` : null;
       if (batch.drained > 0 || batch.deferred > 0) { this.embedding.requested = true; return "more"; }
       return this.embedding.requested ? "more" : "idle";
     } catch (error) {
@@ -678,7 +679,8 @@ export class Runtime {
     await this.requireStorage();
     return this.engine.embeddingStatus(operationId, context);
   }
-  /** Operator requeue: quarantined Episodes rejoin the outbox and the lane wakes at once, which also retries any deferred entry whose backoff elapsed. */
+  /** Operator requeue: quarantined ledger entries are dropped so their Episodes are found again by the missing-vector
+   * scan, and the lane wakes at once, which also retries any deferred Episode whose backoff elapsed. */
   async requeueQuarantinedEmbeddings(params: RpcEmbeddingRequeueParams, context: InstallationContext) {
     await this.requireStorage();
     const result = await this.engine.requeueQuarantinedEmbeddings(params, context);

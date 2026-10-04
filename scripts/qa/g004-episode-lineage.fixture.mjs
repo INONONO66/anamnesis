@@ -324,8 +324,8 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     const invalidTime = params('nonaligned-day'); invalidTime.episode.time = { value: '2026-09-01T12:34:56Z', precision: 'day' };
     const invalidTimeRow = await engine.remember(coreInput(invalidTime));
     await assert.rejects(engine.store.semanticEpisode(invalidTimeRow.id, custody), { name: 'ZodError' });
-    const counts = await query('MATCH (e:Episode) OPTIONAL MATCH (l:EchoLineage {episode_id:e.id}) OPTIONAL MATCH (o:Outbox {element_id:e.id}) RETURN e.id AS id,e.episode_digest_version AS version,count(DISTINCT l) AS lineage,count(DISTINCT o) AS outbox');
-    assert.ok(counts.every(c => c.lineage === (c.version === 2 ? 1 : 0) && c.outbox === 1));
+    const counts = await query('MATCH (e:Episode) OPTIONAL MATCH (l:EchoLineage {episode_id:e.id}) RETURN e.id AS id,e.episode_digest_version AS version,count(DISTINCT l) AS lineage');
+    assert.ok(counts.every(c => c.lineage === (c.version === 2 ? 1 : 0)));
     assert.deepEqual(await query('MATCH (n) WHERE n:Fact OR n:Entity OR n:Community OR n:Hit RETURN count(n) AS count'), [{ count: 0 }]);
     assert.deepEqual(await engine.verify(), []);
     console.log(JSON.stringify({ checkpoint: 'core-expiry-source-custody-and-atomic-counts', counts, time: retained.time, semantic_writes: false }));

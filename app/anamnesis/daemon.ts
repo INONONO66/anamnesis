@@ -48,7 +48,7 @@ export async function foreground(): Promise<void> {
       if (fault(error).code === "ownership_lost") lostOwnership();
     }
   };
-  /** One embedding outbox batch. */
+  /** One embedding turn over Episodes lacking a vector. */
   const embeddingTurn = async () => {
     embeddingReady = false;
     try {

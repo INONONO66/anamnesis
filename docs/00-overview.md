@@ -90,7 +90,9 @@ exists yet, and the gates that will produce one are in
    ([04-forgetting](04-forgetting.md) §2).
 3. **Only the cache layer is ever SET.** Hit cache, utility cache, active
    policy, Entity witness rows, ConductingArc, hub shortlist, `m_cache`,
-   Outbox, selectors. All of it must be deletable and regenerable.
+   selectors. All of it must be deletable and regenerable. Operational
+   ledgers such as the embedding lane's `embedding-state.json` live outside
+   the graph entirely; Neo4j holds memory, not bookkeeping.
    ConductingArc is nonsemantic endpoint access metadata rebuilt from retained
    physical links and maintained atomically with them. Its composite
    (source_id, link_id) index supplies ordered first-256 probes before filters;

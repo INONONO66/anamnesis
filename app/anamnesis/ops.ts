@@ -101,7 +101,7 @@ async function embed({ root }: Context): Promise<void> {
     print(status.capabilities.embeddings ? { embeddings: "enabled", drained: 0 } : { embeddings: "disabled", drained: 0 });
   } finally { await client.close(); }
 }
-/** Quarantined Episodes return to the embedding outbox; the daemon wakes its embedding lane on the call. */
+/** Quarantined Episodes leave the embedding ledger and are rediscovered by the missing-vector scan; the daemon wakes its embedding lane on the call. */
 async function embedRequeue({ root, extra }: Context): Promise<void> {
   const limit = extra.length ? Number(extra[1]) : 100;
   await withClient(root, async client => print({ ...await client.request("embedding.requeue", { limit }), limit }));

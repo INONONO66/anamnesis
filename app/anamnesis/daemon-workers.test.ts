@@ -1,4 +1,4 @@
-// Real Node daemon over UDS: the embedding outbox worker must drain committed
+// Real Node daemon over UDS: the embedding worker must embed committed
 // Episodes by itself, inside the single-writer turn loop. Every wait is an
 // event (stdout line, socket reply, child exit) with a bounded deadline.
 // The drain scenario needs the isolated harness graph and is skipped without it:
@@ -139,7 +139,7 @@ test("status reports the worker counters even while storage is unavailable", asy
   });
 }, 60_000);
 
-test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, which drains the outbox and reports idle", async () => {
+test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, which embeds every Episode and reports idle", async () => {
   const provider = await embedder();
   const driver = neo4j.driver(URI!, neo4j.auth.basic("neo4j", PASSWORD!), { disableLosslessIntegers: true });
   try {
@@ -228,7 +228,7 @@ test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is ser
           else expect((await remembered).state).toBe("committed");
 
         }
-        // The seed released at most three calls (one per turn between remembers); the rest of the outbox is still due
+        // The seed released at most three calls (one per turn between remembers); the remaining Episodes still lack a vector
         // and every further call is held. A status queued now is answered after the call in flight, and at most one
         // more if the owner started a second turn before the frame was admitted. A batch turn would embed every
         // remaining entry before serving it.

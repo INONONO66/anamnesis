@@ -11,6 +11,7 @@ import { sha256, canonicalJson } from "./digest.ts";
 import { receiptTime, RecallReceipt, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, PolicyEvent, policySelector, policyBody, type PolicyState, requireInstallation } from "./policy.ts";
 import { type QueryParameters, recordsToObjects } from "./records.ts";
+import { EmbeddingLedger } from "./embedding-ledger.ts";
 
 export interface StoreOptions {
   uri: string;
@@ -21,6 +22,7 @@ export interface StoreOptions {
   /** Server clock only, never accepted from a feedback request. */
   clock?: () => number;
   embeddingProvider?: EmbeddingProvider;
+  embeddingLedgerPath?: string;
   tokenizers?: Tokenizers;
   recallDefaultBytes?: number;
   /** Trusted runtime injection only; never loaded from an RPC or arbitrary command. */
@@ -65,6 +67,7 @@ export class StoreCore {
   writerEpoch: number | undefined;
   readonly clock: () => number;
   readonly embeddingProvider: EmbeddingProvider | undefined;
+  readonly embeddingLedger: EmbeddingLedger;
   readonly tokenizers: Tokenizers;
   readonly recallDefaultBytes: number;
   readonly relationJudge: boolean;
@@ -72,6 +75,7 @@ export class StoreCore {
     this.clock = opts.clock ?? Date.now;
     this.relationJudge = opts.relationJudge ?? false;
     this.embeddingProvider = opts.embeddingProvider;
+    this.embeddingLedger = new EmbeddingLedger(opts.embeddingLedgerPath);
     this.tokenizers = opts.tokenizers ?? new Map();
     this.recallDefaultBytes = z.number().int().min(0).max(1024 * 1024).parse(opts.recallDefaultBytes ?? 65536);
     this.driver =

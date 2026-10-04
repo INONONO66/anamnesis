@@ -20,6 +20,26 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
    ```
 4. Optionally configure ingestion to use `journaledRemember` so writes are spooled before graph ingest. Put its journal directory on durable storage outside the Neo4j volumes. A future stateless ingestion service should depend on `neo4j` with `condition: service_healthy`.
 
+## Migration: embedding ledgers out of Neo4j (#240)
+
+Run this one-shot migration as the `anamnesis` user from `/opt/anamnesis`. Stop the daemon first so no embedding attempt is in flight while its legacy ledgers are copied:
+
+```sh
+systemctl stop anamnesis
+cd /opt/anamnesis
+set -a; . /etc/anamnesis/anamnesis.env; set +a
+bun scripts/migrate-embedding-ledgers.ts --dry-run
+bun scripts/migrate-embedding-ledgers.ts
+```
+
+The script first reports its JSON step lines, then writes the new ledger atomically to `${ANAMNESIS_RUNTIME_ROOT:-~/.anamnesis}/embedding-state.json` (normally `/var/lib/anamnesis/runtime/embedding-state.json`), removes the legacy schema objects, and deletes `EmbeddingAttempt` and `Outbox` nodes. Do not proceed past the dry run unless its counts are expected.
+
+Quarantined Episodes remain quarantined after the cutover. Re-drive selected ones after the daemon starts with `anamnesis-ops embed-requeue [--limit N]`; it removes their quarantine entries so the missing-vector scan can pick them up again.
+
+```sh
+systemctl start anamnesis
+```
+
 ## Optional TCP listener
 
 By default the daemon accepts RPC only on the Unix socket `<runtime root>/anamnesis.sock` (mode 0600), where filesystem permissions are the access control. Setting `ANAMNESIS_LISTEN` adds a TCP listener with identical framing and request handling; the socket keeps working unchanged. TCP has no filesystem check, so every TCP connection must prove possession of a bearer token before its first request.

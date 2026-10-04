@@ -72,7 +72,6 @@ beforeAll(async () => {
   }
   await admin.executeQuery(`MATCH (e:Element {id:$id}) SET e:Episode, e.origin_key=$origin,e.revision_key=$revision,e.ingest_seq=1
     CREATE (h:OriginHead {origin_key:$origin,revision_key:$revision})
-    CREATE (o:Outbox {element_id:$id,enqueued_at:'historical-fixture'})-[:OF]->(e)
     MERGE (m:Meta {key:'meta'}) SET m.ingest_seq=1`, { id: ids[0], origin: originKey, revision: revisionKey });
   await admin.executeQuery("MATCH (e:Element) WHERE e.id IN $ids SET e:Fact", { ids: ids.slice(1) });
 });

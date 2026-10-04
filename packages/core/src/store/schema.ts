@@ -5,8 +5,8 @@ export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_
 
 export const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (l:EchoLineage) REQUIRE l.episode_id IS UNIQUE`,
-  `CREATE CONSTRAINT embedding_attempt_id IF NOT EXISTS FOR (a:EmbeddingAttempt) REQUIRE a.operation_id IS UNIQUE`,
   `CREATE CONSTRAINT embedding_vector_key IF NOT EXISTS FOR (v:EmbeddingVector) REQUIRE v.key IS UNIQUE`,
+  `CREATE INDEX embedding_vector_episode_profile IF NOT EXISTS FOR (v:EmbeddingVector) ON (v.episode_id, v.profile_id)`,
   `CREATE CONSTRAINT embedding_profile_id IF NOT EXISTS FOR (p:EmbeddingProfile) REQUIRE p.id IS UNIQUE`,
   `CREATE CONSTRAINT policy_authority_key IF NOT EXISTS FOR (p:PolicyAuthority) REQUIRE p.key IS UNIQUE`,
   `CREATE CONSTRAINT policy_event_revision IF NOT EXISTS FOR (p:PolicyEvent) REQUIRE p.revision IS UNIQUE`,
@@ -56,8 +56,6 @@ export const SCHEMA_STATEMENTS = [
    FOR (e:Element) ON (e.time_utc)`,
   `CREATE INDEX element_schema IF NOT EXISTS
    FOR (e:Element) ON (e.schema)`,
-  `CREATE INDEX outbox_pending IF NOT EXISTS
-   FOR (o:Outbox) ON (o.processed_at)`,
   // valid(T) seeks invalidators by target instead of expanding adjacency.
   `CREATE CONSTRAINT extraction_generation_id IF NOT EXISTS FOR (g:ExtractionGeneration) REQUIRE g.id IS UNIQUE`,
   `CREATE CONSTRAINT extraction_attempt_id IF NOT EXISTS FOR (a:ExtractionAttempt) REQUIRE a.id IS UNIQUE`,

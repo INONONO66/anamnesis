@@ -331,7 +331,6 @@ test("real crash recovery: exact identity/topology, legacy preservation and UDS 
     }
     await db.executeQuery(`MATCH (e:Element {id:$id}) SET e:Episode,e.origin_key=$origin,e.revision_key=$revision,e.ingest_seq=1
       CREATE (:OriginHead {origin_key:$origin,revision_key:$revision})
-      CREATE (:Outbox {element_id:$id,enqueued_at:'historical-fixture'})-[:OF]->(e)
       CREATE (:Meta {key:'meta',ingest_seq:1})`, { id: legacyIds[0], origin: "324eaac8861d8ce9d127fe7895cfa5c0c8ed20c6c6907ff97d42cfe2e07b6531", revision: "3338e8315ea8e487094db0da6b32efa6f9a0619fc4a6318b848f55f9018430bf" });
     await db.executeQuery("MATCH (e:Element) WHERE e.id IN $ids SET e:Fact", { ids: legacyIds.slice(1) });
     const options = { uri: `bolt://127.0.0.1:${target}`, user: "neo4j", password, objectsRoot: join(legacyRoot, "objects") };
@@ -347,7 +346,7 @@ test("real crash recovery: exact identity/topology, legacy preservation and UDS 
     legacyStore = new Store(options, observed);
     const validId = "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e12";
     const legacyParams: RpcRememberParams = { episode: { schema: "anamnesis.original-message/1", content: "valid legacy", time: { value: "2026-09-02T10:00:00Z", precision: "second" }, origin: { source: "fixture", session: "valid", actor: "user", record: "r" }, mass: 0.5, properties: { z: 1, a: 2 } }, source_revision: "r", expected_previous_revision_key: null };
-    assert.deepEqual(await legacyStore.putElement({ ...legacyParams.episode, id: validId }, { sourceRevision: "r", expectedPreviousRevisionKey: null, enqueue: true }), { id: validId, created: true });
+    assert.deepEqual(await legacyStore.putElement({ ...legacyParams.episode, id: validId }, { sourceRevision: "r", expectedPreviousRevisionKey: null }), { id: validId, created: true });
     const frozenDigest = sha(JSON.stringify({ schema: legacyParams.episode.schema, content: legacyParams.episode.content, properties: legacyParams.episode.properties, time: legacyParams.episode.time, payload_hash: null, previous_revision_key: null }));
     await db.executeQuery("MATCH (e:Element {id:$id}) SET e.digest=$digest,e.episode_digest_version=1 REMOVE e.digest_format", { id: validId, digest: frozenDigest });
     async function legacySnapshot(directory = rawRoot) {

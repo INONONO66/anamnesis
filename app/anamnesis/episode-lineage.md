@@ -19,7 +19,7 @@ responsible for truthful role and whether it delivered context. Neither source
 prose nor actor labels establish these facts. The server owns all roots,
 depths, context digests and the version discriminator; callers cannot supply
 these fields. A partial/invalid explicit request fails with `invalid_params`
-after stored-version selection, without Episode/CAS/outbox/topology changes.
+after stored-version selection, without Episode/CAS/topology changes.
 
 ## Custody and bounds
 
@@ -45,8 +45,8 @@ Parent creation must precede ingestion. A logical one-ms admission tick permits
 same-wall-clock-ms receipt/remember ordering without sleeps. Receipt TTL controls
 feedback only: a retained expired parent can establish lineage, but a deleted
 parent cannot establish new lineage. Children never depend on later retention.
-The row, v2 digest, Episode, revision CAS, existing Outbox and session topology
-commit together under the writer fence. Lineage rows are not receipt-TTL data.
+The row, v2 digest, Episode, revision CAS and session topology commit
+together under the writer fence. Lineage rows are not receipt-TTL data.
 
 New explicit lineage admission requires the database; it is not acknowledged
 through the legacy spool without parent custody. Metadata-free spool behavior

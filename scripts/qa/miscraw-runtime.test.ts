@@ -185,11 +185,10 @@ test("built Node misc snapshots: exact UDS identities/payload/outbox, UNKNOWN, r
       const properties = JSON.parse(row.properties); delete properties.payload_hash; expect(properties).toEqual(p.episode.properties);
       expect(await client.request("ingest.status", identity(p, status.data_incarnation))).toMatchObject({ state: "committed", id: row.id, ingest_seq: row.ingest_seq });
     }
-    const effects = (await driver.executeQuery("MATCH (e:Episode) OPTIONAL MATCH (o:Outbox {element_id:e.id}) WITH e, count(o) AS effects RETURN e.id AS id, effects ORDER BY e.ingest_seq")).records.map(r => r.toObject());
-    expect(effects).toEqual(rows.map(e => ({ id: e.id, effects: 1 }))); expect((await client.request("status", {})).outbox_pending).toBe(5);
+    expect((await client.request("status", {})).outbox_pending).toBe(5);
     const topology = (await driver.executeQuery("MATCH (a:Episode)-[:NEXT_EPISODE]->(b:Episode) RETURN a.revision_key AS from, b.revision_key AS to ORDER BY a.ingest_seq")).records.map(r => r.toObject());
     expect(topology).toEqual([{ from: revisionKey(pb), to: revisionKey(pc) }, { from: revisionKey(pc), to: revisionKey(pd) }]);
-    await record("acceptance.json", { cursor, params, replies, rows, effects, topology, restart: { oldPid, newPid: daemon.pid, incarnation: status.data_incarnation }, payload: { hash: hash(payload), bytes: payload.length }, requests: observe.requests });
+    await record("acceptance.json", { cursor, params, replies, rows, topology, restart: { oldPid, newPid: daemon.pid, incarnation: status.data_incarnation }, payload: { hash: hash(payload), bytes: payload.length }, requests: observe.requests });
 
     // Alter joined metadata only after a genuine duplicate COMMIT has been
     // observed. Post-reply consistency check must preserve cursor and pending.

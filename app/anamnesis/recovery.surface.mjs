@@ -102,9 +102,7 @@ async function rows(expected) {
   const values=result.records.map(r=>r.toObject());
   assert.equal(values.length,expected);
   for(const field of ['id','revision','seq'])assert.equal(new Set(values.map(r=>r[field])).size,expected);
-  const outbox=await driver.executeQuery('MATCH (e:Episode) WHERE e.origin_source=$source OPTIONAL MATCH (o:Outbox {element_id:e.id}) RETURN e.id AS id, count(o) AS effects',{source:caseName});
-  assert.equal(outbox.records.length,expected);for(const row of outbox.records)assert.equal(row.get('effects'),1);
-  checkpoint('database-exact-identities',{values,outbox:outbox.records.map(r=>r.toObject())});return values;
+  checkpoint('database-exact-identities',{values});return values;
 }
 async function upload(c,bytes=Buffer.from('G002 object payload')) {
   const sha256=hash(bytes), params={sha256,size:bytes.length,media_type:'text/plain'};

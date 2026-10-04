@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { EventEmitter, once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import neo4j from 'neo4j-driver';
 import { RpcClient } from '../../dist/anamnesis-client.mjs';
@@ -45,6 +45,14 @@ const providerReady = once(provider, 'listening', { signal: AbortSignal.timeout(
 const config = { endpoint: `http://127.0.0.1:${provider.address().port}/v1/embeddings`, profile, timeout_ms: 5000 };
 const driver = neo4j.driver(uri, neo4j.auth.basic('neo4j', password), { disableLosslessIntegers: true });
 const query = async (cypher, params = {}) => (await driver.executeQuery(cypher, params)).records.map(row => row.toObject());
+// Attempt/quarantine state is the daemon's embedding ledger file, never graph rows; it is replaced atomically, so a
+// read sees one whole version. Absent until the first ledger mutation.
+const ledgerPath = root + '/embedding-state.json';
+const ledger = async () => {
+  try { const file = JSON.parse(await readFile(ledgerPath, 'utf8')); assert.equal(file.version, 1); return file.episodes; }
+  catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+};
+const ledgerAttempts = async () => Object.values(await ledger()).flatMap(entry => entry.attempts);
 let daemon, client;
 async function start() {
   const child = spawn(process.execPath, ['dist/anamnesis-daemon.mjs'], { env: { ...process.env, ANAMNESIS_RUNTIME_ROOT: root,
@@ -101,13 +109,20 @@ try {
   // The daemon embeds every committed original on its own lane. A rejecting provider lets it quarantine both
   // originals first, so every later provider call is attributable and the explicit recovery starts from nothing.
   mode = 'fail';
-  const originalsSettled = idleWhen(async () => (await query('MATCH (x:EmbeddingAttempt) RETURN count(x) AS n'))[0].n === 2);
+  const originalsSettled = idleWhen(async () => Object.keys(await ledger()).length === 2);
   const originalsAsked = Promise.all([providerRequest('document: needle A\né🙂'), providerRequest('document: unrelated original')]);
   const a = await remember('a', 'needle A\né🙂'), b = await remember('b', 'unrelated original');
   await originalsAsked; await originalsSettled;
-  assert.deepEqual(await query('MATCH (x:EmbeddingAttempt) RETURN x.state AS state, x.reason AS reason ORDER BY x.episode_id'),
-    [{ state: 'quarantined', reason: 'provider_rejected' }, { state: 'quarantined', reason: 'provider_rejected' }]);
-  assert.equal((await query('MATCH (o:Outbox) WHERE o.processed_at IS NULL RETURN o')).length, 0);
+  await stat(ledgerPath); // The daemon created the ledger file on its first mutation.
+  const originals = await ledger();
+  assert.deepEqual(Object.keys(originals).sort(), [a.id, b.id].sort());
+  for (const entry of Object.values(originals)) {
+    assert.equal(entry.state, 'quarantined'); assert.equal(entry.retry_after, null); assert.equal(entry.attempts.length, 1);
+    assert.deepEqual([entry.attempts[0].state, entry.attempts[0].reason], ['quarantined', 'provider_rejected']);
+  }
+  // Quarantined Episodes are not pending work, and no ledger lives in the graph.
+  assert.equal((await client.request('status', {})).outbox_pending, 0);
+  assert.equal((await query('MATCH (x) WHERE x:EmbeddingAttempt OR x:Outbox RETURN count(x) AS n'))[0].n, 0);
   const failedRequest = { episode_id: a.id, operation_id: uuid() };
   const failed = await client.request('embedding.recover', failedRequest);
   assert.equal(failed.state, 'quarantined'); assert.equal(failed.reason, 'provider_rejected');
@@ -116,6 +131,7 @@ try {
   mode = 'ok'; const recovered = await client.request('embedding.recover', { ...failedRequest, operation_id: uuid() });
   assert.equal(recovered.state, 'succeeded'); assert.equal(recovered.input_revision, a.revision_key);
   assert.equal(recovered.input_digest, (await query('MATCH (e:Episode {id:$id}) RETURN e.digest AS digest', { id: a.id }))[0].digest);
+  assert.equal((await ledger())[a.id], undefined, 'a success deletes the ledger entry');
   await client.request('embedding.recover', { episode_id: b.id, operation_id: uuid() });
   const validVectors = await query('MATCH (v:EmbeddingVector) RETURN properties(v) AS p ORDER BY v.key');
   for (const [failure, reason] of [['dimension','invalid_vector'], ['norm','invalid_vector'], ['model','profile_mismatch'], ['incarnation','profile_mismatch']]) {
@@ -124,7 +140,9 @@ try {
     assert.equal(attempt.state, 'quarantined'); assert.equal(attempt.reason, reason);
     assert.deepEqual(await query('MATCH (v:EmbeddingVector) RETURN properties(v) AS p ORDER BY v.key'), validVectors);
   }
-  await assert.rejects(client.request('embedding.recover', { ...failedRequest, episode_id: b.id }), { code: 'idempotency_conflict' });
+  // a's success deleted its ledger entry, so the vector is now the only record of an operation on a; reusing its
+  // operation id for another Episode still conflicts.
+  await assert.rejects(client.request('embedding.recover', { episode_id: b.id, operation_id: recovered.operation_id }), { code: 'idempotency_conflict' });
   mode = 'ok';
   const request = { query: 'needle', session: { source: root, session: 'small' }, limit: 2, budget: { unit: 'utf8_bytes', limit: 65536 } };
   const hybrid = await client.request('recall', request);
@@ -194,33 +212,40 @@ try {
   assert.ok(oversized.diagnostics.skipped_bundles > 0);
   assert.ok(Buffer.byteLength(JSON.stringify(oversized)) < 1048576);
   for (const item of oversized.results) assert.equal(item.content.length, 63006);
-  // Exact HTTP request event follows the durable pending write. Kill there,
-  // restart, and resume the same operation ID rather than creating duplicate work.
+  // An in-flight attempt is never persisted: kill at the exact HTTP request event, restart, and the operation is
+  // unknown until the same operation ID is resumed.
   const pendingRequest = { episode_id: b.id, operation_id: uuid() }; mode = 'hold';
   const requested = providerRequest('document: unrelated original');
   const pendingReply = client.request('embedding.recover', pendingRequest).catch(error => error);
   await requested;
-  assert.equal(JSON.parse((await query('MATCH (a:EmbeddingAttempt {operation_id:$id}) RETURN a.body AS body', { id: pendingRequest.operation_id }))[0].body).state, 'pending');
+  assert.ok(!(await ledgerAttempts()).some(item => item.operation_id === pendingRequest.operation_id));
+  assert.equal((await query('MATCH (v:EmbeddingVector {operation_id:$id}) RETURN count(v) AS n', { id: pendingRequest.operation_id }))[0].n, 0);
   await stop(); assert.equal((await pendingReply).code, 'outcome_unknown');
   mode = 'ok'; await start();
-  assert.equal((await client.request('embedding.status', { operation_id: pendingRequest.operation_id })).state, 'pending');
+  assert.deepEqual(await client.request('embedding.status', { operation_id: pendingRequest.operation_id }), { state: 'unknown', operation_id: pendingRequest.operation_id });
   assert.equal((await client.request('embedding.recover', pendingRequest)).state, 'succeeded');
   assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: b.id }))[0].n, 1);
-  await assert.rejects(client.request('embedding.status', { operation_id: failedRequest.operation_id }), { code: 'policy_denied' });
-  assert.equal(JSON.parse((await query('MATCH (a:EmbeddingAttempt {operation_id:$id}) RETURN a.body AS body', { id: failedRequest.operation_id }))[0].body).state, 'quarantined');
+  // The status of a vector-backed operation is synthesized from its EmbeddingVector and still honors the policy.
+  await assert.rejects(client.request('embedding.status', { operation_id: recovered.operation_id }), { code: 'policy_denied' });
+  // a's first failure was dropped from the ledger by its later success; no attempt row survives in the graph.
+  assert.ok(!(await ledgerAttempts()).some(item => item.operation_id === failedRequest.operation_id));
+  assert.deepEqual(await client.request('embedding.status', { operation_id: failedRequest.operation_id }), { state: 'unknown', operation_id: failedRequest.operation_id });
   assert.deepEqual(JSON.parse((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: hybrid.recall_id }))[0].body), receipt);
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
-  // A quarantined Episode returns to the outbox through embedding.requeue; the call itself wakes the lane.
+  // embedding.requeue drops a quarantined ledger entry so the missing-vector scan finds the Episode again; the call
+  // itself wakes the lane.
   mode = 'fail';
   // The idle that ends the candidate's quarantine can be printed before remember's reply carries its id, so the
   // check waits for the identity instead of discarding that idle.
   let candidateId; const candidateKnown = new Promise(resolve => { candidateId = resolve; });
-  const candidateSettled = idleWhen(async () => (await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN count(a) AS n', { id: await candidateKnown }))[0].n === 1);
+  const candidateSettled = idleWhen(async () => (await ledger())[await candidateKnown]?.attempts.length === 1);
   const candidateAsked = providerRequest('document: requeue candidate');
   const c = await remember('c', 'requeue candidate', 'small');
   candidateId(c.id);
   await candidateAsked; await candidateSettled;
-  assert.deepEqual(await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN a.state AS state, a.reason AS reason', { id: c.id }), [{ state: 'quarantined', reason: 'provider_rejected' }]);
+  const candidate = (await ledger())[c.id];
+  assert.equal(candidate.state, 'quarantined');
+  assert.deepEqual(candidate.attempts.map(item => [item.state, item.reason]), [['quarantined', 'provider_rejected']]);
   assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 0);
   mode = 'ok';
   const idleAfterRequeue = daemonEvent('workers_idle'), candidateRetried = providerRequest('document: requeue candidate');
@@ -228,7 +253,10 @@ try {
   assert.ok(requeued.requeued >= 1, `requeued ${requeued.requeued}`);
   await candidateRetried; await idleAfterRequeue;
   assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 1);
-  assert.deepEqual((await query('MATCH (a:EmbeddingAttempt {episode_id:$id}) RETURN a.state AS state ORDER BY a.operation_id', { id: c.id })).map(row => row.state), ['quarantined', 'succeeded']);
+  assert.equal((await ledger())[c.id], undefined, 'the successful retry deletes the ledger entry');
+  const retried = (await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN v.operation_id AS id', { id: c.id }))[0].id;
+  assert.notEqual(retried, candidate.attempts[0].operation_id);
+  assert.equal((await client.request('embedding.status', { operation_id: retried })).state, 'succeeded');
   assert.deepEqual(await client.request('embedding.requeue', { limit: 100 }), { requeued: 0 });
   log('verified', { configured_provider: config.profile, recovery: ['quarantine','retry-idempotence','pending-restart','requeue'],
     hybrid_ids: hybrid.results.map(item => item.id), byte_budget: hybrid.used_budget, scalar_budget: [...hybrid.context_text].length,

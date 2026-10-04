@@ -23,7 +23,6 @@ export interface ElementWriteOptions {
   payloadMediaType?: string;
   sourceRevision?: string;
   expectedPreviousRevisionKey?: string | null;
-  enqueue?: boolean;
   previous?: string;
   admission?: { metadata: unknown; context: InstallationContext };
 }
