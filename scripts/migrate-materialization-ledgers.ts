@@ -1,11 +1,27 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { canonicalExtractionBody, extractionBodyDigest, EchoLineage } from "@anamnesis/protocol";
+import { ExtractionJournal, type ExtractionJournalEntry } from "../packages/core/src/store/extraction-journal.ts";
 
 const LABELS = ["MaterializationOperation", "OriginHead", "EchoLineage", "FactRelationInput", "FactRelationVerdict", "EntityWitness"] as const;
 // Every Episode and Entity the engine writes is an Element, and `element_id` is the only id index: an id lookup
 // spelled `(e:Episode {id:...})` plans as a per-row label scan (billions of rows on production), so every join
 // below names `Element:Episode` / `Element:Entity`. Legacy ledgers carry no such index for FactRelationVerdict.
-const USAGE = "Usage: node dist/anamnesis-migrate-g4.mjs [--dry-run] [--batch <positive integer>]";
+const USAGE = "Usage: node dist/anamnesis-migrate-g4.mjs [--dry-run] [--runtime-root <dir>] [--batch <positive integer>]";
+// Live copy statements. The ledger id is projected to a scalar before the CALL: inside `CALL (l) {...} IN TRANSACTIONS`
+// Neo4j 5.26 plans `e.id = l.episode_id` as a full Element(id) index scan per row (2,004,002 index rows for 1,001
+// ledgers), while `{id:episode_id}` on an imported scalar is a unique seek. The test suite PROFILEs both statements.
+export const COPY_LINEAGE = (batch: number) => `MATCH (l:EchoLineage) WITH l,l.episode_id AS episode_id CALL (l,episode_id) {
+  MATCH (e:Element:Episode {id:episode_id})
+  SET e.lineage_mode=l.lineage_mode,e.parent_recall_ids=l.parent_recall_ids,
+      e.context_digests=l.context_digests,e.root_episode_ids=l.root_episode_ids,
+      e.echo_depth=l.echo_depth,e.lineage_complete=l.complete,e.lineage_digest=l.digest
+} IN TRANSACTIONS OF ${batch} ROWS`;
+export const COPY_WITNESS = (batch: number) => `MATCH (w:EntityWitness {state:'COMPLETE'}) WITH w,w.entity_id AS entity_id CALL (w,entity_id) {
+  MATCH (e:Element:Entity {id:entity_id})
+  SET e.witness_generation=w.generation,e.witness_policy_revision=w.policy_revision
+} IN TRANSACTIONS OF ${batch} ROWS`;
 type Counts = Record<typeof LABELS[number], number>;
 type Cursor = { readonly generation: string; readonly episodes: number; readonly active_extraction: number };
 type Schema = { readonly name: string; readonly labelsOrTypes: string[] | null; readonly owningConstraint?: string | null };
@@ -15,6 +31,8 @@ type Options = {
   readonly user?: string;
   readonly password?: string;
   readonly database?: string;
+  /** Directory holding the daemon's `extraction-state.json`; `--runtime-root` and `ANAMNESIS_RUNTIME_ROOT` override it. */
+  readonly runtimeRoot?: string;
   readonly output?: (line: string) => void;
 };
 function required(value: string | undefined, name: string): string {
@@ -24,10 +42,15 @@ function required(value: string | undefined, name: string): string {
 
 export async function main(options: Options = {}) {
   let dryRun = false, batch = 10_000;
+  let runtimeRoot = options.runtimeRoot ?? process.env["ANAMNESIS_RUNTIME_ROOT"] ?? join(homedir(), ".anamnesis");
   const args = options.args ?? process.argv.slice(2);
   for (let index = 0; index < args.length; index++) {
     if (args[index] === "--dry-run") dryRun = true;
-    else if (args[index] === "--batch") {
+    else if (args[index] === "--runtime-root") {
+      const value = args[++index];
+      if (!value) throw new Error(`--runtime-root needs a directory\n${USAGE}`);
+      runtimeRoot = value;
+    } else if (args[index] === "--batch") {
       const value = args[++index];
       if (!value || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`--batch must be a positive safe integer\n${USAGE}`);
       batch = Number(value);
@@ -95,6 +118,28 @@ export async function main(options: Options = {}) {
     }
     return { count, sources };
   };
+  // The legacy daemon commits coverage before pruning its file journal, so a crash between the two leaves an entry for
+  // a covered source. The new engine never resumes such a source (discovery starts after the cursor) but its activation
+  // check demands file custody the entry does not carry, and reading the pipeline replays the relation judge for an
+  // omission whose only custody this migration deletes. Refuse every covered or unresolvable entry; the legacy daemon
+  // prunes a covered entry when it reads the pipeline (`extraction.audit.status`) or commits coverage.
+  const journalPath = join(runtimeRoot, "extraction-state.json");
+  const journal = async () => {
+    let entries: [string, ExtractionJournalEntry][];
+    try { entries = await new ExtractionJournal(journalPath).list(); }
+    catch (error) { throw new Error(`journal_unreadable: ${journalPath}: ${String(error)}`); }
+    const unpruned: string[] = [];
+    for (const [id, entry] of entries) {
+      const row = (await session.run<{ seq: unknown; covered: unknown }>(
+        `OPTIONAL MATCH (e:Element:Episode {id:$source})
+         OPTIONAL MATCH (c:ExtractionCoverage {generation_id:$generation,partition:'episodes'})
+         RETURN e.ingest_seq AS seq,c.covered_ingest_seq AS covered`, { source: entry.source_id, generation: entry.generation_id })).records[0];
+      const seq = row?.get("seq"), covered = row?.get("covered");
+      if (typeof seq !== "number" || typeof covered !== "number" || seq <= covered)
+        unpruned.push(`${id}:${entry.generation_id}:${entry.source_id}:seq=${String(seq)}:covered=${String(covered)}`);
+    }
+    return { path: journalPath, entries: entries.length, unpruned: unpruned.length, unpruned_pipelines: unpruned.slice(0, 100) };
+  };
   // Check destructive-cutover gates before the first copy write; emit them in the requested step order below.
   const inflight = async () => {
     const operations = (await session.run<{ id: string }>(`MATCH (o:MaterializationOperation)
@@ -153,7 +198,7 @@ export async function main(options: Options = {}) {
     const facts = await number("MATCH (f:Fact) RETURN count(f) AS count");
     line("count_legacy", { counts: before, constraints: legacySchema.constraints.map(c => c.name), indexes: legacySchema.indexes.map(i => i.name), facts, dry_run: dryRun });
     const coverage = await cursors(), split = coverage.filter(row => row.episodes !== row.active_extraction);
-    const pending = await inflight(), gap = await uncovered();
+    const pending = await inflight(), gap = await uncovered(), legacyJournal = await journal();
     const duplicates = (await session.run<{ generation: string; meaning_digest: string; primary_episode_id: string; ids: string[] }>(
       `MATCH (f:Fact) WHERE f.generation IS NOT NULL AND f.meaning_digest IS NOT NULL AND f.primary_episode_id IS NOT NULL
        WITH f.generation AS generation,f.meaning_digest AS meaning_digest,f.primary_episode_id AS primary_episode_id,collect(f.id) AS ids
@@ -232,16 +277,9 @@ export async function main(options: Options = {}) {
       throw new Error(`copy_mismatch: EchoLineage has missing Episodes, conflicting properties or invalid bodies: ${JSON.stringify(ids)}`);
     }
     // All destructive-cutover gates are read before copying, without obscuring the ordered output.
-    const gatesPass = split.length === 0 && gap.count === 0 && pending.count === 0 && pending.malformed_seals === 0 && duplicateCount === 0
-      && witnessMissing.length === 0 && witnessJoined === before.EntityWitness && existingWitness <= before.EntityWitness;
-    if (!dryRun && gatesPass) {
-      await session.run(`MATCH (l:EchoLineage) CALL (l) {
-        MATCH (e:Element:Episode) WHERE e.id = l.episode_id
-        SET e.lineage_mode=l.lineage_mode,e.parent_recall_ids=l.parent_recall_ids,
-            e.context_digests=l.context_digests,e.root_episode_ids=l.root_episode_ids,
-            e.echo_depth=l.echo_depth,e.lineage_complete=l.complete,e.lineage_digest=l.digest
-      } IN TRANSACTIONS OF ${batch} ROWS`);
-    }
+    const gatesPass = split.length === 0 && gap.count === 0 && legacyJournal.unpruned === 0 && pending.count === 0 && pending.malformed_seals === 0
+      && duplicateCount === 0 && witnessMissing.length === 0 && witnessJoined === before.EntityWitness && existingWitness <= before.EntityWitness;
+    if (!dryRun && gatesPass) await session.run(COPY_LINEAGE(batch));
     const lineageCount = dryRun || !gatesPass ? before.EchoLineage : await number("MATCH (e:Episode) WHERE e.lineage_mode IS NOT NULL RETURN count(e) AS count");
     const postcopyMismatch: string[] = [];
     let postcopyMismatchCount = 0;
@@ -282,10 +320,7 @@ export async function main(options: Options = {}) {
       line("copy_mismatch", { label: "EntityWitness", count: witnessJoined, existing: existingWitness, expected: before.EntityWitness, ids: witnessMissing, dry_run: dryRun });
       throw new Error("copy_mismatch: EntityWitness has incomplete, missing or conflicting Entities");
     }
-    if (!dryRun && gatesPass) await session.run(`MATCH (w:EntityWitness {state:'COMPLETE'}) CALL (w) {
-      MATCH (e:Element:Entity) WHERE e.id = w.entity_id
-      SET e.witness_generation=w.generation,e.witness_policy_revision=w.policy_revision
-    } IN TRANSACTIONS OF ${batch} ROWS`);
+    if (!dryRun && gatesPass) await session.run(COPY_WITNESS(batch));
     const witnessCount = dryRun || !gatesPass ? before.EntityWitness : await number("MATCH (e:Entity) WHERE e.witness_generation IS NOT NULL RETURN count(e) AS count");
     // Every witness row is re-read against its Entity after the copy; the pre-copy gate already proved the join is complete.
     const witnessMismatchQuery = `MATCH (w:EntityWitness) MATCH (e:Element:Entity) WHERE e.id = w.entity_id
@@ -303,6 +338,9 @@ export async function main(options: Options = {}) {
     line("check_coverage", { coverage, split, uncovered: gap.count, uncovered_sources: gap.sources, dry_run: dryRun });
     if (split.length) throw new Error(`Extraction coverage partitions disagree: ${JSON.stringify(split)}`);
     if (gap.count) throw new Error(`coverage_gap: ${gap.count} custody sources are beyond the coverage cursor or unresolved and would be replayed after cutover: ${JSON.stringify(gap.sources)}`);
+    line("check_journal", { ...legacyJournal, dry_run: dryRun });
+    if (legacyJournal.unpruned) throw new Error(`journal_unpruned: ${legacyJournal.unpruned} extraction journal entries in ${journalPath} belong to covered or unresolvable sources; `
+      + `start the legacy daemon and let it prune them (extraction.audit.status on each pipeline, or a coverage commit), stop it, then rerun: ${JSON.stringify(legacyJournal.unpruned_pipelines)}`);
     line("check_inflight", { ...pending, dry_run: dryRun });
     if (pending.malformed_seals) throw new Error(`malformed_seal: ${pending.malformed_seals} sealed omissions could not be parsed: ${JSON.stringify(pending.malformed)}`);
     if (pending.count) throw new Error("In-flight materialization work remains");

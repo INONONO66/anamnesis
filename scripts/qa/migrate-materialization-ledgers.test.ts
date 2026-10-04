@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import neo4j, { type Driver } from "neo4j-driver";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import neo4j, { type Driver, type ProfiledPlan } from "neo4j-driver";
 import { canonicalExtractionBody, extractionBodyDigest } from "@anamnesis/protocol";
-import { main } from "../migrate-materialization-ledgers.ts";
+import { ExtractionJournal } from "../../packages/core/src/store/extraction-journal.ts";
+import { COPY_LINEAGE, COPY_WITNESS, main } from "../migrate-materialization-ledgers.ts";
 
 const db = {
   uri: process.env["ANAMNESIS_TEST_NEO4J_URI"] ?? "",
@@ -19,7 +23,26 @@ const lineage = {
   complete: true,
 };
 let driver: Driver;
-const migrate = (options: Parameters<typeof main>[0] = {}) => main({ ...db, ...options });
+let runtimeRoot: string;
+const migrate = (options: Parameters<typeof main>[0] = {}) => main({ ...db, runtimeRoot, ...options });
+const generation = "018f0d8d-7b6a-7cc0-8b42-000000000011";
+/** A legacy (pre-G4) journal entry: a claim task for the seeded source and no `relations` custody. */
+const legacyEntry = {
+  work_key: `${generation}:${lineage.episode_id}`, generation_id: generation, source_id: lineage.episode_id,
+  claim: {
+    id: "018f0d8d-7b6a-7cc0-8b42-000000000020", generation_id: generation, source_id: lineage.episode_id,
+    source_revision: "a".repeat(64), body_digest: "b".repeat(64), source_ingest_seq: 1, attempt_id: null, kind: "claim" as const,
+    model: "legacy-model", model_incarnation: "c".repeat(64), state: "queued" as const, lease: null, policy_context: null,
+    version: 1, attempts: 0, created_at: 1, updated_at: 1,
+  },
+  claim_attempt: null, judge: null, judge_input: null, judge_attempt: null, decisions: [], attempts: [], sealed_ingest_seq: null,
+};
+/** Every operator of a PROFILE plan, depth first. */
+function operators(plan: ProfiledPlan, found: ProfiledPlan[] = []): ProfiledPlan[] {
+  found.push(plan);
+  for (const child of plan.children) operators(child, found);
+  return found;
+}
 const legacyConstraints = ["echo_lineage_episode", "origin_head_key", "materialization_operation_id"] as const;
 const newIndexes = ["episode_origin_head", "entity_witness"] as const;
 
@@ -61,6 +84,7 @@ async function seed(legacy = true): Promise<void> {
 
 beforeEach(async () => {
   driver = neo4j.driver(db.uri, neo4j.auth.basic(db.user, db.password), { disableLosslessIntegers: true });
+  runtimeRoot = await mkdtemp(join(tmpdir(), "migrate-g4-"));
   await seed();
   await driver.executeQuery("CREATE CONSTRAINT element_id IF NOT EXISTS FOR (n:Element) REQUIRE n.id IS UNIQUE");
   await driver.executeQuery("CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (n:EchoLineage) REQUIRE n.episode_id IS UNIQUE");
@@ -75,6 +99,7 @@ afterEach(async () => {
   await driver.executeQuery("DROP CONSTRAINT fact_identity IF EXISTS");
   await driver.executeQuery("DROP CONSTRAINT element_id IF EXISTS");
   await driver.close();
+  await rm(runtimeRoot, { recursive: true, force: true });
 }, 300000);
 
 describe.serial("materialization ledger migration", () => {
@@ -85,18 +110,19 @@ describe.serial("materialization ledger migration", () => {
     expect(await count("EchoLineage")).toBe(1);
     expect(await count("EntityWitness")).toBe(1);
     const steps = lines.map(line => JSON.parse(line));
-    expect(steps.map(step => step.step)).toEqual(["count_legacy", "copy_lineage", "copy_witness", "check_coverage", "check_inflight", "fact_duplicates", "drop_schema", "create_schema", "delete_legacy_ledgers", "verify"]);
+    expect(steps.map(step => step.step)).toEqual(["count_legacy", "copy_lineage", "copy_witness", "check_coverage", "check_journal", "check_inflight", "fact_duplicates", "drop_schema", "create_schema", "delete_legacy_ledgers", "verify"]);
     expect(steps[0].constraints.sort()).toEqual([...legacyConstraints].sort());
     expect(steps[0].indexes).toContain("relation_input_occurrence");
     expect(steps[3].split).toEqual([]);
     expect(steps[3].uncovered).toBe(0);
-    expect(steps[4].count).toBe(0);
-    expect(steps[4].malformed_seals).toBe(0);
-    expect(steps[4].terminal_zero_candidate).toBe(0);
-    expect(steps[4].sealed_exhausted).toBe(0);
-    expect(steps[4].pending).toBe(0);
+    expect(steps[4]).toMatchObject({ path: join(runtimeRoot, "extraction-state.json"), entries: 0, unpruned: 0, unpruned_pipelines: [] });
     expect(steps[5].count).toBe(0);
-    expect(steps.slice(6).every(step => step.dry_run === true)).toBe(true);
+    expect(steps[5].malformed_seals).toBe(0);
+    expect(steps[5].terminal_zero_candidate).toBe(0);
+    expect(steps[5].sealed_exhausted).toBe(0);
+    expect(steps[5].pending).toBe(0);
+    expect(steps[6].count).toBe(0);
+    expect(steps.slice(7).every(step => step.dry_run === true)).toBe(true);
     const episode = await driver.executeQuery("MATCH (e:Episode {id:$id}) RETURN e.lineage_mode AS mode", { id: lineage.episode_id });
     expect(episode.records[0]?.get("mode")).toBeNull();
     const schema = await driver.executeQuery("SHOW CONSTRAINTS YIELD name RETURN name");
@@ -185,6 +211,61 @@ describe.serial("materialization ledger migration", () => {
     expect(lines.map(line => JSON.parse(line)).find(step => step.step === "check_inflight"))
       .toMatchObject({ count: 0, pending: 0, sealed_exhausted: 0, malformed_seals: 1, malformed: [`018f0d8d-7b6a-7cc0-8b42-000000000013:${generation}:${lineage.episode_id}`] });
     expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
+  test.serial("refuses a legacy journal entry for a covered source without graph changes", async () => {
+    // The legacy daemon commits coverage (cursor 10 covers ingest_seq 1) before pruning: a crash between the two leaves
+    // this entry, which the new engine would neither resume nor accept at activation.
+    await new ExtractionJournal(join(runtimeRoot, "extraction-state.json")).set("018f0d8d-7b6a-7cc0-8b42-000000000021", legacyEntry);
+    const before = await graphSnapshot();
+    const lines: string[] = [];
+    await expect(migrate({ output: line => lines.push(line) })).rejects.toThrow("journal_unpruned");
+    const steps = lines.map(line => JSON.parse(line));
+    expect(steps.find(step => step.step === "check_journal")).toMatchObject({
+      entries: 1, unpruned: 1, unpruned_pipelines: [`018f0d8d-7b6a-7cc0-8b42-000000000021:${generation}:${lineage.episode_id}:seq=1:covered=10`],
+    });
+    expect(steps.some(step => step.step === "check_inflight")).toBe(false);
+    expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
+  test.serial("accepts a legacy journal entry whose source is beyond coverage", async () => {
+    await driver.executeQuery("MATCH (e:Element:Episode {id:$id}) SET e.ingest_seq=11", { id: lineage.episode_id });
+    // The seeded custody rows name this source too, so the coverage gate refuses first; the journal gate itself passes.
+    await driver.executeQuery("MATCH (n:MaterializationOperation) SET n.source_episode_id='018f0d8d-7b6a-7cc0-8b42-000000000004'");
+    await driver.executeQuery("CREATE (:Element:Episode {id:'018f0d8d-7b6a-7cc0-8b42-000000000004',ingest_seq:2})");
+    await new ExtractionJournal(join(runtimeRoot, "extraction-state.json")).set("018f0d8d-7b6a-7cc0-8b42-000000000021", legacyEntry);
+    const lines: string[] = [];
+    await migrate({ args: ["--dry-run"], output: line => lines.push(line) });
+    expect(lines.map(line => JSON.parse(line)).find(step => step.step === "check_journal")).toMatchObject({ entries: 1, unpruned: 0, unpruned_pipelines: [] });
+  }, 300000);
+
+  test.serial("refuses an unreadable journal file without graph changes", async () => {
+    await Bun.write(join(runtimeRoot, "extraction-state.json"), "{\"version\":1,\"pipelines\":{\"not-a-uuid\":{}}}");
+    const before = await graphSnapshot();
+    await expect(migrate({ output: () => undefined })).rejects.toThrow("journal_unreadable");
+    expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
+  test.serial("live copies seek each Element by id instead of scanning the index per ledger row", async () => {
+    const ids = Array.from({ length: 1001 }, (_, offset) => `018f0d8d-7b6a-7cc0-8b42-${String(offset + 200_000).padStart(12, "0")}`);
+    await driver.executeQuery(`UNWIND $ids AS id CREATE (:Element:Episode {id:id,ingest_seq:2}) CREATE (:EchoLineage {episode_id:id,lineage_mode:'direct',digest:'d'})
+      CREATE (:Element:Entity {id:'e'+id}) CREATE (:EntityWitness {entity_id:'e'+id,generation:$generation,policy_revision:1,state:'COMPLETE'})`, { ids, generation });
+    // CALL ... IN TRANSACTIONS needs an auto-commit transaction, as in the migration itself.
+    const session = driver.session();
+    try {
+      for (const statement of [COPY_LINEAGE(100), COPY_WITNESS(100)]) {
+        const { summary } = await session.run(`PROFILE ${statement}`);
+        const element = operators(summary.profile as ProfiledPlan).filter(operator => String(operator.arguments["Details"] ?? "").includes("Element(id)"));
+        expect(element.length).toBeGreaterThan(0);
+        // 1,002 ledgers must cost 1,002 index lookups: a per-row NodeIndexScan visits over two million rows here.
+        for (const operator of element) {
+          expect(operator.operatorType).toContain("NodeUniqueIndexSeek");
+          expect(operator.rows).toBeLessThanOrEqual(1002);
+        }
+      }
+    } finally { await session.close(); }
+    expect(await driver.executeQuery("MATCH (e:Episode) WHERE e.lineage_mode IS NOT NULL RETURN count(e) AS count").then(r => r.records[0]?.get("count"))).toBe(1002);
+    expect(await driver.executeQuery("MATCH (e:Entity) WHERE e.witness_generation IS NOT NULL RETURN count(e) AS count").then(r => r.records[0]?.get("count"))).toBe(1002);
   }, 300000);
 
   test.serial("refuses a candidate-bearing input without verdict or seal", async () => {
