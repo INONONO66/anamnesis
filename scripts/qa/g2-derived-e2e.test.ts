@@ -180,7 +180,11 @@ test("failed and cancelled claims and judges seal content-free omissions and fre
       }
     }
     for (const partition of ["episodes", "active_extraction"] as const) expect((await engine.store.recordExtractionCoverage({ generation_id: generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: sources.length }, context)).omission_digest).toBe(digest);
-    for (const task of failed) await expect(engine.store.retryModelTask(task, context)).rejects.toThrow("coverage_frozen");
+    // Sealed omissions are pruned from the journal; their tasks cannot be retried.
+    for (const task of failed) {
+      expect(await engine.store.extractionJournal.byTask(task.task_id)).toBeUndefined();
+      await expect(engine.store.retryModelTask(task, context)).rejects.toThrow("unknown_ModelTask");
+    }
     const selection = await engine.readExtractionSelection(context);
     expect((await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context)).state).toBe("active");
     const driver = neo4j.driver(uri!, neo4j.auth.basic("neo4j", password!));

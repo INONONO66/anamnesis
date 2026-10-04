@@ -33,11 +33,12 @@ test("digest then full-content top-20 recall preserves the fence and includes ma
       sources.push((await engine.remember({ content, time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "contrast", session: "s", actor: "fixture", record: String(i) } })).id);
     const generation = Generation.parse({ id: uuidv7(), stream: "extraction", incarnation: "b".repeat(64), state: "catching_up", covered_ingest_seq: 0, created_at: Date.now(), updated_at: Date.now() });
     await engine.store.createExtractionGeneration(generation, context);
-    const pipelines = new Map<string, string>();
+    // Coverage prunes terminal pipelines from the extraction journal, so each outcome is asserted as it settles.
     for (const source_id of sources) {
       const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id }, context);
-      pipelines.set(source_id, task.id);
-      await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "contrast", lease_ms: 30000 }, context);
+      const pipeline = await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "contrast", lease_ms: 30000 }, context);
+      if (pipeline.state !== "known") throw new Error("pipeline_unknown");
+      expect(pipeline.claim.state).toBe("succeeded"); expect(pipeline.judge?.state).toBe("succeeded");
     }
     for (const partition of ["episodes", "active_extraction"] as const) await engine.store.recordExtractionCoverage({ generation_id: generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: 20 }, context);
     expect(await engine.drainEmbeddingOutbox(1000)).toEqual({ drained: 0, reason: "embeddings_disabled" });
@@ -45,11 +46,6 @@ test("digest then full-content top-20 recall preserves the fence and includes ma
     await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context);
     // No provider: every Episode still lacks a vector.
     expect((await engine.status()).pendingOutbox).toBe(20);
-    for (const task_id of pipelines.values()) {
-      const pipeline = await engine.store.readExtractionPipeline(task_id, context);
-      if (pipeline.state !== "known") throw new Error("pipeline_unknown");
-      expect(pipeline.claim.state).toBe("succeeded"); expect(pipeline.judge?.state).toBe("succeeded");
-    }
     const rows = await driver.executeQuery("MATCH (f:Fact)-[:DERIVED_FROM]->(e:Episode) RETURN f.id AS id,f.content AS content,e.id AS source ORDER BY f.id");
     const visible = rows.records.filter(row => row.get("source") === sources[0]).map(row => String(row.get("id")));
     const hidden = String(rows.records.find(row => row.get("source") === sources[1])!.get("id"));

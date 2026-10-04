@@ -91,7 +91,7 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
     assert.equal(response.status, 200);
     return response.json();
   };
-  const engineOptions = { ...options, objectsRoot: root,
+  const engineOptions = { ...options, objectsRoot: root, extractionJournalPath: join(root, 'extraction-state.json'),
     extractionProvider: new HttpExtractionProvider({ endpoint, model: 'qa', model_incarnation: incarnation }),
     semanticReviewProvider: { profileId: hash('independent-semantic-judge'),
       resolve: async input => SemanticResolution.parse(await semanticRequest('resolve_semantic', input)),

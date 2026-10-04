@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { startProcess } from './runtime-scenarios.ts';
 
@@ -7,6 +7,7 @@ test('retained materialization persists valid identities through real Node and o
   expect(process.env.ANAMNESIS_TEST_NEO4J_URI).toBeTruthy();
   expect(process.env.ANAMNESIS_TEST_NEO4J_PASSWORD).toBeTruthy();
   const parent = resolve(process.env.G004_MATERIALIZATION_EVIDENCE ?? '.omo/evidence/g004-materialization-store');
+  await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, 'node-'));
   const bundle = join(root, 'fixture.mjs');
   const daemon = join(root, 'daemon.mjs');

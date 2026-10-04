@@ -69,7 +69,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     "ops extract is capability admission only; extraction uses Engine after ops down.",
     "verify/status RPC has no Episode/Fact/generation counters; committed ingest receipts and read-only owned-DB snapshots supplement verify health.",
     "Attempt 4 was cleaned before a recall probe could run; its second response was not recorded. Queries now use full Fact text and top-20 results; ranking code was not changed without evidence.",
-    "Pipeline outcomes are checked after coverage and cutover: every pipeline ends in a successful outcome or terminal omission.",
+    "Pipeline outcomes are captured before coverage prunes terminal journal entries: every pipeline ends in a successful outcome or terminal omission.",
   ];
   const llmMinIntervalMs = Number(process.env.ANAMNESIS_QA_LLM_MIN_INTERVAL_MS ?? "3000");
   const pacer = createLlmPacer(llmMinIntervalMs);
@@ -232,7 +232,8 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     // Engine's environment loader requires a password even with explicit options.
     process.env.ANAMNESIS_NEO4J_PASSWORD = password;
     delete process.env.ANAMNESIS_EMBEDDING_CONFIG; delete process.env.ANAMNESIS_EXTRACTION_CONFIG;
-    engine = new Engine({ uri: env.ANAMNESIS_NEO4J_URI, user: "neo4j", password, objectsRoot: join(root, "objects"), extractionProvider: provider, embeddingLedgerPath: join(root, "embedding-state.json"), ...(embeddingProvider ? { embeddingProvider } : {}) });
+    engine = new Engine({ uri: env.ANAMNESIS_NEO4J_URI, user: "neo4j", password, objectsRoot: join(root, "objects"), extractionProvider: provider,
+      embeddingLedgerPath: join(root, "embedding-state.json"), extractionJournalPath: join(root, "extraction-state.json"), ...(embeddingProvider ? { embeddingProvider } : {}) });
     // Pacing must precede lease acquisition, not consume the task's 30s lease.
     // runExtractionPipeline dispatches both claim and judge through this method.
     const runTask = engine.runExtractionTask.bind(engine);
@@ -242,23 +243,23 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     await engine.store.createExtractionGeneration(generation, context);
     const episodes = (await driver.executeQuery("MATCH (e:Episode) RETURN e.id AS id ORDER BY e.ingest_seq")).records.map(row => String(row.get("id")));
     const extractStart = Date.now();
-    const pipelines = new Map<string, string>();
+    const pipelineOutcomes: ExtractionPipeline[] = [];
     let completed = 0;
     const residual: { index: number; task_id: string; code: string }[] = [];
     summary.residual_extraction_errors = residual;
     for (const [index, source_id] of episodes.entries()) {
       const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id }, context);
-      pipelines.set(source_id, task.id);
       const deadline = Date.now() + 31 * 60 * 1000;
       for (let attempt = 0; ; attempt++) {
         const current: ExtractionPipeline = await engine.store.readExtractionPipeline(task.id, context); assert.equal(current.state, "known"); if (current.state !== "known") throw new Error("pipeline_unknown");
         const result = await engine.runExtractionPipeline({ task_id: task.id, expected_version: current.claim.version, worker_id: owner, lease_ms: 30000 }, context);
         assert.equal(result.state, "known"); if (result.state !== "known") throw new Error("pipeline_unknown");
         const failed = result.claim.state === "failed" ? { task: result.claim, attempt: result.claim_attempt } : result.judge?.state === "failed" ? { task: result.judge, attempt: result.judge_attempt } : undefined;
-        if (!failed) { assert.equal(result.judge?.state, "succeeded"); completed++; break; }
+        if (!failed) { assert.equal(result.judge?.state, "succeeded"); pipelineOutcomes.push(result); completed++; break; }
         const reason = failed.attempt?.reason ?? "unknown"; errors[reason] = (errors[reason] ?? 0) + 1; await log("extraction_error", { index, attempt, task: failed.task.kind, code: reason });
         if (quotaSince !== undefined && Date.now() - quotaSince > 30 * 60 * 1000) throw new Error("quota_exhausted_over_30_minutes");
         if (Date.now() >= deadline || attempt >= 3) {
+          pipelineOutcomes.push(result);
           residual.push({ index, task_id: failed.task.id, code: reason });
           if (residual.length > episodes.length * 0.1) throw new Error("extraction_failed:error_threshold");
           break;
@@ -270,6 +271,13 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     summary.extraction_completed = completed;
     durations.extraction_ms = Date.now() - extractStart;
     assert.ok(completed >= 50);
+    // Coverage prunes terminal journal entries, so assert the provider outcomes before sealing them.
+    assert.equal(pipelineOutcomes.length, episodes.length);
+    for (const pipeline of pipelineOutcomes) {
+      assert.equal(pipeline.state, "known");
+      if (pipeline.state !== "known") throw new Error("pipeline_unknown");
+      assert.ok(["failed", "cancelled"].includes(pipeline.claim.state) || (pipeline.claim.state === "succeeded" && pipeline.judge && ["succeeded", "failed", "cancelled"].includes(pipeline.judge.state)));
+    }
     // The Store seals successful audits or immutable terminal omissions; the
     // runner never fabricates coverage for unresolved tasks.
     summary.facts_materialized = (await driver.executeQuery("MATCH (f:Fact) RETURN count(f) AS count")).records[0]!.get("count");
@@ -295,13 +303,6 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     summary.stage = "cutover";
     await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context);
     const active = await snapshot(); summary.facts_active = active.facts_active; assert.ok(Number(active.facts_active) >= 50);
-    // Store coverage/cutover accepted each outcome: every pipeline is a success or a terminal omission.
-    summary.stage = "pipeline_outcomes";
-    for (const taskId of pipelines.values()) {
-      const pipeline = await engine.store.readExtractionPipeline(taskId, context);
-      assert.equal(pipeline.state, "known"); if (pipeline.state !== "known") throw new Error("pipeline_unknown");
-      assert.ok(["failed", "cancelled"].includes(pipeline.claim.state) || (pipeline.claim.state === "succeeded" && pipeline.judge && ["succeeded", "failed", "cancelled"].includes(pipeline.judge.state)));
-    }
     // pendingOutbox counts Episodes lacking a vector: zero after the embedding drain, every Episode when embeddings are disabled.
     assert.equal((await engine.status()).pendingOutbox, embeddingProvider ? 0 : count);
     durations.extraction_ms = Date.now() - extractStart;

@@ -26,7 +26,7 @@ async function setup(handler=async input=>output(input)) {
  const server=createServer((req,res)=>{void(async()=>{const chunks=[];for await(const part of req)chunks.push(part);const input=JSON.parse(Buffer.concat(chunks));requests.push(input);const result=await handler(input,events);res.end(JSON.stringify({model:'qa-pipeline',model_incarnation:incarnation,output:result}));})().catch(error=>{errors.push(String(error));res.statusCode=500;res.end();});});
  const listening=once(server,'listening');server.listen(0,'127.0.0.1');await listening;
  const config={endpoint:`http://127.0.0.1:${server.address().port}`,model:'qa-pipeline',model_incarnation:incarnation,timeout_ms:5000};
- const engine=new Engine({...options,objectsRoot:root,clock:()=>now,extractionProvider:new HttpExtractionProvider(config)});
+ const engine=new Engine({...options,objectsRoot:root,extractionJournalPath:root+'/extraction-state.json',clock:()=>now,extractionProvider:new HttpExtractionProvider(config)});
  const driver=neo4j.driver(options.uri,neo4j.auth.basic('neo4j',options.password),{disableLosslessIntegers:true});
  const query=async(cypher,params={})=>(await driver.executeQuery(cypher,params)).records.map(r=>r.toObject());
  await query('MATCH (n) DETACH DELETE n');await engine.init();await engine.claimWriterEpoch();
@@ -69,8 +69,10 @@ test('claim-only pipeline cannot advance audit coverage; decisions are atomic wi
   await assert.rejects(advance('active_extraction'),/extraction_audit_incomplete/);
   const result=await f.run(task);await advance('active_extraction');await advance('episodes');
   assert.equal((await f.store.getExtractionGeneration(f.g.id,context)).covered_ingest_seq,1);
-  await assert.rejects(f.store.cutoverExtractionGeneration({generation_id:f.g.id,expected_generation_id:null,expected_selector_version:0},context),{code:'activation_prerequisite_unavailable'});
-  audit('audit-only-coverage',{result});
+  // Embedding coverage gates activation only when an embedding provider is configured (#233); audit-only coverage with per-source custody activates.
+  const active=await f.store.cutoverExtractionGeneration({generation_id:f.g.id,expected_generation_id:null,expected_selector_version:0},context);
+  assert.equal(active.state,'active');
+  audit('audit-only-coverage',{result,active});
  }finally{await f.close();}
 });
 
@@ -91,7 +93,8 @@ for(const count of [0,64])test(`exact ${count} claim boundary retains a complete
 
 test('missing disposition authority rejects reads and cannot seal coverage',async()=>{
  const f=await setup();try{const task=await f.create(),result=await f.run(task);
-  await f.query('MATCH (d:ExtractionDisposition {judge_attempt_id:$id,claim_index:0}) DELETE d',{id:result.judge_attempt.id});
+  const entry=await f.store.extractionJournal.get(task.id);
+  await f.store.extractionJournal.set(task.id,{...entry,decisions:entry.decisions.filter(d=>d.claim_index!==0)});
   await assert.rejects(f.store.readExtractionPipeline(task.id,context),/extraction_audit_conflict/);
   await assert.rejects(f.store.recordExtractionCoverage({generation_id:f.g.id,partition:'active_extraction',expected_covered_ingest_seq:0,covered_ingest_seq:1},context),/extraction_audit_conflict/);
  }finally{await f.close();}
@@ -116,9 +119,8 @@ for(const race of ['deny','head','policy','cancel','parent'])test(`in-flight jud
   if(race==='parent'){
    // Deliberate retained-control corruption, not a production mutation API:
    // simulate a stale persisted parent binding while the real HTTP call is held.
-   const rows=await f.query('MATCH (p:ExtractionJudgeInput {id:$id}) RETURN p.body AS body',{id:state.judge.attempt_id});
-   const premise=JSON.parse(rows[0].body);premise.claim_context.attempt_id=uuid();
-   await f.query('MATCH (p:ExtractionJudgeInput {id:$id}) SET p.body=$body',{id:state.judge.attempt_id,body:JSON.stringify(premise)});
+   const entry=await f.store.extractionJournal.get(task.id);
+   await f.store.extractionJournal.set(task.id,{...entry,judge_input:{...entry.judge_input,claim_context:{...entry.judge_input.claim_context,attempt_id:uuid()}}});
   }
   f.events.emit('release');const result=await running;
   if(race==='deny')assert.match(String(result.error),/policy_denied/);
@@ -127,9 +129,10 @@ for(const race of ['deny','head','policy','cancel','parent'])test(`in-flight jud
    assert.equal(result.error.code,'extraction_audit_conflict');f.clock(state.judge.lease.expires_at);
    await f.store.settleModelTask({task_id:state.judge.id,expected_version:state.judge.version,lease_epoch:state.judge.lease.epoch,reason:'expired'},context);
   }
-  const rows=await f.query('MATCH (a:ExtractionAttempt {task_id:$id}) RETURN a.body AS body',{id:state.judge.id});assert.equal(rows.length,1);
-  const attempt=JSON.parse(rows[0].body);assert.equal(attempt.output,null);assert.equal(attempt.reason,race==='deny'?'policy_denied':['head','policy'].includes(race)?'premises_changed':race==='parent'?'expired':'cancelled');
-  assert.deepEqual(await semantic(f),[{count:0}]);assert.deepEqual(await f.query('MATCH (d:ExtractionDisposition) RETURN count(d) AS count'),[{count:0}]);audit('race',{race,attempt});
+  const entry=await f.store.extractionJournal.get(task.id);
+  const attempts=entry.attempts.filter(a=>a.task_id===state.judge.id);assert.equal(attempts.length,1);
+  const attempt=attempts[0];assert.equal(attempt.output,null);assert.equal(attempt.reason,race==='deny'?'policy_denied':['head','policy'].includes(race)?'premises_changed':race==='parent'?'expired':'cancelled');
+  assert.deepEqual(await semantic(f),[{count:0}]);assert.deepEqual(entry.decisions,[]);audit('race',{race,attempt});
  }finally{f.events.emit('release');if(running)await running;await f.close();}
 });
 
@@ -137,7 +140,7 @@ test('worker replacement settles judge loss; restart resumes without repeating c
  const f=await setup();let replacement;try{
   const task=await f.create();await f.engine.runExtractionTask(lease(task),context);const judge=await f.store.createExtractionJudgeTask({claim_task_id:task.id},context);
   const held=await f.store.leaseModelTask(lease(judge),context);
-  replacement=new Engine({...options,objectsRoot:f.root,clock:()=>100,extractionProvider:new HttpExtractionProvider(f.config)});await replacement.claimWriterEpoch();
+  replacement=new Engine({...options,objectsRoot:f.root,extractionJournalPath:f.root+'/extraction-state.json',clock:()=>100,extractionProvider:new HttpExtractionProvider(f.config)});await replacement.claimWriterEpoch();
   await assert.rejects(f.store.extractionTaskInput(held.id,held.lease.epoch,context),/stale_writer_epoch/);
   const lost=await replacement.store.settleModelTask({task_id:held.id,expected_version:held.version,lease_epoch:held.lease.epoch,reason:'worker_lost'},context);
   await replacement.store.retryModelTask({task_id:lost.id,expected_version:lost.version},context);
@@ -175,36 +178,48 @@ test('real daemon UDS authenticates audit boundaries and recovers UNKNOWN withou
   if(corruption==='reordered')body.decisions.reverse();
   return body;
  });const root=await mkdtemp('/tmp/g004-pipeline-uds-');let p;
+ // A configured daemon schedules the uncovered Episode as soon as it boots, so the judge hold is awaited before the spawn.
+ const entered=once(f.events,'entered',{signal:AbortSignal.timeout(30000)});
  const child=spawn('node',[process.env.G004_DAEMON],{env:{...process.env,ANAMNESIS_NEO4J_URI:options.uri,ANAMNESIS_NEO4J_PASSWORD:options.password,ANAMNESIS_RUNTIME_ROOT:root,ANAMNESIS_RUNTIME_TOKEN:'pipeline-token',ANAMNESIS_EXTRACTION_CONFIG:JSON.stringify(f.config)},stdio:['ignore','pipe','pipe']});
  const exited=once(child,'exit',{signal:AbortSignal.timeout(60000)});child.stderr.on('data',b=>process.stderr.write(b));const lines=createInterface({input:child.stdout});
- const ready=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('readiness deadline')),30000);lines.on('line',line=>{if(JSON.parse(line).event==='listening'){clearTimeout(timer);resolve();}});child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('exit',code=>{clearTimeout(timer);reject(new Error(`exit ${code}`))});});
+ // The daemon log is the durable audit record: one structured line per task transition.
+ const log=new EventEmitter(),logged=[];lines.on('line',line=>{const event=JSON.parse(line);logged.push(event);log.emit('line',event);});
+ const ready=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('readiness deadline')),30000);const observe=event=>{if(event.event!=='listening')return;clearTimeout(timer);log.off('line',observe);resolve();};log.on('line',observe);child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('exit',code=>{clearTimeout(timer);reject(new Error(`exit ${code}`))});});
+ const recorded=(name,match)=>{const seen=logged.find(event=>event.event===name&&match(event));if(seen)return Promise.resolve(seen);
+  return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{log.off('line',observe);reject(new Error(`${name} deadline`));},30000);const observe=event=>{if(event.event!==name||!match(event))return;clearTimeout(timer);log.off('line',observe);resolve(event);};log.on('line',observe);});};
  const ok=reply=>{assert.ok('result'in reply,JSON.stringify(reply));return reply.result;};
  try{
   await ready;p=peer(root+'/anamnesis.sock');const id=uuid();
   assert.equal((await p.request('extraction.audit.status',{pipeline_id:id})).error.data.code,'unauthenticated');
-  const hello=ok(await p.request('hello',{version:1,client:'qa',token:'pipeline-token',commit_mode:'receipt'}));assert.equal(hello.capabilities.extraction,false);
+  const hello=ok(await p.request('hello',{version:1,client:'qa',token:'pipeline-token',commit_mode:'receipt'}));assert.equal(hello.capabilities.extraction,true);
   assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:id})),{state:'unknown',pipeline_id:id});
-  const task=ok(await p.request('extraction.audit.create',{id,generation_id:f.g.id,source_id:f.source.id}));
-  const entered=once(f.events,'entered',{signal:AbortSignal.timeout(10000)});
-  const pending=p.request('extraction.audit.run',lease(task)).then(value=>({value}),error=>({error}));
-  await entered;p.socket.destroy();assert.match(String((await pending).error),/socket closed/);
-  f.events.emit('release');
+  // The scheduler adopted the fixture's catching-up generation and owns the Episode's work key; a second admission fails closed.
+  await entered;const created=await recorded('extraction.task.created',event=>event.source_id===f.source.id&&event.kind==='claim');
+  assert.equal(created.generation_id,f.g.id);assert.equal(created.work_key,`${f.g.id}:${f.source.id}`);const pipeline=created.pipeline_id;
+  assert.ok('error'in await p.request('extraction.audit.create',{id,generation_id:f.g.id,source_id:f.source.id}));
+  assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:id})),{state:'unknown',pipeline_id:id});
+  const running=ok(await p.request('extraction.audit.status',{pipeline_id:pipeline}));assert.equal(running.claim.state,'succeeded');assert.equal(running.judge.state,'leased');
+  // A client that vanishes while the judge call is held does not abort the daemon's pipeline.
+  p.socket.destroy();f.events.emit('release');
+  const judged=await recorded('extraction.attempt.recorded',event=>event.pipeline_id===pipeline&&event.kind==='judge');
+  assert.equal(judged.state,'succeeded');assert.equal(judged.decisions,4);assert.equal(f.requests.length,2);
   p=peer(root+'/anamnesis.sock');ok(await p.request('hello',{version:1,client:'qa-new',token:'pipeline-token',commit_mode:'receipt'}));
-  const result=ok(await p.request('extraction.audit.status',{pipeline_id:id}));assert.equal(result.judge.state,'succeeded');
-  assert.deepEqual(ok(await p.request('extraction.audit.run',lease(task))),result);assert.equal(f.requests.length,2);
+  // Coverage seals the terminal pipeline and prunes it from the state file; afterwards status answers unknown and the log line is the record.
+  const pruned=await recorded('extraction.pipeline.pruned',event=>event.pipeline_id===pipeline);assert.equal(pruned.sealed_ingest_seq,1);
+  assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:pipeline})),{state:'unknown',pipeline_id:pipeline});
   for(const mode of ['partial','duplicate','out_of_range','reordered']){
    corruption=mode;
    const episode={schema:'anamnesis.original-message/1',content:'Aé🙂Z',mass:0.5,properties:{},time:f.original.time,origin:{...f.original.origin,record:mode}};
    const remembered=ok(await p.request('remember',{episode,source_revision:mode,expected_previous_revision_key:null}));
-   const next=ok(await p.request('extraction.audit.create',{id:uuid(),generation_id:f.g.id,source_id:remembered.id}));
-   const refused=ok(await p.request('extraction.audit.run',lease(next)));
-   assert.equal(refused.judge_attempt.state,'failed');assert.equal(refused.judge_attempt.reason,'provider_mismatch');assert.equal(refused.judge_attempt.detail,mode==='out_of_range'?'normalize':'judge_shape');assert.equal(refused.judge_attempt.output,null);assert.deepEqual(refused.decisions,[]);
-   assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:next.id})),refused);
-   audit('uds-decision-refusal',{mode,refused});
+   const refused=await recorded('extraction.attempt.recorded',event=>event.source_id===remembered.id&&event.kind==='judge');
+   assert.equal(refused.state,'failed');assert.equal(refused.reason,'provider_mismatch');assert.equal(refused.detail,mode==='out_of_range'?'normalize':'judge_shape');assert.equal(refused.decisions,0);
+   const status=ok(await p.request('extraction.audit.status',{pipeline_id:refused.pipeline_id}));assert.equal(status.claim.state,'succeeded');assert.deepEqual(status.decisions,[]);
+   audit('uds-decision-refusal',{mode,refused,status});
   }
   const denied=ok(await p.request('policy.set',{policy_id:uuid(),selector:{episode_id:f.source.id},scope:'content'}));
-  assert.equal((await p.request('extraction.audit.status',{pipeline_id:id})).error.data.code,'policy_denied');
-  assert.deepEqual(await semantic(f),[{count:0}]);audit('uds-audit',{hello,result,denied});
+  // The pruned pipeline carries no Episode to authorize: a denied source still answers unknown, never its content.
+  assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:pipeline})),{state:'unknown',pipeline_id:pipeline});
+  assert.deepEqual(await semantic(f),[{count:0}]);audit('uds-audit',{hello,created,judged,pruned,denied});
   ok(await p.request('shutdown'));assert.equal((await exited)[0],0);
  }finally{p?.socket.destroy();lines.close();if(child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await exited;}await rm(root,{recursive:true,force:true});await f.close();audit('uds-cleanup',{root,removed:true,exit:child.exitCode,signal:child.signalCode});}
 });
