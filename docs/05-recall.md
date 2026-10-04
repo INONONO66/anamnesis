@@ -670,7 +670,7 @@ tokenizer versions, and SHA-256 result/context digests. It also stores an
 immutable
 `selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
 {element_id, root_episode_ids, echo_depth, complete} records))`. That stored
-value is what a later assistant Episode's `EchoLineage` copies into
+value is what a later assistant Episode copies into its lineage properties in
 `context_digests`, so lineage never depends on recomputing a selection after
 the feedback window closes (docs/01 §3.3). Original text need not be
 duplicated: its immutable Episode IDs suffice. A write failure prevents

@@ -431,7 +431,7 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
                        parent receipt, including expired parents. Any changed
                        version-1 field → reject revision_conflict. Newly
                        supplied origin_role or lineage values sit outside
-                       version-1 identity: they create no EchoLineage, repair
+                       version-1 identity: they create no lineage properties, repair
                        no lineage, change no eligibility and mutate nothing
               exists, version 2                → recompute the version-2 body.
                        Same digest → no-op. A changed origin_role, a changed
@@ -444,7 +444,7 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
                        lineage_mode = direct | receipts; receipts requires
                        1..4 distinct parent_recall_ids, each an existing
                        receipt bound to this authenticated caller.
-                       Resolve the bounded EchoLineage body under docs/01 §3.3;
+                       Resolve the bounded Episode lineage body under docs/01 §3.3;
                        lineage_digest = sha256(RFC-8785 canonical body).
                        Set server-selected episode_digest_version = 2 and
                        digest = sha256(RFC-8785 canonical JSON of
@@ -452,11 +452,11 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
                           time, payload_hash, previous_revision_key, origin_role,
                           lineage_digest}).
                        Only then CREATE below.
-         b. CAS (:OriginHead {origin_key})
+         b. Under the Meta writer fence, find the newest Episode for
+            origin_key using episode_origin_head (ingest_seq DESC)
               no head + previous=null         → CREATE first Episode
               head=previous_revision_key      → CREATE new Episode,
-                                                 new -[:INVALIDATES]-> previous,
-                                                 SET head=new revision_key
+                                                 new -[:INVALIDATES]-> previous
               otherwise                       → reject stale_revision
          c. MERGE Payload metadata, HAS_PAYLOAD
          d. update the rebuildable session topology around this Episode
@@ -466,15 +466,15 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
             Every concurrent remember contends for this one node's write lock,
             which Neo4j holds until commit, so the increment rides on the last
             statement that nothing else in the transaction depends on
-         f2. CREATE the EchoLineage row for this newly created version-2
-            Episode (docs/01 §3.3); an existing version-1 row never reaches
+         f2. SET lineage properties on this newly created version-2
+            Episode (docs/01 §3.3); an existing version-1 Episode never reaches
             this step:
             copy each parent receipt's bounded delivered snapshot, pair the
             parent IDs with their selection digests, sort by recall ID, store
             the sorted distinct root union and 1 + max(item.echo_depth).
             Every parent's created_at must precede this ingestion. Either cap
-            overflowing sets complete=false; an exact retry of the same body
-            is a no-op and a different body is idempotency_conflict
+            overflowing sets lineage_complete=false; an exact retry of the
+            same body is a no-op and a changed body is revision_conflict
          g. For each distinct M in {active model, target model if set},
               CREATE Outbox
               {episode_id, stage: embed_episode, target_generation: 0,
@@ -492,8 +492,9 @@ Append-only adapters use their immutable record ID as both `record` and
 `source_revision`. `revision_key` is unique, while `digest` detects an adapter
 that mutates one token; the stored `episode_digest_version` decides which body
 that comparison uses, and an existing row's version always wins over the
-version a new caller or journal entry would have created (docs/01 §1). `OriginHead` is a rebuildable CAS cache over the
-immutable INVALIDATES chain.
+version a new caller or journal entry would have created (docs/01 §1).
+The origin head is the newest Episode by indexed `ingest_seq` under the
+Meta writer fence, not a separate CAS cache.
 
 remember calls no LLM. It does not embed either — ingestion must succeed even
 when the embedding service is down. Extraction and embedding are driven by the
@@ -631,7 +632,7 @@ decisions. LLM calls cannot sit inside a transaction.
         · normal extraction: target_generation = active[extraction]
         · rebuild/rollback: target state is BUILDING or CATCHING_UP
         · require ingest_seq = Generation.next_ingest_seq
-        capture input_head = OriginHead[episode.origin_key]
+        capture input_head = newest Episode.revision_key for episode.origin_key
         capture policy_revision; control Episodes complete as no-ops
         content-denied input creates no derived output or re_mention Hit
     ── extraction LLM (outside a tx) ────────────────────────────────────────
@@ -715,12 +716,12 @@ decisions. LLM calls cannot sit inside a transaction.
         · normal path: active[extraction] == target_generation
         · rebuild path: target state is still BUILDING or CATCHING_UP
         · ingest_seq still equals Generation.next_ingest_seq
-        · OriginHead[episode.origin_key] still equals input_head
+        · newest Episode.revision_key for episode.origin_key still equals input_head
         · rerun the bounded reads and require the exact candidate_digest
         · every referenced candidate and replacement-context edge is unchanged
         · for an accepted adjudication proposal, compare its **stored** fields
           directly: target_generation still ACTIVE,
-          OriginHead[episode.origin_key] == proposal.source_head_revision_key,
+          newest Episode.revision_key for episode.origin_key == proposal.source_head_revision_key,
           Meta.policy_revision == proposal.policy_revision, the revalidated
           claim reproduces proposal.proposed_claim_digest, and the repeated
           bounded read reproduces proposal.candidate_digest. Never infer
@@ -924,7 +925,8 @@ semantic link.
                         W5 transaction that used it (single use)
 ```
 
-`source_head_revision_key` is the exact 64-lowercase-hex `OriginHead` value
+`source_head_revision_key` is the exact 64-lowercase-hex newest Episode
+`revision_key` for that origin by indexed `ingest_seq`
 captured before the bounded candidate read and the model call;
 `policy_revision` is the nonnegative safe integer captured at that same point.
 Both are **persisted premises**, not values reconstructed later from the

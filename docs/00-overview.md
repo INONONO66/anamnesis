@@ -26,7 +26,7 @@ for offline analysis and as an accuracy baseline only.
     ├─ originals: Episode · Hit ledger              ├─ objects/   payload bytes (content-addressed, part of the authority)
     │             policy Episodes                   ├─ spool/     transient remember() queue while Neo4j is down
     ├─ control:   RecallReceipt (append-only)       └─ neo4j/     container volume
-    │             InvalidationEvidence · EchoLineage
+    │             InvalidationEvidence · Episode lineage properties
     │             adjudication + embedding records (append-only)
     ├─ derived:   Fact · Entity · Community
     │             Link · embedding (generations)
@@ -78,7 +78,7 @@ exists yet, and the gates that will produce one are in
 2. **The derived layer is regenerable.** Fact, Entity, Community, Link and
    embeddings must be rebuildable at any time from the originals layer, the
    Hit ledger, the retained content-free `InvalidationEvidence` ledger, the
-   retained `EchoLineage`, `AdjudicationReview` / operator-adjudication
+   retained Episode lineage properties, `AdjudicationReview` / operator-adjudication
    Episode, `AdjudicationCorrection` and `EmbeddingResolution` control
    records, and the explicit old/new target mappings of each rebuild.
    Originals and Hits alone are not enough: a denied invalidator's text may

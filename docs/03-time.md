@@ -81,21 +81,24 @@ even when structural caches are stale.
 The Entity witness is one more property comparison, not a per-request scan:
 
 ```text
-  earliest_allowed_from(n, g_e, policy_revision)
-    = min { e.time_utc : (e)-[:MENTIONS]->(n), e.generation ∈ {none, g_e},
-            allowed(e, policy_revision) }        null if the set is empty
-
-  witnessed(n, T) = earliest_allowed_from(n, g_e, policy_revision) <= T
+  witnessed(n, T) = n.generation = g_e
+                    && n.visible_from_utc <= T
+                    && n.witness_generation = g_e
+                    && n.witness_policy_revision = policy_revision
 ```
 
-`EntityWitness {generation, policy_revision, entity_id, earliest_allowed_from}`
-rows are rebuilt for the active generation whenever `policy_revision`
-advances, as part of the policy barrier's reconciliation, and are keyed by
-`(generation, policy_revision)` only. Echo lineage adds nothing to this axis:
+The witness is stored on the Entity itself as the indexed marker
+`Entity.{witness_generation, witness_policy_revision}` (index `entity_witness`,
+docs/01 §7), set in the transaction that writes an allowed mention for
+the current generation and policy revision; activation requires the marker on
+every distinct Entity the generation's Facts mention
+(`entity_witness_policy_coverage`). The pinned generation and policy revision
+must match the stored marker; there is no separate witness row. Echo lineage
+adds nothing to this axis:
 `echo_depth`, roots and receipt times are operational provenance and never
 supply or shift a Fact's event time or its visibility at `T` (D49). There is no cache keyed by an arbitrary
-request `T`; the request supplies `T` and compares. A null or missing row,
-or an unavailable cache, excludes the Entity from candidates, seeds and
+request `T`; the request supplies `T` and compares `visible_from_utc`. An
+absent or mismatched marker excludes the Entity from candidates, seeds and
 conduction; it never falls back to `visible_from_utc` alone (docs/01 §3.2,
 §7).
 
@@ -342,9 +345,7 @@ LIMIT 64
 // Entity temporal visibility plus the current-policy witness (docs/03 §3).
 MATCH (n:Entity {id: $entity_id})
 WHERE n.generation = $g_e AND n.visible_from_utc <= $T
-MATCH (w:EntityWitness {generation: $g_e, policy_revision: $policy_revision,
-                        entity_id: n.id})
-WHERE w.earliest_allowed_from IS NOT NULL AND w.earliest_allowed_from <= $T
+  AND n.witness_generation = $g_e AND n.witness_policy_revision = $policy_revision
 RETURN n.id
 ```
 

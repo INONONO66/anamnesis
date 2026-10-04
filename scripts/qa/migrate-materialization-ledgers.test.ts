@@ -19,6 +19,7 @@ const lineage = {
   complete: true,
 };
 let driver: Driver;
+const migrate = (options: Parameters<typeof main>[0] = {}) => main({ ...db, ...options });
 const legacyConstraints = ["echo_lineage_episode", "origin_head_key", "materialization_operation_id"] as const;
 const newIndexes = ["episode_origin_head", "entity_witness"] as const;
 
@@ -26,18 +27,33 @@ async function count(label: string): Promise<number> {
   const result = await driver.executeQuery(`MATCH (n:${label}) RETURN count(n) AS count`);
   return result.records[0]?.get("count") ?? 0;
 }
+async function graphSnapshot(): Promise<unknown[]> {
+  const result = await driver.executeQuery(`
+    MATCH (n)
+    OPTIONAL MATCH (n)-[r]->(target)
+    WITH n,r,target ORDER BY elementId(r)
+    WITH n,collect(CASE WHEN r IS NULL THEN null ELSE {
+      id:elementId(r),type:type(r),target:elementId(target),props:properties(r)
+    } END) AS raw_edges
+    RETURN elementId(n) AS id,labels(n) AS labels,properties(n) AS props,
+      [edge IN raw_edges WHERE edge IS NOT NULL] AS edges
+    ORDER BY id`);
+  return result.records.map(record => record.toObject());
+}
 async function seed(legacy = true): Promise<void> {
   await driver.executeQuery("MATCH (n) DETACH DELETE n");
-  await driver.executeQuery("CREATE (:ExtractionGeneration {id:'g1'})");
-  await driver.executeQuery("CREATE (:ExtractionCoverage {generation_id:'g1',partition:'episodes',covered_ingest_seq:10})");
-  await driver.executeQuery("CREATE (:ExtractionCoverage {generation_id:'g1',partition:'active_extraction',covered_ingest_seq:10})");
+  await driver.executeQuery("CREATE (:ExtractionGeneration {id:'018f0d8d-7b6a-7cc0-8b42-000000000011'})");
+  await driver.executeQuery("CREATE (:ExtractionCoverage {generation_id:'018f0d8d-7b6a-7cc0-8b42-000000000011',partition:'episodes',covered_ingest_seq:10})");
+  await driver.executeQuery("CREATE (:ExtractionCoverage {generation_id:'018f0d8d-7b6a-7cc0-8b42-000000000011',partition:'active_extraction',covered_ingest_seq:10})");
   await driver.executeQuery("CREATE (:Episode {id:$id,ingest_seq:1})", { id: lineage.episode_id });
   await driver.executeQuery("CREATE (:Entity {id:'018f0d8d-7b6a-7cc0-8b42-000000000002'})");
-  await driver.executeQuery("CREATE (:Fact {id:'018f0d8d-7b6a-7cc0-8b42-000000000003',generation:'g1',meaning_digest:'digest',primary_episode_id:$id})", { id: lineage.episode_id });
+  await driver.executeQuery("CREATE (:Fact {id:'018f0d8d-7b6a-7cc0-8b42-000000000003',generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',meaning_digest:'digest',primary_episode_id:$id})", { id: lineage.episode_id });
   if (!legacy) return;
   await driver.executeQuery("CREATE (:EchoLineage $props)", { props: { ...lineage, body: canonicalExtractionBody(lineage), digest: extractionBodyDigest(lineage) } });
-  await driver.executeQuery("CREATE (:EntityWitness {entity_id:'018f0d8d-7b6a-7cc0-8b42-000000000002',generation:'g1',policy_revision:1,state:'COMPLETE'})");
-  await driver.executeQuery("CREATE (:MaterializationOperation {id:'op',result:'{}',occurrence_key:'occ',source_episode_id:$id,generation:'g1'})", { id: lineage.episode_id });
+  await driver.executeQuery("CREATE (:EntityWitness {entity_id:'018f0d8d-7b6a-7cc0-8b42-000000000002',generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',policy_revision:1,state:'COMPLETE'})");
+  await driver.executeQuery("CREATE (:MaterializationOperation {id:'018f0d8d-7b6a-7cc0-8b42-000000000010',digest:$digest,result:$result,occurrence_key:$occurrence,source_episode_id:$id,generation:$generation})",
+    { id: lineage.episode_id, digest: "a".repeat(64), result: canonicalExtractionBody({ created: false, facts: 0, refused: [] }),
+      occurrence: "legacy-custody", generation: "018f0d8d-7b6a-7cc0-8b42-000000000011" });
   await driver.executeQuery("CREATE (:OriginHead {origin_key:'origin'})");
   await driver.executeQuery("CREATE (:FactRelationVerdict {occurrence_key:'verdict'})");
 }
@@ -61,7 +77,7 @@ afterEach(async () => {
 describe.serial("materialization ledger migration", () => {
   test.serial("dry-run reports gates and changes nothing", async () => {
     const lines: string[] = [];
-    const result = await main({ args: ["--dry-run"], ...db, output: line => lines.push(line) });
+    const result = await migrate({ args: ["--dry-run"], output: line => lines.push(line) });
     expect(result.dry_run).toBe(true);
     expect(await count("EchoLineage")).toBe(1);
     expect(await count("EntityWitness")).toBe(1);
@@ -71,6 +87,9 @@ describe.serial("materialization ledger migration", () => {
     expect(steps[0].indexes).toContain("relation_input_occurrence");
     expect(steps[3].split).toEqual([]);
     expect(steps[4].count).toBe(0);
+    expect(steps[4].terminal_zero_candidate).toBe(0);
+    expect(steps[4].sealed_exhausted).toBe(0);
+    expect(steps[4].pending).toBe(0);
     expect(steps[5].count).toBe(0);
     expect(steps.slice(6).every(step => step.dry_run === true)).toBe(true);
     const episode = await driver.executeQuery("MATCH (e:Episode {id:$id}) RETURN e.lineage_mode AS mode", { id: lineage.episode_id });
@@ -81,20 +100,76 @@ describe.serial("materialization ledger migration", () => {
 
   test.serial("refuses when an EchoLineage Episode is missing", async () => {
     await driver.executeQuery("MATCH (e:Episode) DETACH DELETE e");
-    await expect(main({ ...db, output: () => undefined })).rejects.toThrow("copy_mismatch");
+    await expect(migrate({ output: () => undefined })).rejects.toThrow("copy_mismatch");
     expect(await count("EchoLineage")).toBe(1);
   }, 300000);
 
   test.serial("refuses an in-flight operation", async () => {
     await driver.executeQuery("MATCH (o:MaterializationOperation) SET o.result=null,o.occurrence_key=null");
-    await expect(main({ ...db, output: () => undefined })).rejects.toThrow("In-flight");
+    await expect(migrate({ output: () => undefined })).rejects.toThrow("In-flight");
     expect(await count("MaterializationOperation")).toBe(1);
     expect(await count("EchoLineage")).toBe(1);
   }, 300000);
 
+  test.serial("allows zero-candidate inputs without a verdict", async () => {
+    await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:'zero',candidates:0,generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',source_episode_id:$source})", { source: lineage.episode_id });
+    const lines: string[] = [];
+    await migrate({ args: ["--dry-run"], output: line => lines.push(line) });
+    const gate = lines.map(line => JSON.parse(line)).find(step => step.step === "check_inflight");
+    expect(gate).toMatchObject({ count: 0, terminal_zero_candidate: 1, sealed_exhausted: 0, pending: 0 });
+    expect(await count("FactRelationInput")).toBe(1);
+  }, 300000);
+
+  test.serial("allows sealed exhausted inputs as terminal", async () => {
+    const generation = "018f0d8d-7b6a-7cc0-8b42-000000000011";
+    const occurrence = extractionBodyDigest([generation, lineage.episode_id]);
+    const relationOccurrence = "a".repeat(64);
+    const result = { created: false, facts: 0, refused: [], omitted: "relation_judge_exhausted", failures: 4, occurrences: [relationOccurrence] };
+    await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:$relationOccurrence,candidates:1,generation:$generation,source_episode_id:$source})",
+      { generation, relationOccurrence, source: lineage.episode_id });
+    await driver.executeQuery("CREATE (:MaterializationOperation {id:$id,digest:$digest,occurrence_key:$occurrence,result:$result,generation:$generation,source_episode_id:$source})",
+      { id: "018f0d8d-7b6a-7cc0-8b42-000000000012", digest: "b".repeat(64), occurrence,
+        result: canonicalExtractionBody(result), generation, source: lineage.episode_id });
+    const lines: string[] = [];
+    await migrate({ args: ["--dry-run"], output: line => lines.push(line) });
+    const gate = lines.map(line => JSON.parse(line)).find(step => step.step === "check_inflight");
+    expect(gate).toMatchObject({ count: 0, terminal_zero_candidate: 0, sealed_exhausted: 1, pending: 0 });
+    expect(await count("MaterializationOperation")).toBe(2);
+  }, 300000);
+
+  test.serial("refuses a candidate-bearing input without verdict or seal", async () => {
+    await driver.executeQuery("CREATE (:FactRelationInput {occurrence_key:'pending',candidates:1,generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',source_episode_id:$source})",
+      { source: lineage.episode_id });
+    const lines: string[] = [];
+    await expect(migrate({ output: line => lines.push(line) })).rejects.toThrow("In-flight");
+    expect(lines.map(line => JSON.parse(line)).find(step => step.step === "check_inflight"))
+      .toMatchObject({ count: 1, pending: 1, sealed_exhausted: 0 });
+    expect(await count("FactRelationInput")).toBe(1);
+    expect(await count("EchoLineage")).toBe(1);
+  }, 300000);
+
+  test.serial("refuses corrupt lineage past the first thousand without graph changes", async () => {
+    const entries = Array.from({ length: 1000 }, (_, offset) => {
+      const id = `018f0d8d-7b6a-7cc0-8b42-${String(offset + 2).padStart(12, "0")}`;
+      const body = { ...lineage, episode_id: id, root_episode_ids: [id] };
+      return { id, props: { ...body, body: canonicalExtractionBody(body), digest: offset === 999 ? "f".repeat(64) : extractionBodyDigest(body) } };
+    });
+    await driver.executeQuery("UNWIND $entries AS entry CREATE (e:Episode {id:entry.id,ingest_seq:2}) CREATE (l:EchoLineage) SET l = entry.props", { entries });
+    const before = await graphSnapshot();
+    await expect(migrate({ args: ["--dry-run"], output: () => undefined })).rejects.toThrow("copy_mismatch");
+    expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
+  test.serial("refuses Episode and ledger lineage digest disagreement without graph changes", async () => {
+    await driver.executeQuery("MATCH (e:Episode {id:$id}) SET e.lineage_digest=$digest", { id: lineage.episode_id, digest: "f".repeat(64) });
+    const before = await graphSnapshot();
+    await expect(migrate({ args: ["--dry-run"], output: () => undefined })).rejects.toThrow("copy_mismatch");
+    expect(await graphSnapshot()).toEqual(before);
+  }, 300000);
+
   test.serial("copies and removes all six ledgers on live run", async () => {
     const lines: string[] = [];
-    const result = await main({ args: ["--batch", "1"], ...db, output: line => lines.push(line) });
+    const result = await migrate({ args: ["--batch", "1"], output: line => lines.push(line) });
     expect(result.counts_after).toEqual({
       MaterializationOperation: 0, OriginHead: 0, EchoLineage: 0,
       FactRelationInput: 0, FactRelationVerdict: 0, EntityWitness: 0,
@@ -107,7 +182,7 @@ describe.serial("materialization ledger migration", () => {
     expect(episode.records[0]?.get("depth")).toBe(0);
     expect(episode.records[0]?.get("complete")).toBe(true);
     const witness = await driver.executeQuery("MATCH (e:Entity) RETURN e.witness_generation AS generation,e.witness_policy_revision AS revision");
-    expect(witness.records[0]?.get("generation")).toBe("g1");
+    expect(witness.records[0]?.get("generation")).toBe("018f0d8d-7b6a-7cc0-8b42-000000000011");
     expect(witness.records[0]?.get("revision")).toBe(1);
     const constraints = await driver.executeQuery("SHOW CONSTRAINTS YIELD name RETURN name");
     expect(constraints.records.map(row => row.get("name"))).toContain("fact_identity");
@@ -115,7 +190,7 @@ describe.serial("materialization ledger migration", () => {
     const indexes = await driver.executeQuery("SHOW INDEXES YIELD name RETURN name");
     for (const name of newIndexes) expect(indexes.records.map(row => row.get("name"))).toContain(name);
     expect(indexes.records.map(row => row.get("name"))).not.toContain("relation_input_occurrence");
-    expect(JSON.parse(lines.at(-1) ?? "{}").step).toBe("verify");
+    expect(JSON.parse(lines[lines.length - 1] ?? "{}").step).toBe("verify");
     expect(await count("Fact")).toBe(1);
   }, 300000);
 });

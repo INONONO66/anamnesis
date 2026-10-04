@@ -14,7 +14,6 @@ type Options = {
   readonly database?: string;
   readonly output?: (line: string) => void;
 };
-
 function required(value: string | undefined, name: string): string {
   if (!value) throw new Error(`${name} is required to run the materialization ledger migration`);
   return value;
@@ -76,14 +75,44 @@ export async function main(options: Options = {}) {
     const operations = (await session.run<{ id: string }>(`MATCH (o:MaterializationOperation)
       WHERE o.result IS NULL OR o.occurrence_key IS NULL
       RETURN o.id AS id ORDER BY id LIMIT 100`)).records.map(row => row.get("id"));
-    const inputs = (await session.run<{ id: string }>(`MATCH (i:FactRelationInput)
-      WHERE NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
-      RETURN i.occurrence_key AS id ORDER BY id LIMIT 100`)).records.map(row => row.get("id"));
     const operationCount = await number(`MATCH (o:MaterializationOperation)
       WHERE o.result IS NULL OR o.occurrence_key IS NULL RETURN count(o) AS count`);
-    const inputCount = await number(`MATCH (i:FactRelationInput)
-      WHERE NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) } RETURN count(i) AS count`);
-    return { operations, inputs, count: operationCount + inputCount };
+    const zeroCandidate = await number(`MATCH (i:FactRelationInput)
+      WHERE i.candidates = 0 RETURN count(i) AS count`);
+    const sealed = new Set<string>();
+    const sealedRows = await session.run<{ generation: string; source: string; occurrence: string; result: string }>(
+      `MATCH (o:MaterializationOperation)
+       WHERE o.result CONTAINS '"omitted":"relation_judge_exhausted"' AND o.occurrence_key IS NOT NULL
+         AND o.generation IS NOT NULL AND o.source_episode_id IS NOT NULL
+       RETURN o.generation AS generation,o.source_episode_id AS source,o.occurrence_key AS occurrence,o.result AS result`);
+    for (const row of sealedRows.records) {
+      let result: unknown;
+      try { result = JSON.parse(row.get("result")); } catch { continue; }
+      if (typeof result === "object" && result !== null && "omitted" in result
+        && result.omitted === "relation_judge_exhausted"
+        && row.get("occurrence") === extractionBodyDigest([row.get("generation"), row.get("source")]))
+        sealed.add(`${row.get("generation")}:${row.get("source")}`);
+    }
+    const pendingRows = await session.run<{ id: string; generation: string; source: string }>(`MATCH (i:FactRelationInput)
+      WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
+      RETURN i.occurrence_key AS id,i.generation AS generation,i.source_episode_id AS source ORDER BY id`);
+    const pending: string[] = [], sealedExhausted: string[] = [];
+    let pendingCount = 0, sealedCount = 0;
+    for (const row of pendingRows.records) {
+      const id = row.get("id"), sourceKey = `${row.get("generation")}:${row.get("source")}`;
+      if (sealed.has(sourceKey)) {
+        sealedCount++;
+        if (sealedExhausted.length < 100) sealedExhausted.push(id);
+      } else {
+        pendingCount++;
+        if (pending.length < 100) pending.push(id);
+      }
+    }
+    return {
+      operations, inputs: pending, count: operationCount + pendingCount,
+      terminal_zero_candidate: zeroCandidate, sealed_exhausted: sealedCount, pending: pendingCount,
+      sealed_inputs: sealedExhausted,
+    };
   };
   try {
     const before = await counts(), legacySchema = await schema();
@@ -124,32 +153,49 @@ export async function main(options: Options = {}) {
     const lineageJoined = await number(`MATCH (l:EchoLineage) MATCH (e:Episode) WHERE e.id = l.episode_id
       RETURN count(DISTINCT e) AS count`);
     const existingLineage = await number(`MATCH (e:Episode) WHERE e.lineage_mode IS NOT NULL RETURN count(e) AS count`);
-    const lineageSample = await session.run<{
-      digest: string; body: string; episode_id: string; lineage_mode: string; parent_recall_ids: string[];
-      context_digests: string[]; root_episode_ids: string[]; echo_depth: number; complete: boolean;
-    }>(
-      "MATCH (l:EchoLineage) RETURN l.digest AS digest,l.body AS body,l.episode_id AS episode_id,l.lineage_mode AS lineage_mode," +
-      "l.parent_recall_ids AS parent_recall_ids,l.context_digests AS context_digests,l.root_episode_ids AS root_episode_ids," +
-      "l.echo_depth AS echo_depth,l.complete AS complete ORDER BY l.episode_id LIMIT 1000");
+    const unrelatedLineage = (await session.run<{ id: string }>(`MATCH (e:Episode)
+      WHERE e.lineage_mode IS NOT NULL AND NOT EXISTS { MATCH (l:EchoLineage {episode_id:e.id}) }
+      RETURN e.id AS id LIMIT 20`)).records.map(row => row.get("id"));
     const badBodies: string[] = [];
-    for (const row of lineageSample.records) {
-      try {
-        const parsed = EchoLineage.parse(JSON.parse(row.get("body")));
-        const stored = {
-          episode_id: row.get("episode_id"), lineage_mode: row.get("lineage_mode"),
-          parent_recall_ids: row.get("parent_recall_ids"), context_digests: row.get("context_digests"),
-          root_episode_ids: row.get("root_episode_ids"), echo_depth: row.get("echo_depth"), complete: row.get("complete"),
-        };
-        if (canonicalExtractionBody(parsed) !== row.get("body") || canonicalExtractionBody(parsed) !== canonicalExtractionBody(stored)
-          || extractionBodyDigest(parsed) !== row.get("digest")) badBodies.push(`${parsed.episode_id}:body-or-digest`);
-      } catch (error) {
-        badBodies.push(`${row.get("body")}:${String(error)}`);
+    let lineageCursor = "", lineageValidated = 0;
+    while (true) {
+      const rows = await session.run<{
+        digest: string; body: string; episode_id: string; lineage_mode: string; parent_recall_ids: string[];
+        context_digests: string[]; root_episode_ids: string[]; echo_depth: number; complete: boolean; episode_digest: string | null;
+      }>(
+        `MATCH (l:EchoLineage)
+         WHERE l.episode_id > $cursor
+         MATCH (e:Episode {id:l.episode_id})
+         RETURN l.digest AS digest,l.body AS body,l.episode_id AS episode_id,l.lineage_mode AS lineage_mode,
+           l.parent_recall_ids AS parent_recall_ids,l.context_digests AS context_digests,l.root_episode_ids AS root_episode_ids,
+           l.echo_depth AS echo_depth,l.complete AS complete,e.lineage_digest AS episode_digest
+         ORDER BY l.episode_id LIMIT ${batch}`, { cursor: lineageCursor });
+      if (rows.records.length === 0) break;
+      for (const row of rows.records) {
+        try {
+          const parsed = EchoLineage.parse(JSON.parse(row.get("body")));
+          const stored = {
+            episode_id: row.get("episode_id"), lineage_mode: row.get("lineage_mode"),
+            parent_recall_ids: row.get("parent_recall_ids"), context_digests: row.get("context_digests"),
+            root_episode_ids: row.get("root_episode_ids"), echo_depth: row.get("echo_depth"), complete: row.get("complete"),
+          };
+          const digest = extractionBodyDigest(parsed);
+          if (canonicalExtractionBody(parsed) !== row.get("body") || canonicalExtractionBody(parsed) !== canonicalExtractionBody(stored)
+            || digest !== row.get("digest") || (row.get("episode_digest") !== null && row.get("episode_digest") !== digest))
+            if (badBodies.length < 100) badBodies.push(`${parsed.episode_id}:body-or-digest`);
+        } catch (error) {
+          if (badBodies.length < 100) badBodies.push(`${row.get("episode_id")}:${String(error)}`);
+        }
       }
+      lineageValidated += rows.records.length;
+      lineageCursor = rows.records[rows.records.length - 1]?.get("episode_id") ?? lineageCursor;
     }
+    if (lineageValidated !== before.EchoLineage && badBodies.length < 100) badBodies.push(`joined:${lineageValidated}/${before.EchoLineage}`);
     const missingLineage = lineageMissing.records.map(row => `${row.get("id")}:episode=${row.get("episode")}:mode=${row.get("mode")}`);
-    if (lineageJoined !== before.EchoLineage || existingLineage > before.EchoLineage || missingLineage.length || badBodies.length) {
-      line("copy_mismatch", { label: "EchoLineage", count: lineageJoined, existing: existingLineage, expected: before.EchoLineage, ids: [...missingLineage, ...badBodies], dry_run: dryRun });
-      throw new Error(`copy_mismatch: EchoLineage has missing Episodes, conflicting properties or invalid bodies: ${JSON.stringify([...missingLineage, ...badBodies])}`);
+    if (lineageJoined !== before.EchoLineage || existingLineage > before.EchoLineage || unrelatedLineage.length || missingLineage.length || badBodies.length) {
+      const ids = [...unrelatedLineage.map(id => `${id}:unrelated-lineage`), ...missingLineage, ...badBodies];
+      line("copy_mismatch", { label: "EchoLineage", count: lineageJoined, existing: existingLineage, expected: before.EchoLineage, ids, dry_run: dryRun });
+      throw new Error(`copy_mismatch: EchoLineage has missing Episodes, conflicting properties or invalid bodies: ${JSON.stringify(ids)}`);
     }
     // All destructive-cutover gates are read before copying, without obscuring the ordered output.
     const gatesPass = split.length === 0 && pending.count === 0 && duplicateCount === 0
@@ -159,21 +205,44 @@ export async function main(options: Options = {}) {
         MATCH (e:Episode) WHERE e.id = l.episode_id
         SET e.lineage_mode=l.lineage_mode,e.parent_recall_ids=l.parent_recall_ids,
             e.context_digests=l.context_digests,e.root_episode_ids=l.root_episode_ids,
-            e.echo_depth=l.echo_depth,e.lineage_complete=l.complete
+            e.echo_depth=l.echo_depth,e.lineage_complete=l.complete,e.lineage_digest=l.digest
       } IN TRANSACTIONS OF ${batch} ROWS`);
     }
     const lineageCount = dryRun || !gatesPass ? before.EchoLineage : await number("MATCH (e:Episode) WHERE e.lineage_mode IS NOT NULL RETURN count(e) AS count");
-    const sampledMismatch = dryRun || !gatesPass ? [] : (await session.run<{ id: string }>(`MATCH (l:EchoLineage) MATCH (e:Episode) WHERE e.id = l.episode_id
-      WITH l,e ORDER BY l.episode_id LIMIT 1000
-      WHERE NOT coalesce(e.lineage_mode = l.lineage_mode,false) OR NOT coalesce(e.parent_recall_ids = l.parent_recall_ids,false)
-         OR NOT coalesce(e.context_digests = l.context_digests,false) OR NOT coalesce(e.root_episode_ids = l.root_episode_ids,false)
-         OR NOT coalesce(e.echo_depth = l.echo_depth,false) OR NOT coalesce(e.lineage_complete = l.complete,false)
-      RETURN l.episode_id AS id`)).records.map(row => row.get("id"));
-    if (lineageCount !== before.EchoLineage || sampledMismatch.length) {
-      line("copy_mismatch", { label: "EchoLineage", count: lineageCount, expected: before.EchoLineage, ids: sampledMismatch });
-      throw new Error("copy_mismatch: Episode lineage count or sample differs");
+    const postcopyMismatch: string[] = [];
+    let postcopyMismatchCount = 0;
+    if (!dryRun && gatesPass) {
+      let cursor = "", verified = 0;
+      while (true) {
+        const rows = await session.run<{ id: string; digest: string | null; body: string; matches: boolean }>(
+          `MATCH (l:EchoLineage) MATCH (e:Episode {id:l.episode_id})
+           WHERE l.episode_id > $cursor
+           RETURN l.episode_id AS id,e.lineage_digest AS digest,l.body AS body,
+             coalesce(e.lineage_mode = l.lineage_mode,false) AND coalesce(e.parent_recall_ids = l.parent_recall_ids,false)
+             AND coalesce(e.context_digests = l.context_digests,false) AND coalesce(e.root_episode_ids = l.root_episode_ids,false)
+             AND coalesce(e.echo_depth = l.echo_depth,false) AND coalesce(e.lineage_complete = l.complete,false) AS matches
+           ORDER BY l.episode_id LIMIT ${batch}`, { cursor });
+        if (rows.records.length === 0) break;
+        for (const row of rows.records) {
+          const digest = extractionBodyDigest(EchoLineage.parse(JSON.parse(row.get("body"))));
+          if (row.get("digest") !== digest || !row.get("matches")) {
+            postcopyMismatchCount++;
+            if (postcopyMismatch.length < 100) postcopyMismatch.push(row.get("id"));
+          }
+        }
+        verified += rows.records.length;
+        cursor = rows.records[rows.records.length - 1]?.get("id") ?? cursor;
+      }
+      if (verified !== before.EchoLineage) {
+        postcopyMismatchCount++;
+        if (postcopyMismatch.length < 100) postcopyMismatch.push(`count:${verified}/${before.EchoLineage}`);
+      }
     }
-    line("copy_lineage", { count: lineageCount, sampled: lineageSample.records.length, mismatch: 0, dry_run: dryRun });
+    if (lineageCount !== before.EchoLineage || postcopyMismatchCount) {
+      line("copy_mismatch", { label: "EchoLineage", count: lineageCount, expected: before.EchoLineage, ids: postcopyMismatch });
+      throw new Error("copy_mismatch: Episode lineage count or digest differs");
+    }
+    line("copy_lineage", { count: lineageCount, validated: lineageValidated, mismatch: postcopyMismatchCount, dry_run: dryRun });
 
     if (witnessJoined !== before.EntityWitness || existingWitness > before.EntityWitness || witnessMissing.length) {
       line("copy_mismatch", { label: "EntityWitness", count: witnessJoined, existing: existingWitness, expected: before.EntityWitness, ids: witnessMissing, dry_run: dryRun });
