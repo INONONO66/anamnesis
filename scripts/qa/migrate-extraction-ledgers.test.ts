@@ -54,7 +54,8 @@ beforeEach(async () => {
     `, { label });
   }
   await driver.executeQuery("CREATE (:ExtractionGeneration {id: 'preserved-generation'})");
-  await driver.executeQuery("CREATE (:ExtractionCoverage {key: 'preserved-coverage'})");
+  await driver.executeQuery(`UNWIND ['episodes', 'active_extraction'] AS partition
+    CREATE (:ExtractionCoverage {key: 'preserved-generation:' + partition, generation_id: 'preserved-generation', partition: partition, covered_ingest_seq: 7})`);
 });
 
 afterEach(async () => {
@@ -76,13 +77,33 @@ describe.serial("extraction ledger migration", () => {
       ExtractionJudgeInput: 2, ExtractionDisposition: 2,
     });
     expect(result.counts_after).toEqual(result.counts_before);
+    expect(result.coverage).toEqual([{ generation: "preserved-generation", episodes: 7, active_extraction: 7 }]);
     for (const label of LABELS) expect(await count(label)).toBe(2);
     const names = await constraints();
     for (const name of LEGACY_CONSTRAINTS) expect(names).toContain(name);
     const steps = lines.map((line) => JSON.parse(line));
-    expect(steps.map((step) => step.step)).toEqual(["count_legacy", "drop_schema", "delete_legacy_ledgers", "verify"]);
+    expect(steps.map((step) => step.step)).toEqual(["count_legacy", "check_coverage", "drop_schema", "delete_legacy_ledgers", "verify"]);
     expect(steps[0].counts).toEqual(result.counts_before);
-    expect(steps[1].constraints.slice().sort()).toEqual([...LEGACY_CONSTRAINTS].sort());
+    expect(steps[1].split).toEqual([]);
+    expect(steps[2].constraints.slice().sort()).toEqual([...LEGACY_CONSTRAINTS].sort());
+  });
+
+  test.serial("refuses to delete anything while a generation's coverage partitions disagree", async () => {
+    // A daemon stopped between the two coverage commits leaves `episodes` ahead of `active_extraction`. The old
+    // build reconciles that from the graph ledgers; the no-seed migration must not take them away first.
+    await driver.executeQuery("MATCH (c:ExtractionCoverage {key: 'preserved-generation:active_extraction'}) SET c.covered_ingest_seq = 6");
+    const lines: string[] = [];
+
+    for (const args of [["--dry-run"], []]) {
+      await expect(main({ args, ...TEST_DB, output: (line) => lines.push(line) })).rejects.toThrow("Extraction coverage partitions disagree");
+    }
+
+    for (const label of LABELS) expect(await count(label)).toBe(2);
+    const names = await constraints();
+    for (const name of LEGACY_CONSTRAINTS) expect(names).toContain(name);
+    const steps = lines.map((line) => JSON.parse(line));
+    expect(steps.map((step) => step.step)).toEqual(["count_legacy", "check_coverage", "count_legacy", "check_coverage"]);
+    expect(steps[1].split).toEqual([{ generation: "preserved-generation", episodes: 7, active_extraction: 6 }]);
   });
 
   test.serial("deletes only legacy nodes and constraints on live run", async () => {
@@ -101,9 +122,9 @@ describe.serial("extraction ledger migration", () => {
     for (const name of LEGACY_CONSTRAINTS) expect(names).not.toContain(name);
     for (const name of PRESERVED_CONSTRAINTS) expect(names).toContain(name);
     expect(await count("ExtractionGeneration")).toBe(1);
-    expect(await count("ExtractionCoverage")).toBe(1);
+    expect(await count("ExtractionCoverage")).toBe(2);
     expect(lines.map((line) => JSON.parse(line).step)).toEqual([
-      "count_legacy", "drop_schema", ...LABELS.map(() => "delete_legacy_ledgers"), "verify",
+      "count_legacy", "check_coverage", "drop_schema", ...LABELS.map(() => "delete_legacy_ledgers"), "verify",
     ]);
   });
 });

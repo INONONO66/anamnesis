@@ -20,6 +20,9 @@ const CONSTRAINTS = [
 
 type Label = typeof LABELS[number];
 type Counts = Record<Label, number>;
+/** Both coverage cursors of one generation. The journal starts empty, so a source sealed by one partition but not
+ * the other would have no entry for the lagging partition to read and no task the fence would let it recreate. */
+export type CoverageCursors = { readonly generation: string; readonly episodes: number; readonly active_extraction: number };
 
 export type MigrationOptions = {
   readonly args?: readonly string[];
@@ -34,6 +37,7 @@ export type MigrationResult = {
   readonly counts_before: Counts;
   readonly counts_after: Counts;
   readonly constraints_dropped: readonly string[];
+  readonly coverage: readonly CoverageCursors[];
   readonly dry_run: boolean;
 };
 
@@ -81,6 +85,20 @@ export async function main(options: MigrationOptions = {}): Promise<MigrationRes
     );
     return result.records.map((record) => record.get("name"));
   };
+  const coverageCursors = async (): Promise<CoverageCursors[]> => {
+    const result = await session.run<{ generation: string; partitions: { partition: unknown; covered: unknown }[] }>(
+      `MATCH (g:ExtractionGeneration) OPTIONAL MATCH (c:ExtractionCoverage {generation_id: g.id})
+       RETURN g.id AS generation, collect({partition: c.partition, covered: c.covered_ingest_seq}) AS partitions ORDER BY generation`,
+    );
+    return result.records.map((record) => {
+      const cursor = (partition: string): number => {
+        const covered = record.get("partitions").find((row) => row.partition === partition)?.covered ?? 0;
+        if (typeof covered !== "number") throw new Error(`Neo4j returned a non-numeric ${partition} cursor for generation ${record.get("generation")}`);
+        return covered;
+      };
+      return { generation: record.get("generation"), episodes: cursor("episodes"), active_extraction: cursor("active_extraction") };
+    });
+  };
   const counts = async (): Promise<Counts> => {
     const result: Counts = {
       ModelTask: 0,
@@ -102,12 +120,20 @@ export async function main(options: MigrationOptions = {}): Promise<MigrationRes
     const counts_before = await counts();
     const present = await schemaNames();
     line("count_legacy", { counts: counts_before, constraints: present, dry_run: dryRun });
+    const coverage = await coverageCursors();
+    const split = coverage.filter((cursors) => cursors.episodes !== cursors.active_extraction);
+    line("check_coverage", { coverage, split, dry_run: dryRun });
+    if (split.length > 0) {
+      // Recovery: run the previous daemon build once more; its coverage step reads the graph ledgers that are still
+      // present and seals the lagging partition. Re-run the migration when both cursors agree.
+      throw new Error(`Extraction coverage partitions disagree; the ledgers stay until the previous daemon build reconciles them: ${JSON.stringify(split)}`);
+    }
 
     if (dryRun) {
       line("drop_schema", { constraints: present, dry_run: true });
       line("delete_legacy_ledgers", { counts: counts_before, batch, dry_run: true });
       line("verify", { counts: counts_before, constraints: present, dry_run: true });
-      return { counts_before, counts_after: counts_before, constraints_dropped: [], dry_run: true };
+      return { counts_before, counts_after: counts_before, constraints_dropped: [], coverage, dry_run: true };
     }
 
     for (const name of CONSTRAINTS) await session.run(`DROP CONSTRAINT ${name} IF EXISTS`);
@@ -123,7 +149,7 @@ export async function main(options: MigrationOptions = {}): Promise<MigrationRes
     if (LABELS.some((label) => counts_after[label] !== 0) || remaining.length > 0) {
       throw new Error(`Extraction ledger deletion incomplete: counts=${JSON.stringify(counts_after)}, constraints=${JSON.stringify(remaining)}`);
     }
-    return { counts_before, counts_after, constraints_dropped: present, dry_run: false };
+    return { counts_before, counts_after, constraints_dropped: present, coverage, dry_run: false };
   } finally {
     await session.close();
     await driver.close();
