@@ -2,7 +2,7 @@ import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult } from "@anamnesis/protocol";
-import { EmbeddingError, embeddingProfileId, validateVector } from "../embedding.ts";
+import { EmbeddingError, EmbeddingProfile, embeddingProfileId, validateVector } from "../embedding.ts";
 import { RecallError } from "../recall.ts";
 import { tupleHash } from "./digest.ts";
 import { ReceiptError } from "./receipts.ts";
@@ -25,10 +25,25 @@ type EpisodeInput = { content: string; revision: string; digest: string };
 type ProviderOutcome = { vector: number[] | null; reason: RpcEmbeddingAttempt["reason"]; detail: string | null };
 
 export class EmbeddingStore {
+  private readonly profiles = new Map<string, EmbeddingProfile>();
+
   constructor(private readonly core: StoreCore) {}
 
-  private vectorAttempt(row: VectorRow): RpcEmbeddingAttempt {
-    const profile = this.core.embeddingProvider?.profile;
+  /** The profile a vector names, from the `EmbeddingProfile` row `init` persisted for it. Immutable per id, so cached. */
+  private async vectorProfile(profileId: string): Promise<EmbeddingProfile> {
+    const cached = this.profiles.get(profileId);
+    if (cached) return cached;
+    const rows = await this.core.run<{ body: string }>(`MATCH (p:EmbeddingProfile {id:$id}) RETURN p.body AS body`, { id: profileId });
+    if (!rows[0]) throw new Error(`EmbeddingVector names profile ${profileId} but no EmbeddingProfile row carries it`);
+    const profile = EmbeddingProfile.parse(JSON.parse(rows[0].body));
+    this.profiles.set(profileId, profile);
+    return profile;
+  }
+
+  /** Vectors written before the lane recorded model metadata on the row take it from their persisted profile. */
+  private async vectorAttempt(row: VectorRow): Promise<RpcEmbeddingAttempt> {
+    const profile = row.model === null || row.model_incarnation === null || row.dimensions === null
+      ? await this.vectorProfile(row.profile_id) : null;
     return RpcEmbeddingAttempt.parse({
       operation_id: row.operation_id, episode_id: row.episode_id, profile_id: row.profile_id,
       input_revision: row.input_revision, input_digest: row.input_digest,
@@ -50,7 +65,7 @@ export class EmbeddingStore {
       .find(attempt => attempt.operation_id === operationId);
     if (recorded) return recorded;
     const existing = await this.core.run<VectorRow>(`MATCH (v:EmbeddingVector {operation_id:$id}) ${VECTOR_RETURN}`, { id: operationId });
-    return existing[0] ? this.vectorAttempt(existing[0]) : null;
+    return existing[0] ? await this.vectorAttempt(existing[0]) : null;
   }
 
   /** The Episode's input under the receipt lock; the returned revision pins the provider call. */
@@ -99,14 +114,15 @@ export class EmbeddingStore {
       // is not called and the submitted id, having done no work, is recorded nowhere; a replay returns the same
       // attempt and the id's status stays unknown. A lingering ledger entry is stale and goes with it.
       if (previous) await this.core.embeddingLedger.delete(request.episode_id);
-      return this.vectorAttempt(held[0]);
+      return await this.vectorAttempt(held[0]);
     }
     // Another profile's entry lends no deferral budget: the first attempt under this profile replaces it.
     const deferrals = previous?.profile_id === profileId && previous.state === "deferred" ? previous.deferrals : 0;
+    const createdAt = this.core.clock();
     const outcome = await this.embedInput(prepared.content);
     if (outcome.reason === "provider_unavailable" && !operator && deferrals >= EMBEDDING_MAX_DEFERRALS)
       outcome.reason = "provider_unavailable_exhausted";
-    const { result, vectorPresent } = await this.commitAttempt(request, prepared, outcome, this.core.clock());
+    const { result, vectorPresent } = await this.commitAttempt(request, prepared, outcome, createdAt);
     if (result.state === "succeeded") {
       if (previous) await this.core.embeddingLedger.delete(request.episode_id);
     } else if (!vectorPresent) {
@@ -163,7 +179,7 @@ export class EmbeddingStore {
       }
       const state = reason === null ? "succeeded" : reason === "provider_unavailable" ? "deferred" : "quarantined";
       const result = winner && winner.operation_id !== request.operation_id
-        ? this.vectorAttempt(winner)
+        ? await this.vectorAttempt(winner)
         : RpcEmbeddingAttempt.parse({
           ...request, profile_id: profileId, model: profile.model, model_incarnation: profile.model_incarnation,
           dimensions: profile.dimensions, input_revision: prepared.revision, input_digest: prepared.digest,
@@ -197,7 +213,7 @@ export class EmbeddingStore {
     return this.core.withWriteTx(async tx => {
       const policy = await this.core.receiptLockTx(tx);
       const rows = attempt ? null : await tx.run<VectorRow>(`MATCH (v:EmbeddingVector {operation_id:$id}) ${VECTOR_RETURN}`, { id });
-      const found = attempt ?? (rows?.records[0] ? this.vectorAttempt(rows.records[0].toObject()) : null);
+      const found = attempt ?? (rows?.records[0] ? await this.vectorAttempt(rows.records[0].toObject()) : null);
       if (!found) return { state: "unknown" as const, operation_id: id };
       await this.core.authorizeEpisodesTx(tx, [found.episode_id], policy);
       return found;

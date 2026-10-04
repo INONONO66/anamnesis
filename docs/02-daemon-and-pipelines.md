@@ -814,11 +814,11 @@ transient_failure | permanent_failure | worker_lost | cancelled`, and
 
 `client_error` is the exact name for a deterministic 4xx response and
 `malformed_response` for output that is not a valid embedding payload; neither
-is a transient class, and "4xx" is not itself a state. Every attempt leaves
-one terminal record in the Episode's `embedding-state.json` ledger entry
-(D54), with a bounded error code and digest and no source text; the graph
-holds only the resulting `EmbeddingVector`, and a successful attempt deletes
-the entry outright. A blocked head freezes that model's cursor and
+is a transient class, and "4xx" is not itself a state. Every failed attempt
+leaves one terminal record in the Episode's `embedding-state.json` ledger
+entry (D54), with a bounded error code and digest and no source text; the
+graph holds only the resulting `EmbeddingVector`, and a successful attempt
+deletes the entry outright. A blocked head freezes that model's cursor and
 leaves later entries unpublished, so no vector ever appears across a hole; the
 active profile keeps serving its prior prefix while BM25, session and PPR
 recall continue. Nothing is truncated, chunked, zero-filled or silently

@@ -962,12 +962,17 @@ with `generation=0` only for `episode`. `EmbeddingWork` is unique by
 `source_id?`, `input_digest`, state, `attempts_in_cycle`, `attempts_total`,
 `retry_cycle` and `next_retry_at`. `input_digest` is SHA-256 of the exact
 UTF-8 string presented as that endpoint input before JSON escaping. Attempt
-records are not graph nodes. Each immutable attempt `{attempt_id,
-embedding_model_id, stream, generation, ingest_seq, item_ordinal, source_id?,
-input_digest, attempt_ordinal, started_at, finished_at, outcome, error_code,
-error_digest}` is appended to that item's entry in the embedding ledger
-(`embedding-state.json`, D54) and carries no source text; `attempt_id` is SHA-256 of the canonical work key plus
-`attempt_ordinal`. Outcome is `succeeded | no_vector_required |
+records are not graph nodes. In the shipped v0.1 lane each failed attempt is
+an `RpcEmbeddingAttempt` (`operation_id`, `episode_id`, `profile_id`,
+`input_revision`, `input_digest`, model identity, timestamps, `state`,
+`reason`, bounded `detail`) appended to the Episode's entry in the embedding
+ledger (`embedding-state.json`, D54), keyed by Episode and carrying no source
+text; the work-item shape below is the design for the generation-scoped lane.
+Each immutable attempt `{attempt_id, embedding_model_id, stream, generation,
+ingest_seq, item_ordinal, source_id?, input_digest, attempt_ordinal,
+started_at, finished_at, outcome, error_code, error_digest}` is appended to
+that item's ledger entry; `attempt_id` is SHA-256 of the canonical work key
+plus `attempt_ordinal`. Outcome is `succeeded | no_vector_required |
 transient_failure | permanent_failure | worker_lost | cancelled`, and error
 code is one of `unavailable | timeout | rate_limited | server_error |
 invalid_input | context_overflow | zero_norm | nonfinite | wrong_dimension |

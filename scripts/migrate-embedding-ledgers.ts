@@ -7,7 +7,7 @@ import {
   type RpcEmbeddingAttempt as EmbeddingAttempt,
 } from "../packages/protocol/src/rpc.ts";
 
-const USAGE = "Usage: bun scripts/migrate-embedding-ledgers.ts [--dry-run] [--runtime-root <dir>] [--batch <positive integer>]";
+const USAGE = "Usage: bun scripts/migrate-embedding-ledgers.ts [--dry-run] [--runtime-root <dir>] [--batch <positive integer>] [--profile <embedding profile id>]";
 
 type LedgerEntry = {
   readonly profile_id: string;
@@ -33,6 +33,8 @@ type MigrationArguments = {
   readonly dryRun: boolean;
   readonly runtimeRoot: string;
   readonly batch: number;
+  /** Seed only this profile's quarantines; without it the newest quarantine per Episode wins across profiles. */
+  readonly profile: string | null;
 };
 
 export type MigrationOptions = {
@@ -56,18 +58,22 @@ function parseArguments(args: readonly string[]): MigrationArguments {
   let dryRun = false;
   let runtimeRoot = process.env["ANAMNESIS_RUNTIME_ROOT"] ?? join(homedir(), ".anamnesis");
   let batch = 10_000;
+  let profile: string | null = null;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--dry-run") {
       dryRun = true;
       continue;
     }
-    if (argument === "--runtime-root" || argument === "--batch") {
+    if (argument === "--runtime-root" || argument === "--batch" || argument === "--profile") {
       const value = args[index + 1];
       if (!value || value.startsWith("--")) throw new Error(`Missing value for ${argument}\n${USAGE}`);
       index += 1;
       if (argument === "--runtime-root") runtimeRoot = value;
-      else {
+      else if (argument === "--profile") {
+        if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(`--profile must be a 64-hex embedding profile id\n${USAGE}`);
+        profile = value;
+      } else {
         if (!/^[1-9]\d*$/.test(value)) throw new Error(`--batch must be a positive integer\n${USAGE}`);
         batch = Number(value);
         if (!Number.isSafeInteger(batch)) throw new Error(`--batch is out of bounds\n${USAGE}`);
@@ -76,7 +82,7 @@ function parseArguments(args: readonly string[]): MigrationArguments {
     }
     throw new Error(`Unknown option: ${argument}\n${USAGE}`);
   }
-  return { dryRun, runtimeRoot, batch };
+  return { dryRun, runtimeRoot, batch, profile };
 }
 
 function required(value: string | undefined, name: string): string {
@@ -215,9 +221,10 @@ export async function main(options: MigrationOptions = {}): Promise<MigrationRes
       body: string;
     }>(`
       MATCH (a:EmbeddingAttempt { state: 'quarantined' })
+      WHERE $profile IS NULL OR a.profile_id = $profile
       RETURN a.episode_id AS episodeId, a.profile_id AS profileId,
              a.operation_id AS operationId, a.body AS body
-    `);
+    `, { profile: args.profile });
     const candidates = latestQuarantined(quarantined.records.map((record) => ({
       episodeId: stringValue(record.get("episodeId"), "episode_id"),
       profileId: stringValue(record.get("profileId"), "profile_id"),

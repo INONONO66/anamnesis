@@ -145,6 +145,13 @@ describe.serial("embedding lane on isolated Neo4j", () => {
     if (!succeeded) throw new Error("successful vector has no operation");
     expect(await engine.embeddingStatus(succeeded, context)).toMatchObject({
       state: "succeeded", episode_id: id, operation_id: succeeded,
+      model: profile.model, model_incarnation: profile.model_incarnation, dimensions: profile.dimensions,
+    });
+    // A vector written before the lane recorded model metadata answers with its persisted profile's metadata.
+    await query("MATCH (v:EmbeddingVector {operation_id:$id}) REMOVE v.model, v.model_incarnation, v.dimensions", { id: succeeded });
+    expect(await engine.embeddingStatus(succeeded, context)).toMatchObject({
+      state: "succeeded", operation_id: succeeded, profile_id: embeddingProfileId(profile),
+      model: profile.model, model_incarnation: profile.model_incarnation, dimensions: profile.dimensions,
     });
     const unknown = uuidv7();
     expect(await engine.embeddingStatus(unknown, context)).toEqual({ state: "unknown", operation_id: unknown });

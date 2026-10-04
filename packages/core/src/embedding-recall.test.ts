@@ -47,6 +47,7 @@ test("persisted receipt projections retain exact bytes across serialization, not
 
 test("embedding recovery and hybrid recall have real core and wire entry points", () => {
   expect(typeof Reflect.get(Store.prototype, "recoverEmbedding")).toBe("function");
+  expect(typeof Reflect.get(Store.prototype, "recall")).toBe("function");
   expect(typeof Reflect.get(Store.prototype, "embeddingStatus")).toBe("function");
   expect(typeof Reflect.get(Store.prototype, "requeueQuarantinedEmbeddings")).toBe("function");
   expect(typeof Reflect.get(Store.prototype, "drainEmbeddingOutbox")).toBe("function");
