@@ -75,6 +75,30 @@ systemctl start anamnesis.service anamnesis-backup.timer
 for t in $timers; do systemctl start "$t"; done
 ```
 
+## Migration: materialization ledgers out of Neo4j (G4)
+
+Build `dist/anamnesis-migrate-g4.mjs` with `bun run build:runtime` and run this one-shot migration from `/opt/anamnesis`. Stop the daemon, backup timer/service, ingest services, and ingest timers exactly as in G3 before either migration command. Run each command separately; the dry run is read-only and must pass all gates before the live run:
+
+The operator transcript template is `.omo/evidence/foundation/g4-prod/runbook.sh`; invoke one named step at a time (`counts`, `deploy`, `stop`, `dryrun`, `migrate`, `verify`, `start`, `status`, `extract`, `journal`). It does not run automatically.
+
+```sh
+set -e
+timers=$(systemctl list-units --type=timer --state=active --plain --no-legend 'anamnesis-ingest@*' | awk '{print $1}')
+for t in $timers; do systemctl stop "$t"; done
+systemctl stop 'anamnesis-ingest@*.service' anamnesis-backup.timer anamnesis-backup.service anamnesis.service
+runuser -u anamnesis -- sh -c 'cd /opt/anamnesis && set -a && . /etc/anamnesis/anamnesis.env && set +a && node dist/anamnesis-migrate-g4.mjs --dry-run'
+```
+
+The expected pre-migration production counts from the 2026-10-04 snapshot are `MaterializationOperation=161831`, `OriginHead=133727`, `EchoLineage=133726`, `FactRelationInput=117340`, `FactRelationVerdict=29223`, and `EntityWitness=13759`; the Fact count is `102735`. Reconcile any newer counts against a fresh backup. Review `count_legacy` (including legacy constraints and indexes), then require `split=[]`, `copy_lineage` and `copy_witness` with zero mismatches, `check_inflight` with zero operations and inputs, and `fact_duplicates` with zero duplicates. A refusal is a stop: for `copy_mismatch`, restore the missing Episode/Entity or reconcile the body and rerun; for a coverage split, start the previous daemon build to seal the lagging cursor from the still-present ledgers, stop it, and rerun; for in-flight work, let the stopped daemon's pending operation or relation verdict reach a terminal outcome and rerun; for `fact_duplicates`, do not create the constraint until the engine lane supplies its deduplication procedure. A failed live copy can leave some Episode/Entity properties written; after repairing the cause, rerun the idempotent copy while the daemon remains stopped. If schema deletion or the final verification fails, leave the daemon stopped and restore the pre-migration backup before retrying.
+
+```sh
+runuser -u anamnesis -- sh -c 'cd /opt/anamnesis && set -a && . /etc/anamnesis/anamnesis.env && set +a && node dist/anamnesis-migrate-g4.mjs'
+systemctl start anamnesis.service anamnesis-backup.timer
+for t in $timers; do systemctl start "$t"; done
+```
+
+The live run copies lineage fields onto their original Episodes and witness fields onto Entities, drops legacy constraints/indexes for the six labels, creates `episode_origin_head`, `entity_witness`, and the guarded `fact_identity` constraint, then deletes the six labels in batches of 10,000. Its final `verify` line must show all six label counts as zero, no legacy schema objects, both new indexes and `fact_identity`, Episode lineage count `133726`, Entity witness count `13759`, and an unchanged Fact count. If verification fails, leave the daemon stopped, preserve the JSON transcript, and restore from the pre-migration Neo4j backup before retrying.
+
 ## Optional TCP listener
 
 By default the daemon accepts RPC only on the Unix socket `<runtime root>/anamnesis.sock` (mode 0600), where filesystem permissions are the access control. Setting `ANAMNESIS_LISTEN` adds a TCP listener with identical framing and request handling; the socket keeps working unchanged. TCP has no filesystem check, so every TCP connection must prove possession of a bearer token before its first request.
