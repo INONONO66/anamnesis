@@ -66,7 +66,7 @@ Link, Hit and every RPC method, plus the server-owned `episode_digest_version`
 discriminator and this exact control-record inventory:
 
 ```text
-records: EchoLineage;
+records: Episode lineage properties;
          AdjudicationAttempt, AdjudicationProposal, AdjudicationReview,
          AdjudicationConsumption, AdjudicationCorrection,
          AdjudicationCorrectionMap;
@@ -148,7 +148,7 @@ integration: Neo4j container (service) → core/recall tests · policy suppressi
                · literal quote + derived span · verbatim query on both channels
              · echo-lineage and grouping: dual digest-version round trip (version-1 write-free, version-2
                role/lineage conflict) · bounded parents/roots/depth with overflow → unknown · receipt
-               selection_digest == EchoLineage.context_digests · unknown-lineage Episode and its outputs
+               selection_digest == Episode.context_digests · unknown-lineage Episode and its outputs
                ineligible · complete vs incomplete synthesis support unions · same_scope_l1b vs
                same_scope_group · null subject_keys with no literal fallback
              · shadow-adjudication and operator-correction: no Fact or edge in shadow · persisted

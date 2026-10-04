@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExtractionAttempt, ModelTask } from "@anamnesis/protocol";
+import { ExtractionAttempt, ModelTask, extractionBodyDigest } from "@anamnesis/protocol";
 import { ExtractionJournal, journalAttempt, type ExtractionJournalEntry } from "./extraction-journal.ts";
 
 const generation = "018f5b5e-7b1e-7abc-8def-123456789010";
@@ -226,4 +226,53 @@ test("rejects invalid set entries without rewriting the previous file", async ()
     expect(JSON.parse(await readFile(path, "utf8")).pipelines[pipeline]).toEqual(good);
     expect(await journal.get(pipeline)).toEqual(good);
   });
+});
+
+type Relation = NonNullable<ExtractionJournalEntry["relations"]>["verdicts"][number];
+function relation(candidateCount = 1): Relation {
+  const time = { value: "2026-09-01T00:00:00Z", precision: "day" as const };
+  const body = { fact: { text: "Alice prefers light mode", time },
+    candidates: Array.from({ length: candidateCount }, (_, i) => ({
+      id: `018f5b5e-7b1e-7abc-8def-${String(100 + i).padStart(12, "0")}`, text: `candidate ${i}`, time,
+    })) };
+  return { key: hash, context: { ...body, body_digest: extractionBodyDigest(body) }, judgements: null, failures: 0,
+    last_failure: null, last_failure_detail: null, model: null, model_incarnation: null, reported_model: null };
+}
+function withRelations(verdicts: Relation[]): ExtractionJournalEntry {
+  return { ...entry(), relations: { verdicts,
+    context_digest: extractionBodyDigest(verdicts.map(({ key, context }) => ({ key, context_digest: context.body_digest }))) } };
+}
+
+test("relation premises and verdicts roundtrip with the same bound context digest", async () => {
+  await withFile(async path => {
+    const journal = new ExtractionJournal(path), pending = relation(16);
+    await journal.set(pipeline, withRelations([pending]));
+    expect(await new ExtractionJournal(path).byRelation(hash)).toEqual(withRelations([pending]));
+    expect(await journal.byRelation("b".repeat(64))).toBeUndefined();
+
+    const judged: Relation = { ...pending, judgements: pending.context.candidates.map(candidate => ({
+      candidate_id: candidate.id, relation: "unrelated", confidence: 0.5, reason: "distinct preference",
+    })), model: "fixture", model_incarnation: hash };
+    await journal.set(pipeline, withRelations([judged]));
+
+    expect(await new ExtractionJournal(path).get(pipeline)).toEqual(withRelations([judged]));
+    expect(withRelations([judged]).relations?.context_digest).toBe(withRelations([pending]).relations?.context_digest);
+  });
+});
+
+test("relation journal rejects overflow, context tampering and incomplete verdict coverage", async () => {
+  const journal = new ExtractionJournal(), premise = relation();
+  await journal.set(pipeline, withRelations([premise]));
+  const wrongContext = { ...premise, context: { ...premise.context, fact: { ...premise.context.fact, text: "tampered" } } };
+  const candidates = relation(2);
+  const repeated = { candidate_id: candidates.context.candidates[0]?.id ?? source, relation: "unrelated" as const, confidence: 0.5, reason: "same candidate twice" };
+  for (const invalid of [
+    withRelations([relation(17)]),
+    withRelations(Array.from({ length: 65 }, () => premise)),
+    withRelations([wrongContext]),
+    withRelations([{ ...premise, judgements: [] }]),
+    withRelations([{ ...candidates, judgements: [repeated, repeated] }]),
+    { ...withRelations([premise]), relations: { context_digest: "b".repeat(64), verdicts: [premise] } },
+  ]) await expect(journal.set(pipeline, invalid)).rejects.toThrow();
+  expect(await journal.get(pipeline)).toEqual(withRelations([premise]));
 });

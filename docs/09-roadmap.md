@@ -45,7 +45,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 |---|---|---|---|
 | G2 | done (#244, #246) | embedding lane: `EmbeddingAttempt` and `Outbox` leave the graph; missing-vector scan; `embedding-state.json` ledger | 01 §4, 02 §3, D54 |
 | G3 | done (#249) | extraction lane: the five pipeline ledger labels and their seven constraints leave the graph; coverage-driven scan; `extraction-state.json` journal with sealed-entry pruning; `extraction.*` audit events | 01 §6, §7, 02 §5, D55 |
-| G4 | next | materialization custody and relation-judge records (`MaterializationOperation`, `FactRelationInput`, `FactRelationVerdict`), `EchoLineage`, `OriginHead`, `EntityWitness` | design pending |
+| G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
 
 ## v0.1 — originals, forgetting, search
 
@@ -56,11 +56,11 @@ derived layer, no PPR.
 
 | Area | Contents | Docs |
 |---|---|---|
-| storage | Neo4j compose, schema, version-dispatched Episode digest (frozen version-1 body for stored rows, version 2 for new admissions, zero SETs either way), global `ingest_seq`, OriginHead CAS, `:Element:Episode`, Payload metadata + `objects/`, originals links, rebuildable event-time NEXT_EPISODE topology | 01 §1–2, §6–8; 02 §3 |
+| storage | Neo4j compose, schema, version-dispatched Episode digest (frozen version-1 body for stored rows, version 2 for new admissions, zero SETs either way), global `ingest_seq`, indexed Episode origin-head lookup under the Meta writer fence, `:Element:Episode`, Payload metadata + `objects/`, originals links, rebuildable event-time NEXT_EPISODE topology | 01 §1–2, §6–8; 02 §3 |
 | daemon | `anamnesisd` UDS JSON-RPC, bounded object upload, write queue, serving revision, pure-Node nonce/heartbeat singleton lease, core RPCs | 02 §1–3 |
 | security | 0700/0600 modes, UDS capability token, length-prefixed frame and global resource caps, bolt on 127.0.0.1 only, per-install random password | 02 §10 |
 | spool | fsync-before-ack, `.done` after commit, drain, retention, cold-start wait | 02 §4, §9 |
-| provenance | authenticated `origin_role` / `lineage_mode`, `EchoLineage` control row written in the Episode transaction, bounded parent receipts, roots and depth, `unknown` lineage never presumed independent | 01 §3.3, D49 |
+| provenance | authenticated `origin_role` / `lineage_mode`, lineage properties written on the Episode in its transaction, bounded parent receipts, roots and depth, `unknown` lineage never presumed independent | 01 §3.3, D49 |
 | embedding | `embed_episode` worker driven by a missing-vector scan (Episodes with no `EmbeddingVector` for the active profile) with attempt/quarantine state in the `embedding-state.json` ledger, bounded batches, three-part embedding identity (`embedding_model_id`, `vector_index_id`, `embedding_profile_id`), per-entry state machine with bounded retry, terminal-prefix coverage, and authenticated operator control through `embedding.recover`, `embedding.requeue` and `embedding.status` (D54) | 01 §4, 02 §3, D51, D54 |
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |

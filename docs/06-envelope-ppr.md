@@ -433,7 +433,7 @@ non-hubs at most 255 + 255 <= 512), not additional bounded policy/source
 lookups. Per checked Fact, at most 16 direct source Episodes plus 16
 non-synthesis support Facts and their at most 16 source Episodes each means
 at most 272 Episode ID lookups and 16 support Fact ID lookups before dedup.
-Resolved entity bindings and EntityWitness checks use their existing bounded
+Resolved entity bindings and Entity witness-property checks use their existing bounded
 materialized IDs/indexes, never native witness expansion. Evaluate at most
 256 active policies and 512 scalars per
 literal (docs/01-02). Policy/control Episodes and their links never conduct.

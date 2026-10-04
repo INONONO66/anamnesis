@@ -330,7 +330,6 @@ test("real crash recovery: exact identity/topology, legacy preservation and UDS 
       });
     }
     await db.executeQuery(`MATCH (e:Element {id:$id}) SET e:Episode,e.origin_key=$origin,e.revision_key=$revision,e.ingest_seq=1
-      CREATE (:OriginHead {origin_key:$origin,revision_key:$revision})
       CREATE (:Meta {key:'meta',ingest_seq:1})`, { id: legacyIds[0], origin: "324eaac8861d8ce9d127fe7895cfa5c0c8ed20c6c6907ff97d42cfe2e07b6531", revision: "3338e8315ea8e487094db0da6b32efa6f9a0619fc4a6318b848f55f9018430bf" });
     await db.executeQuery("MATCH (e:Element) WHERE e.id IN $ids SET e:Fact", { ids: legacyIds.slice(1) });
     const options = { uri: `bolt://127.0.0.1:${target}`, user: "neo4j", password, objectsRoot: join(legacyRoot, "objects") };

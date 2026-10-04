@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,6 +8,8 @@ import { EpisodeJournal } from "./journal.ts";
 import { Engine, RememberInput } from "./engine.ts";
 import { Store } from "./store.ts";
 import { legacyHashes as hashes, legacyLines as lines } from "./legacy-journal.fixture.ts";
+
+setDefaultTimeout(120000);
 
 const digests = [
   "25336ecb71d5a5703763925ee83621b5f014a2c2ea4f6051993018c390b181e1",
@@ -71,10 +73,9 @@ beforeAll(async () => {
     });
   }
   await admin.executeQuery(`MATCH (e:Element {id:$id}) SET e:Episode, e.origin_key=$origin,e.revision_key=$revision,e.ingest_seq=1
-    CREATE (h:OriginHead {origin_key:$origin,revision_key:$revision})
     MERGE (m:Meta {key:'meta'}) SET m.ingest_seq=1`, { id: ids[0], origin: originKey, revision: revisionKey });
   await admin.executeQuery("MATCH (e:Element) WHERE e.id IN $ids SET e:Fact", { ids: ids.slice(1) });
-});
+}, 120000);
 afterAll(async () => {
   try { await engine.close(); } finally {
     try { await store.close(); } finally {

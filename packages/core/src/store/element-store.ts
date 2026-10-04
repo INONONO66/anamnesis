@@ -2,7 +2,7 @@ import neo4j, { type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { LINK_LATTICE, MemoryElement, MemoryLink, type MemoryElementInput, type MemoryLinkInput, type LinkRole, type TimePoint } from "@anamnesis/protocol";
 import { EchoLineage, EpisodeLineageError, parseEpisodeLineage, type EpisodeLineageInput } from "@anamnesis/protocol";
-import { canonicalExtractionBody, extractionBodyDigest } from "@anamnesis/protocol";
+import { extractionBodyDigest } from "@anamnesis/protocol";
 import { type TopologyRow, TOPOLOGY_QUERY, topologyExpectations } from "./conducting.ts";
 import { CONDUCTING_ROLES, celestialOf, carriesTime, labelClause, toUtc } from "./schema.ts";
 import { sha256, END_OF_TIME, CANONICAL_DIGEST, StorageContractError, elementDigest, verifyLineageRetry, tupleHash, originKey, sessionKey, linkIdemKey } from "./digest.ts";
@@ -117,16 +117,14 @@ export class ElementStore {
         const existing = await retry();
         if (existing) return existing;
         const head = await tx.run<{ revisionKey: string | null }>(
-          `MERGE (h:OriginHead { origin_key: $originKey })
-           SET h.revision_key = h.revision_key
-           RETURN h.revision_key AS revisionKey`,
+          `MATCH (head:Episode {origin_key:$originKey})
+           USING INDEX head:Episode(origin_key, ingest_seq)
+           WHERE head.ingest_seq IS NOT NULL
+           RETURN head.revision_key AS revisionKey
+           ORDER BY head.ingest_seq DESC LIMIT 1`,
           { originKey: key },
         );
-        const previousRevisionKey = head.records[0]!.get("revisionKey") ?? null;
-        // A contender may have committed this exact revision while we waited
-        // for the unique head's write lock. Recheck before attempting CREATE.
-        const raced = await retry();
-        if (raced) return raced;
+        const previousRevisionKey = head.records[0]?.get("revisionKey") ?? null;
         if (opts.expectedPreviousRevisionKey !== undefined &&
             opts.expectedPreviousRevisionKey !== previousRevisionKey) {
           throw new StorageContractError("stale_revision", revisionKey);
@@ -158,9 +156,12 @@ export class ElementStore {
           digest: elementDigest(el, { payloadHash, previousRevisionKey,
             ...(metadata ? { format: "episode-rfc8785-v2", episodeDigestVersion: 2, originRole: metadata.origin_role, lineageDigest } : {}) }),
         });
-        if (lineage) await tx.run(`CREATE (l:EchoLineage $props)`, {
-          props: { ...lineage, body: canonicalExtractionBody(lineage), digest: lineageDigest },
-        });
+        if (lineage) {
+          const { episode_id, complete, ...properties } = lineage;
+          await tx.run(`MATCH (e:Episode {id:$id}) SET e += $props`, {
+            id: episode_id, props: { ...properties, lineage_complete: complete },
+          });
+        }
         if (previousId) {
           await this.mergeLinkTx(tx, {
             id: uuidv7(),
@@ -172,20 +173,16 @@ export class ElementStore {
           });
         }
         // Every remember contends for the single Meta node's write lock and
-        // Neo4j holds it until commit, so the increment rides on the last
-        // sequence-independent statement, after CREATE and originals links.
-        // Topology depends on this sequence and runs under the same lock.
-        // It stays inside this
-        // transaction, so an aborted remember consumes no number.
+        // Neo4j holds it until commit. That fence serializes the indexed head
+        // lookup, CAS, Episode creation, and sequence assignment. An aborted
+        // remember therefore cannot publish a head or consume a sequence.
         await tx.run(
-          `MATCH (h:OriginHead { origin_key: $originKey })
-           MATCH (e:Element:Episode { id: $id })
-           SET h.revision_key = $revisionKey
+          `MATCH (e:Element:Episode { id: $id })
            MERGE (m:Meta { key: 'meta' })
            ON CREATE SET m.ingest_seq = 0
            SET m.ingest_seq = m.ingest_seq + 1
            SET e.ingest_seq = m.ingest_seq`,
-          { originKey: key, revisionKey, id: el.id },
+          { id: el.id },
         );
         await this.spliceTopologyTx(tx, { id: el.id, sessionKey: sessionKey(el.origin) });
         if (lineage) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`);
@@ -272,7 +269,7 @@ export class ElementStore {
     tx: ManagedTransaction,
     el: MemoryElement,
     payload: { hash: string; size: number; mediaType: string } | null,
-    opts: { previous?: string },
+    opts: { previous?: string; existingFact?: boolean },
     revision?: ElementRevision,
   ): Promise<void> {
     if (payload) {
@@ -285,7 +282,8 @@ export class ElementStore {
     const isEpisode = celestialOf(el.schema) === "Episode";
     const time = carriesTime(el.schema) ? el.time ?? null : null;
     await tx.run(
-      `CREATE (e:${labelClause(el.schema)} {
+      `${opts.existingFact ? "MATCH (e:Fact {id:$id}) SET e:Element" : `CREATE (e:${labelClause(el.schema)})`}
+       SET e += {
          id: $id, schema: $schema,
          time_value: $timeValue, time_utc: $timeUtc,
          time_precision: $timePrecision,
@@ -300,7 +298,7 @@ export class ElementStore {
          source_revision: $sourceRevision, revision_key: $revisionKey,
          previous_revision_key: $previousRevisionKey,
          ingest_seq: null, ingested_at: $ingestedAt
-       })`,
+       }`,
       {
         originKey: originKey(el.origin),
         sessionKey: isEpisode ? sessionKey(el.origin) : null,

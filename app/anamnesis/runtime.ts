@@ -7,7 +7,7 @@ import { OpenAiChatExtractionProvider } from "@anamnesis/core";
 import { ExtractionScheduler, type ExtractionTurn } from "@anamnesis/core";
 import { PacedExtractionProvider } from "@anamnesis/core";
 import { OpenAiEmbeddingProvider } from "@anamnesis/core";
-import { elementDigest, verifyLineageRetry } from "@anamnesis/core";
+import { elementDigest, verifyLineageRetry, verifyEpisodeLineage } from "@anamnesis/core";
 import { EchoLineage, parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
@@ -136,7 +136,8 @@ export class Runtime {
     });
     // Attempt/quarantine state is an operational ledger beside the spool, never graph rows; Neo4j holds only memory.
     this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json"),
-      extractionJournalPath: join(installation.root, "extraction-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
+      extractionJournalPath: join(installation.root, "extraction-state.json"),
+      materializationStatePath: join(installation.root, "materialization-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
@@ -238,14 +239,10 @@ export class Runtime {
   }
   /** The retained lineage of a v2 Episode, verified against its stored digests, as the remember metadata it implies. */
   private async retainedLineage(row: StoredEpisode, binding: Binding): Promise<{ origin_role: StoredEpisode["origin_role"]; lineage_mode: EchoLineage["lineage_mode"]; parent_recall_ids: EchoLineage["parent_recall_ids"] }> {
-    const retained = (await this.read<{ body: string; props: Record<string, unknown> }>(
-      "MATCH (l:EchoLineage {episode_id:$id}) RETURN l.body AS body,properties(l) AS props", { id: row.id }))[0];
+    const retained = (await this.read<{ props: Record<string, unknown> }>(
+      "MATCH (e:Episode {id:$id}) RETURN properties(e) AS props", { id: row.id }))[0];
     if (!retained) throw new RpcFault("lineage_unavailable", "retained lineage missing");
-    const lineage = EchoLineage.parse(JSON.parse(retained.body));
-    const { body, digest: retainedDigest, ...props } = retained.props;
-    if (lineage.episode_id !== row.id || sha(canonical(lineage)) !== row.lineage_digest
-      || retainedDigest !== row.lineage_digest || canonical(props) !== body || canonical(lineage) !== body)
-      throw new RpcFault("lineage_mismatch", "retained lineage digest mismatch");
+    const lineage = verifyEpisodeLineage(row.id, row.lineage_digest ?? null, retained.props);
     verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);
     return { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids };
   }

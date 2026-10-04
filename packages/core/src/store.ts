@@ -71,6 +71,10 @@ export class Store {
     return this.core.extractionJournal;
   }
 
+  get materializationState() {
+    return this.core.materializationState;
+  }
+
   claimWriterEpoch(): Promise<number> {
     return this.core.claimWriterEpoch();
   }

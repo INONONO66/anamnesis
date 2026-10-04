@@ -425,8 +425,8 @@ and shared by every revision of a source. The adapter supplies a stable,
 per-occurrence `source_revision`; `revision_key = sha256(origin_key,
 source_revision)` is unique and drives idempotency. `digest` separately hashes
 the canonical schema, content, properties, time, payload hash and
-`previous_revision_key`. An
-`OriginHead` CAS plus explicit `previous_revision_key` serializes the immutable
+`previous_revision_key`. The indexed Episode origin-head lookup under the
+Meta writer fence plus explicit `previous_revision_key` serializes the immutable
 revision chain (docs/01 §1, 02 §3).
 
 **Alternative**: derive revision identity from content digest.
@@ -442,7 +442,7 @@ body described above is exactly version 1, and it stays frozen for every
 Episode already stored under it. D49 adds `origin_role` and `lineage_digest`
 only to the version-2 body used by new admissions, and the stored row's
 version decides which body a retry recomputes. Revision identity, the
-`OriginHead` CAS and idempotency are unchanged in both versions.
+indexed origin-head lookup and idempotency are unchanged in both versions.
 
 ## D27 — one commit path for every Hit
 
@@ -1030,8 +1030,8 @@ and `lineage_digest`; any other stored value is `unsupported_digest_version`.
 The stored row's version wins over a caller's or a journal record's creation
 version, so verify, exact retry, journal replay, backup/restore and rebuild
 dispatch on it and never SET `episode_digest_version`, `digest`, `origin_role`
-or `lineage_digest` on a legacy Episode, which also never gains an
-`EchoLineage` row in place. There is no data migration, and this PR ships no
+or `lineage_digest` on a legacy Episode, which also never gains
+lineage properties in place. There is no data migration, and this PR ships no
 compatibility code (docs/01 §1, docs/02 §3 and §4, docs/08, docs/09).
 
 On top of that boundary, the authenticated adapter labels each Episode
@@ -1039,11 +1039,12 @@ On top of that boundary, the authenticated adapter labels each Episode
 `lineage_mode ∈ {direct, receipts}`. Direct input has no parents, depth 0 and
 its own Episode ID as its single root; an assistant turn that received
 anamnesis context must use `receipts` and supply 1..4 distinct
-`parent_recall_ids`. The daemon verifies the caller binding and appends
-`EchoLineage {episode_id, lineage_mode, parent_recall_ids[0..4],
-context_digests[0..4], root_episode_ids[0..16], echo_depth: 0..8, complete}`
-in the Episode transaction; that retained control row, not an expiring
-receipt, is replay authority. `context_digests` copies each parent receipt's
+`parent_recall_ids`. The daemon verifies the caller binding and writes
+Episode lineage properties `{lineage_mode, parent_recall_ids[0..4],
+context_digests[0..4], root_episode_ids[0..16], echo_depth: 0..8,
+lineage_complete, lineage_digest}` in the Episode transaction; those retained
+properties, not an expiring receipt, are replay authority. `context_digests`
+copies each parent receipt's
 stored `selection_digest`, the SHA-256 over the RFC-8785 canonical ordered
 array of at most 64 delivered `{element_id, root_episode_ids, echo_depth,
 complete}` records, so the receipt schema retains exactly the value lineage
@@ -1255,13 +1256,13 @@ that serves adjudication proposals (D50), so every Fact carries
 `meaning_digest`, a real `sub_kind`/`modality`, model-reported
 `confidence` as its mass, Entity nodes resolved against the generation's
 `entity_key` registry (existing → reuse, new → create with an
-`EntityWitness`, unresolved → mention dropped), and a resolved time
+Entity witness properties, unresolved → mention dropped), and a resolved time
 (`time_basis: claim` when the model states an absolute date, otherwise the
 Episode's time as `inherited`). The claim schema gains optional
 `confidence`, `entities`, `time`, `sub_kind` and `speech_act`; the
 extraction prompt asks for them. A claim without any confidence is retained
 as an audit decision only and never becomes a Fact; a claim the validator
-refuses is recorded as a content-free `MaterializationOperation`
+refuses is recorded as content-free custody in `materialization-state.json`
 (`created:false, refused:<code>`) so the occurrence stays idempotent.
 
 The former word-overlap heuristic that linked Facts of one Episode with
@@ -1285,17 +1286,17 @@ docs/05 consume as Fact mass; an absent measurement must stay absent.
 
 ## D53 — Fact→Fact relations come from an LLM relation judge that gates the validated write
 
-**Decision**: When an extraction provider is configured, every validated claim of a source is judged (`judge_relations`, prompt `judge-relations.v1.md`) against at most 16 ACTIVE Facts of the writable generation that share a MENTIONS Entity; the premise (`FactRelationInput`, digest-bound) is persisted once per occurrence, the verdict (`FactRelationVerdict`) is accepted only when it echoes that digest and covers exactly the candidates, and no Fact of the source is written while a verdict is owed (`relation_judge: pending`). Verdicts apply mechanically: `contrasts` → CONTRASTS new→candidate (both stay ACTIVE), `invalidates` → INVALIDATES new→candidate with `effective_time_utc` = the new Fact's time and never onto a Fact that already invalidates one (`chain_refused`), `duplicate` → the Fact is not written (`duplicate:` operation with `duplicate_of`), confidence below 0.6 → `unrelated`; every decision is recorded in `MaterializationOperation.result.relations`. Vector neighbours are not consulted (no Fact vector index exists).
+**Decision**: When an extraction provider is configured, every validated claim of a source is judged (`judge_relations`, prompt `judge-relations.v1.md`) against at most 16 ACTIVE Facts of the writable generation that share a MENTIONS Entity; the digest-bound premise is persisted once per occurrence in `ExtractionJournalEntry.relations`, the verdict is accepted only when it echoes that digest and covers exactly the candidates, and no Fact of the source is written while a verdict is owed (`relation_judge: pending`). Verdicts apply mechanically: `contrasts` → CONTRASTS new→candidate (both stay ACTIVE), `invalidates` → INVALIDATES new→candidate with `effective_time_utc` = the new Fact's time and never onto a Fact that already invalidates one (`chain_refused`), `duplicate` → the Fact is not written (`duplicate:` operation with `duplicate_of`), confidence below 0.6 → `unrelated`; every decision is recorded in the materialization result in `materialization-state.json`. Vector neighbours are not consulted (no Fact vector index exists).
 
 **Alternative**: judge inside the extraction claim call; write the Fact first and link afterwards; chain INVALIDATES transitively.
 
 **Reason**: a verdict must bind to the exact candidate set it saw, retries must be idempotent (custody is the barrier), and a duplicate that was already written would need deletion; a non-recursive INVALIDATES keeps `valid(T)` a single seek (docs/01 §5).
 
-**Exhaustion (addendum)**: a pending relation verdict is attempt-bounded like every other stage. When every owed premise of a pipeline has failed `maxAttempts` times (`FactRelationInput.failures`), the scheduler calls `Store.sealFactRelationOmission`, which writes the source's custody `MaterializationOperation` content-free with `result.omitted = "relation_judge_exhausted"` (plus the failure count and the unjudged occurrence keys) and `fact_id = suppressed:<source>`. No Fact of that source is written — a Fact whose relations were never judged would be exactly the unguessed relation D52 forbids — and the pipeline reads as `relation_judge: "omitted"` (terminal, counted as a failed outcome). Because custody exists, coverage and cutover treat the source like a refused one, so a provider outage during initial catch-up can no longer leave the generation stuck in `catching_up` with `activation_prerequisite_unavailable`. The seal is idempotent and refuses (`relation_omission_premature`) while the budget is not spent.
+**Exhaustion (addendum)**: a pending relation verdict is attempt-bounded like every other stage. When every owed premise of a pipeline has failed `maxAttempts` times (failures in `ExtractionJournalEntry.relations`), the scheduler calls `Store.sealFactRelationOmission`, which records the source's custody content-free in `materialization-state.json` with `result.omitted = "relation_judge_exhausted"` (plus the failure count and the unjudged occurrence keys). No Fact of that source is written — a Fact whose relations were never judged would be exactly the unguessed relation D52 forbids — and the pipeline reads as `relation_judge: "omitted"` (terminal, counted as a failed outcome). Because custody exists, coverage and cutover treat the source like a refused one, so a provider outage during initial catch-up can no longer leave the generation stuck in `catching_up` with `activation_prerequisite_unavailable`. The seal is idempotent and refuses (`relation_omission_premature`) while the budget is not spent.
 
 ## D54 — Embedding lane without graph ledgers (#240)
 
-**Decision**: Neo4j holds only real memory for the embedding lane: `Element:Episode`, `EmbeddingVector`, `OriginHead`, `Meta` and the rest of the memory labels. The `EmbeddingAttempt` and `Outbox` labels that the lane used as ledgers are gone, together with their `embedding_attempt_id` constraint and `outbox_pending` index; `remember` no longer CREATEs an Outbox row for embedding. Work is discovered by what is missing, not by what was queued: an Episode needs embedding when no `EmbeddingVector {episode_id, profile_id}` exists for the active profile, served by a new composite index on `(episode_id, profile_id)`. Attempt and quarantine state lives in one JSON file, `embedding-state.json` under the runtime root (`ANAMNESIS_RUNTIME_ROOT`), written atomically (`.tmp` then rename) and held in memory only when no path is configured (tests, scripts). Ledger schema v1:
+**Decision**: Neo4j holds only real memory for the embedding lane: `Element:Episode`, `EmbeddingVector`, `Meta` and the rest of the memory labels. The `EmbeddingAttempt` and `Outbox` labels that the lane used as ledgers are gone, together with their `embedding_attempt_id` constraint and `outbox_pending` index; `remember` no longer CREATEs an Outbox row for embedding. Work is discovered by what is missing, not by what was queued: an Episode needs embedding when no `EmbeddingVector {episode_id, profile_id}` exists for the active profile, served by a new composite index on `(episode_id, profile_id)`. Attempt and quarantine state lives in one JSON file, `embedding-state.json` under the runtime root (`ANAMNESIS_RUNTIME_ROOT`), written atomically (`.tmp` then rename) and held in memory only when no path is configured (tests, scripts). Ledger schema v1:
 
 ```text
 { "version": 1,

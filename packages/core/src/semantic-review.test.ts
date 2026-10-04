@@ -70,7 +70,8 @@ async function setup() {
   const query = async (cypher: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>[]> =>
     (await driver.executeQuery(cypher, params)).records.map(row => row.toObject());
   const review = reviewFixture();
-  const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider, semanticReviewProvider: review.provider });
+  const materializationStatePath = join(root, "materialization-state.json");
+  const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider, semanticReviewProvider: review.provider, materializationStatePath });
   await query("MATCH (n) DETACH DELETE n");
   await engine.init(); await engine.claimWriterEpoch();
   const generation: Generation = { id: uuidv7(), stream: "extraction", incarnation, state: "catching_up", covered_ingest_seq: 0, created_at: 100, updated_at: 100 };
@@ -94,7 +95,9 @@ async function setup() {
     await query("MATCH (g:ExtractionGeneration {id:$id}) SET g.state=$state, g.body=$body", { id: moved.id, state, body: canonicalExtractionBody(moved) });
     return moved;
   };
-  return { engine, query, review, generation, episode, audit, first, request, materialize, generationIn, options: { uri, password, objectsRoot: root }, async close() { await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
+  return { engine, query, review, generation, episode, audit, first, request, materialize, generationIn,
+    options: { uri, password, objectsRoot: root, materializationStatePath },
+    async close() { await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
 
@@ -157,6 +160,10 @@ test("operator review admits a legacy audit claim: propose, retain, review, mate
     await expect(f.engine.reviewRetainedClaim({ ...accepted, reason: "changed" }, context)).rejects.toThrow("semantic_review_conflict");
     const result = await f.materialize(operation, proposal, 0, semantic);
     expect(result.created).toBe(true);
+    expect(await f.engine.store.materializationState.get(operation)).toMatchObject({
+      generation_id: f.generation.id, source_episode_id: f.first.source.id, fact_ids: [result.fact_id],
+      result: { created: true, fact_id: result.fact_id, link_id: result.link_id },
+    });
     expect(await f.materialize(operation, proposal, 0, semantic)).toEqual({ ...result, created: false });
     await expect(f.materialize(operation, proposal, 0, { ...semantic, confidence: 0.8 })).rejects.toThrow("materialization_conflict");
     await expect(f.materialize(uuidv7(), proposal, 0, { ...semantic, confidence: 0.8 })).rejects.toThrow("semantic_candidate_mismatch");
@@ -167,6 +174,60 @@ test("operator review admits a legacy audit claim: propose, retain, review, mate
     expect(await f.query("MATCH (:Fact)-[:MENTIONS]->(e:Entity) RETURN e.id AS id")).toEqual([{ id: entity }]);
     expect(await f.query("MATCH (c:AdjudicationConsumption) RETURN c.proposal_id AS proposal, c.operation_id AS operation, c.fact_id AS fact")).toEqual([{ proposal, operation, fact: result.fact_id }]);
     expect((await f.engine.checkConductingArcs()).issues).toEqual([]);
+  } finally { await f.close(); }
+}, 120000);
+
+test("committed materialization replays across Engine restart and rejects changed request", async () => {
+  const f = await setup();
+  let replacement: Engine | undefined;
+  try {
+    const entity = uuidv7(), proposal = uuidv7(), operation = uuidv7();
+    const semantic = claim(f.first.source, 0, entity);
+    f.review.resolution = newResolution(f.generation.id, entity);
+    await f.engine.proposeRetainedClaim(f.request(proposal, 0, semantic), context);
+    await f.engine.reviewRetainedClaim({ review_id: uuidv7(), proposal_id: proposal, action: "accept", reason: "restart fixture" }, context);
+    const first = await f.materialize(operation, proposal, 0, semantic);
+    const before = await f.query("MATCH (f:Fact)-[l:DERIVED_FROM]->(e:Episode {id:$source}) RETURN f.id AS fact,l.id AS link", { source: f.first.source.id });
+    replacement = new Engine(f.options);
+    await replacement.claimWriterEpoch();
+    const request = { operation_id: operation, proposal_id: proposal, generation_id: f.generation.id,
+      source_episode_id: f.first.source.id, judge_attempt_id: f.first.judge.id, claim_index: 0, semantic_claim: semantic };
+
+    expect(await replacement.store.materializationState.get(operation)).toMatchObject({
+      fact_ids: [first.fact_id], result: first,
+    });
+    expect(await replacement.materializeRetainedClaim(request, context)).toEqual({ ...first, created: false });
+    await expect(replacement.materializeRetainedClaim({ ...request, semantic_claim: { ...semantic, confidence: 0.8 } }, context))
+      .rejects.toThrow("materialization_conflict");
+    expect(await f.query("MATCH (f:Fact)-[l:DERIVED_FROM]->(e:Episode {id:$source}) RETURN f.id AS fact,l.id AS link", { source: f.first.source.id })).toEqual(before);
+  } finally { await replacement?.close(); await f.close(); }
+}, 120000);
+
+test("uncommitted materialization intent cannot replay a missing Fact", async () => {
+  const f = await setup();
+  try {
+    const entity = uuidv7(), proposal = uuidv7(), operation = uuidv7();
+    const semantic = claim(f.first.source, 0, entity);
+    f.review.resolution = newResolution(f.generation.id, entity);
+    await f.engine.proposeRetainedClaim(f.request(proposal, 0, semantic), context);
+    await f.engine.reviewRetainedClaim({ review_id: uuidv7(), proposal_id: proposal, action: "accept", reason: "rollback fixture" }, context);
+    const request = { operation_id: operation, proposal_id: proposal, generation_id: f.generation.id,
+      source_episode_id: f.first.source.id, judge_attempt_id: f.first.judge.id, claim_index: 0, semantic_claim: semantic };
+    const nonexistent = uuidv7();
+    await f.engine.store.materializationState.set(operation, {
+      request_digest: extractionBodyDigest(request),
+      occurrence_key: extractionBodyDigest([f.generation.id, f.first.source.id, f.first.judge.id, 0]),
+      generation_id: f.generation.id, source_episode_id: f.first.source.id, source_ingest_seq: f.first.source.ingest_seq,
+      fact_ids: [nonexistent], result: { created: true, fact_id: nonexistent, link_id: uuidv7() },
+    });
+
+    const result = await f.engine.materializeRetainedClaim(request, context);
+
+    expect(result.created).toBe(true);
+    expect(result.fact_id).not.toBe(nonexistent);
+    expect(await f.engine.store.materializationState.get(operation)).toMatchObject({ fact_ids: [result.fact_id], result });
+    expect(await f.query("MATCH (f:Fact)-[l:DERIVED_FROM]->(e:Episode {id:$source}) RETURN f.id AS fact,l.id AS link", { source: f.first.source.id }))
+      .toEqual([{ fact: result.fact_id, link: result.link_id }]);
   } finally { await f.close(); }
 }, 120000);
 

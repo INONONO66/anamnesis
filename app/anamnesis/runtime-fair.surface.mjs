@@ -81,7 +81,10 @@ async function stop(client) {
 async function recover(client) {
   const settled = event(daemon, 'drain_settled'); targetPort = dbPort;
   const first = await client.request('status', {}); assert.equal(first.storage, 'available');
-  await settled; return client.request('status', {});
+  // The process event may arrive after the daemon's client idle deadline.
+  await client.close(); clients.delete(client); await settled;
+  const recovered = await RpcClient.connect(root + '/anamnesis.sock', token); clients.add(recovered);
+  return { client: recovered, status: await recovered.request('status', {}) };
 }
 async function verifyRows(source, receipts) {
   const result = await driver.executeQuery('MATCH (e:Episode {origin_source:$source}) RETURN e.revision_key AS revision, e.id AS id, e.ingest_seq AS sequence', { source });
@@ -103,7 +106,8 @@ try {
   await stop(client); client = await start(); const restarted = await client.request('status', {});
   assert.equal(restarted.spool.pending, 50); assert.equal(restarted.data_incarnation, before.data_incarnation); assert.notEqual(restarted.fs_epoch, before.fs_epoch);
   for (const q of queued) assert.deepEqual(await client.request('remember', q.params), q.receipt);
-  const drained = await recover(client); assert.equal(drained.spool.pending, 0); assert.equal(drained.outbox_pending, 50);
+  const recovery = await recover(client); client = recovery.client; const drained = recovery.status;
+  assert.equal(drained.spool.pending, 0); assert.equal(drained.outbox_pending, 50);
   const committed = [];
   for (const q of queued) {
     const result = await client.request('ingest.status', identity(q.receipt)); assert.equal(result.state, 'committed'); assert.deepEqual(identity(result), identity(q.receipt));
@@ -138,11 +142,12 @@ try {
   const journal = await readFile(root + '/spool/spool.journal'); await stop(client);
   assert.deepEqual(await readFile(root + '/spool/spool.journal'), journal);
   offline(); client = await start(); assert.equal((await client.request('status', {})).spool.pending, 108);
-  const status = await recover(client); assert.equal(status.spool.pending, 108); assert.equal(status.spool.blocked, 8); assert.equal(status.outbox_pending, 151);
+  const pageRecovery = await recover(client); client = pageRecovery.client; const status = pageRecovery.status;
+  assert.equal(status.spool.pending, 108); assert.equal(status.spool.blocked, 8); assert.equal(status.outbox_pending, 151);
   for (const [receipt, reason] of blocked) assert.equal((await client.request('ingest.status', identity(receipt))).reason, reason);
   const verified = [];
   for (const receipt of success) { const result = await client.request('ingest.status', identity(receipt)); assert.equal(result.state, 'committed'); assert.deepEqual(identity(result), identity(receipt)); verified.push(result); }
-  const chain = await driver.executeQuery('MATCH (h:OriginHead {origin_key:$origin}) MATCH (e:Episode {revision_key:$child}) RETURN h.revision_key AS head, e.previous_revision_key AS predecessor', { origin: hash(['fair-page', 's', 'a', 'chain']), child: key(child) });
+  const chain = await driver.executeQuery('MATCH (head:Episode {origin_key:$origin}) WITH head ORDER BY head.ingest_seq DESC LIMIT 1 MATCH (e:Episode {revision_key:$child}) RETURN head.revision_key AS head, e.previous_revision_key AS predecessor', { origin: hash(['fair-page', 's', 'a', 'chain']), child: key(child) });
   assert.equal(chain.records[0].get('head'), key(child)); assert.equal(chain.records[0].get('predecessor'), key(parent));
   const doneBytes = await readFile(root + '/spool/spool.done'); const done = JSON.parse(JSON.parse(doneBytes.toString()).payload);
   assert.equal(done.frontier, 0); assert.deepEqual(done.completed, Array.from({ length: 100 }, (_, i) => i + 2));

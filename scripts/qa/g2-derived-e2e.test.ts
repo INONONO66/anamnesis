@@ -218,27 +218,13 @@ test("two hundred sources can activate multiple retained Facts per source", asyn
       const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id }, context);
       await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "scale", lease_ms: 30000 }, context);
     }
-    // The audit bridge records one operation for the source's whole claim batch.
-    // Seed the supported per-Fact custody shape for each second retained Fact;
-    // every added operation references an actual Engine-created evidence link.
-    const custody = neo4j.driver(uri!, neo4j.auth.basic("neo4j", password!), { disableLosslessIntegers: true });
-    try {
-      const extra = await custody.executeQuery(`MATCH (o:MaterializationOperation {generation:$generation})
-        MATCH (f:Fact {generation:$generation})-[l:DERIVED_FROM]->(e:Episode {id:o.source_episode_id})
-        WHERE f.id <> o.fact_id RETURN o.id AS original,f.id AS fact,l.id AS link,e.id AS source`, { generation: generation.id });
-      expect(extra.records).toHaveLength(200);
-      for (const row of extra.records) {
-        const fact = row.get("fact"), link = row.get("link"), source = row.get("source");
-        await custody.executeQuery(`MATCH (o:MaterializationOperation {id:$original})
-          CREATE (:MaterializationOperation {id:$id,occurrence_key:$key,digest:$digest,result:$result,fact_id:$fact,link_id:$link,
-            generation:o.generation,source_episode_id:o.source_episode_id,semantic_profile_id:o.semantic_profile_id})`, {
-          original: row.get("original"), id: uuidv7(), key: extractionBodyDigest([generation.id, source, fact]),
-          digest: extractionBodyDigest({ generation: generation.id, source, fact, link }),
-          result: JSON.stringify({ created: true, fact_id: fact, link_id: link }), fact, link,
-        });
-      }
-      expect((await custody.executeQuery("MATCH (o:MaterializationOperation {generation:$generation}) RETURN count(o) AS count", { generation: generation.id })).records[0]!.get("count")).toBe(400);
-    } finally { await custody.close(); }
+    // Custody is per source, with both Fact identities listed by the engine.
+    const custody = await engine.store.materializationState.list();
+    const sourceCustody = custody.filter(([, entry]) => entry.generation_id === generation.id
+      && entry.occurrence_key === extractionBodyDigest([generation.id, entry.source_episode_id]));
+    expect(sourceCustody).toHaveLength(200);
+    expect(sourceCustody.every(([, entry]) => entry.fact_ids.length === 2
+      && entry.result.created === true && "facts" in entry.result && entry.result.facts === 2)).toBe(true);
     for (const partition of ["episodes", "active_extraction"] as const) await engine.store.recordExtractionCoverage({ generation_id: generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: 200 }, context);
     const selection = await engine.readExtractionSelection(context);
     expect((await engine.cutoverExtractionGeneration({ generation_id: generation.id, expected_generation_id: selection.generation_id, expected_selector_version: selection.selector_version }, context)).state).toBe("active");

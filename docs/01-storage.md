@@ -13,15 +13,15 @@ permits a different kind of write.
              rebuild's explicit old/new target mappings; originals alone do not suffice (§4)
              Fact · Entity · Community · derived links · embedding
   caches     SET allowed. Can be dropped and regenerated at any time
-             hit/utility cache · active policy · EntityWitness · session topology · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · OriginHead · selectors
-             (embedding attempt/quarantine state and extraction pipeline state are not graph
-             layers at all; they live in the `embedding-state.json` ledger and the
-             `extraction-state.json` journal beside the runtime root, §4, §6)
+             hit/utility cache · active policy · Entity witness properties · session topology · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · selectors
+             (embedding, extraction and materialization operational state are not graph
+             layers; they live in `embedding-state.json`, `extraction-state.json` and
+             `materialization-state.json` beside the runtime root, §4, §6)
   control    append-only RecallReceipt impressions and feedback acceptance records;
              durable until explicit receipt retention expiry, not semantic Episodes
              append-only InvalidationEvidence metadata, retained while its
              invalidation outcome can affect a supported historical snapshot
-             append-only EchoLineage provenance rows, AdjudicationAttempt/Proposal/
+             Episode lineage properties, AdjudicationAttempt/Proposal/
              Review/Correction records and EmbeddingResolution/Qualification records;
              retained regeneration authority, never receipt-TTL data (§4)
 ```
@@ -57,21 +57,22 @@ kind-specific queries go through the kind label.
 | `time_value`, `time_utc`, `time_precision` | Episode, Fact | Event time (docs/03 §1) |
 | `origin_source/session/actor/record` | Episode | Source identification |
 | `origin_role` | Episode | `user \| assistant \| tool \| document \| operator`, supplied by the authenticated adapter. Immutable; extraction never infers it from prose (D49) |
-| `lineage_digest` | Episode | SHA-256 of the canonical `EchoLineage` body written in the same transaction; part of the version-2 Episode digest only (§3.3, §1 *Episode digest versions*) |
+| `lineage_mode`, `parent_recall_ids`, `context_digests`, `root_episode_ids`, `echo_depth`, `lineage_complete`, `lineage_digest` | Episode | Bounded lineage body and its canonical SHA-256, stored on the Episode in the same transaction; the digest is part of version-2 Episode identity (§3.3, §1 *Episode digest versions*) |
 | `session_key` | Episode | `sha256(origin_source, origin_session)`; namespaces session order across adapters |
 | `origin_key` | Episode | **Logical** source identity (`sha256(source, session, actor, record)`). Indexed, **not unique** — every revision of the same document shares it |
 | `source_revision` | Episode | Opaque adapter-issued token, stable across retries and unique for each revision of one `origin_key` |
 | `revision_key` | Episode | `sha256(origin_key, source_revision)`. **Unique.** Identity of one revision occurrence, including A→B→A reverts |
-| `previous_revision_key` | Episode | Explicit predecessor for a revision; null only for the first occurrence |
+| `previous_revision_key` | Episode | Explicit predecessor for a revision; null only for the first occurrence. The origin head it is compared against is the newest Episode of the `origin_key` by `ingest_seq`, resolved by the `episode_origin_head` composite index inside the writer-fenced remember transaction; no separate head record exists |
 | `ingest_seq` | Episode | Globally monotonic integer allocated in the remember transaction, last of the statements that do not depend on it; unique build/catch-up cursor. Gapless: an aborted remember consumes no number |
 | `ingested_at` | Episode | Server ms, written once at CREATE. **Not used in snapshot computation** — audit and spool-drain ordering only (docs/03 §1) |
 | `payload_hash` | Episode | Payload reference (optional) |
 | `episode_digest_version` | Episode | Server-selected immutable digest discriminator. Absent on every Episode stored before D49 implementation, which means version 1; `2` on every Episode admitted afterwards; any other stored value is `unsupported_digest_version`. The caller never supplies or downgrades it (*Episode digest versions* below) |
 | `digest` | Episode | SHA-256 for integrity and retry conflict detection, computed by the row's own version. Version 1 hashes the frozen insertion-ordered body `{schema, content, properties, time, payload_hash, previous_revision_key}`; version 2 hashes the RFC-8785 body `{episode_digest_version, schema, content, properties, time, payload_hash, previous_revision_key, origin_role, lineage_digest}`. Byte-identical to the version-2 body in docs/02 §3; under one `revision_key`, a changed version-1 field, or a changed version-2 role or lineage body, is `revision_conflict` |
 | `generation` | Fact, Entity, Community, derived links | Immutable owning generation (§4) |
-| `idem_key` | Fact | SHA-256 of the full canonical Fact identity below. Unique |
+| `idem_key` | Fact | SHA-256 of the full canonical Fact identity below. Fact creation also uses the unique `fact_identity` key `(generation, meaning_digest, primary_episode_id)` with `MERGE` |
 | `entity_key` | Entity | `sha256(generation, normalized_name, entity_kind)`. Unique; create-new Entity retries are no-ops |
-| `visible_from_utc` | Entity, Community | Temporal visibility threshold, one property comparison. Entity is a cache; Community is fixed at build. Policy-independent: an Entity additionally needs a current-policy witness from the `EntityWitness` cache (docs/03 §3) |
+| `visible_from_utc` | Entity, Community | Temporal visibility threshold, one property comparison. Entity is a cache; Community is fixed at build. Policy-independent: an Entity additionally needs current-policy witness properties on the Entity (docs/03 §3) |
+| `witness_generation`, `witness_policy_revision` | Entity | Indexed current-generation and policy-revision witness marker, written with an allowed mention (docs/03 §3) |
 | `source_extraction_generation`, `source_covered_ingest_seq` | Community | Extraction snapshot used to build this Community generation |
 | `source_structure_revision`, `source_export_digest` | Community | Exact serving-view revision and ordered ID/arc/threshold export hash |
 | `source_episode_ids` | Fact | Sorted immutable list of 1–16 original Episode IDs used for mass and Hit attribution |
@@ -144,7 +145,7 @@ Every revision accepted after D49 implementation is version 2, including a new
 The stored row decides. An existing `revision_key` verifies under its own
 version, and an absent value on that row means version 1, so a version-1 row
 stays a no-op on exact retry and never gains `episode_digest_version`,
-`origin_role`, `lineage_digest` or an `EchoLineage` row in place. A legacy row
+`origin_role`, `lineage_digest` or lineage properties in place. A legacy row
 without authenticated lineage stays legacy/unknown under §3.3; only a new
 source revision can carry version-2 lineage. Digest version is not an
 eligibility, policy, candidate or ranking input, and recognizing it changes no
@@ -362,8 +363,8 @@ and ranking state, budget and exact result/context digests (docs/05). It also
 stores an immutable
 `selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
 {element_id, root_episode_ids, echo_depth, complete} records))`, which is the
-exact value a later `EchoLineage` copies into `context_digests` (§3.3); without
-it the lineage row would name a digest the receipt schema never retained. It
+exact value a later Episode's lineage copies into `context_digests` (§3.3); without
+it the lineage would name a digest the receipt schema never retained. It
 does not duplicate complete raw Episode text. A recorded impression means response
 publication was attempted, not proof that the peer consumed socket bytes.
 
@@ -381,11 +382,11 @@ feedback window, not a negative label. Expiry permits retention cleanup of recei
 not their durable Hit events. Utility remains rebuildable from retained
 outcome Hits after the receipt expires.
 
-EchoLineage (§3.3) copies the bounded authority it needs out of a parent
-receipt at `remember` time and stores it in its own retained control row.
+Episode lineage (§3.3) copies the bounded authority it needs out of a parent
+receipt at `remember` time and stores it on the Episode itself.
 Receipt TTL therefore still governs only the feedback window: a parent
 receipt's later expiry cannot change a child Episode's recorded lineage, and
-replay reads the lineage row rather than the receipt.
+replay reads the Episode lineage properties rather than the receipt.
 
 For the outcome-bearing request's adopted set, if present, otherwise the
 delivered primary set (an earlier adoption-only call does not supply a missing
@@ -460,17 +461,14 @@ support a visible synthesis. Do not remove one denied source from immutable
 authority and serve the remainder. Derived summaries/profile caches affected
 by a deny stay unavailable until rebuilt from allowed inputs; Entity anchors
 need an allowed witness, not only a pre-policy visibility threshold. The
-witness is the rebuildable `EntityWitness {generation, policy_revision,
-entity_id, earliest_allowed_from}` cache row: `earliest_allowed_from` is the
-minimum event time of the Entity's MENTIONS sources in that generation that
-the named policy revision allows, or null when none is allowed. Rows are keyed
-by generation and policy revision, never by a request `T`; a request compares
-`earliest_allowed_from <= T` for its pinned pair. A missing or unavailable row
-excludes the Entity rather than falling back to `visible_from_utc`. An
-active-generation append that adds an allowed mention lowers the current
-revision's row in the same transaction, exactly as it lowers
-`visible_from_utc`. Rows for a superseded policy revision are dropped once no in-flight request pins them
-(docs/03 §3).
+witness is the indexed `Entity.{witness_generation, witness_policy_revision}`
+marker set when a validated Fact mentions it. Activation checks the marker
+for each distinct Entity the generation's Facts mention, at the pinned
+generation and policy revision; an absent or mismatched marker blocks that
+generation's activation rather than treating `visible_from_utc` alone as
+sufficient. Request-time queries run against the activated generation and do
+not re-read the marker per Entity. No separate witness row or
+`earliest_allowed_from` property is written (docs/03 §3).
 
 Policy publication takes an immediate serving barrier (docs/02 §1), including
 recall and feedback already in flight. Background reconciliation rebuilds
@@ -498,13 +496,13 @@ most 64 delivered results as
 `{element_id, root_episode_ids[1..16], echo_depth, complete}`.
 
 ```text
-  (:EchoLineage {episode_id, lineage_mode, parent_recall_ids[0..4],
-                 context_digests[0..4], root_episode_ids[0..16],
-                 echo_depth: 0..8, complete})
+  (:Episode {lineage_mode, parent_recall_ids[0..4],
+             context_digests[0..4], root_episode_ids[0..16],
+             echo_depth: 0..8, lineage_complete, lineage_digest})
 ```
 
-The daemon verifies the caller/client binding and appends this row atomically
-with the Episode. `context_digests` copies the parent receipts' stored
+The daemon verifies the caller/client binding and writes these properties
+atomically on the Episode. `context_digests` copies the parent receipts' stored
 `selection_digest` values, so lineage never depends on recomputing an expired
 selection: each receipt persists
 `selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
@@ -512,16 +510,19 @@ selection: each receipt persists
 (§3.1). Parent and digest arrays have equal length; each digest is paired with
 its parent ID, then sorted by recall ID. Roots are the sorted distinct union of
 the referenced snapshots' roots, and depth is `1 + max(item.echo_depth)`.
-`complete=true` only when every referenced item is complete and neither cap
+`lineage_complete=true` only when every referenced item is complete and neither cap
 truncates the result. Parent receipts must still exist when `remember`
 validates them; their later expiry cannot change the copied lineage. The
-canonical body digest is part of the **version-2** Episode digest and unique by
-`episode_id`: an exact retry is a no-op and a different body is
-`idempotency_conflict`. Lineage rows exist only for version-2 Episodes; an
-Episode stored under version 1 never gains one in place, stays legacy/unknown
+canonical body digest (`lineage_digest`) is part of the **version-2** Episode
+digest: an exact retry is a no-op and a changed body under one revision key is
+`revision_conflict`. Lineage properties exist only for version-2 Episodes; an
+Episode stored under version 1 never gains them in place, stays legacy/unknown
 here, and only a new source revision can carry version-2 lineage (§1).
 
-Each Fact copies the bounded metadata in §1. A known echo copies the exact
+Each Fact copies the bounded metadata in §1. Fact identity is the unique
+`(generation, meaning_digest, primary_episode_id)` tuple (`fact_identity`),
+admitted with `MERGE`, so replay does not require a custody node. A known echo
+copies the exact
 delivered item's roots and stores `1 + item.echo_depth`; a context-derived
 Fact copies the Episode's root union and depth. Neither adds the assistant
 Episode as another root. A union over 16 roots keeps its first 16 IDs in
@@ -535,7 +536,7 @@ receipt that contains it; any other Fact from that Episode is
 input without authenticated receipt metadata is `unknown`, never presumed
 independent.
 
-A synthesis has no source Episode lineage row to copy, so it materializes one
+A synthesis has no source Episode lineage to copy, so it materializes one
 from its exact 1..16 non-synthesis support Facts before Fact identity is
 computed. With
 `lineage_complete(f) = f.echo_state ≠ unknown ∧ ¬f.echo_lineage_truncated`,
@@ -565,8 +566,8 @@ state. A later user-authored statement
 is a new direct occurrence; adopting a receipt is usage evidence, not
 semantic corroboration. Lineage never supplies or changes Fact event time,
 snapshot visibility, validity, Hit attribution or source authority, and no
-online operation traverses parents: replay reads the materialized row and
-policy checks at most 16 roots.
+online operation traverses parents: replay reads the materialized Episode
+properties and policy checks at most 16 roots.
 
 ### 3.4 Adjudication control records (D50)
 
@@ -585,7 +586,8 @@ revalidated from its own stored shape rather than from current graph state:
                           effective_time_basis, reason, judge_profile_id})
 ```
 
-`source_head_revision_key` is the exact `OriginHead` value captured before the
+`source_head_revision_key` is the exact origin-head revision key (the newest
+`Episode.revision_key` for the `origin_key` by `ingest_seq`, §1) captured before the
 bounded candidate read and the model call, and `policy_revision` is the
 integer captured at that same point; both are 64-lowercase-hex or nonnegative
 safe integers respectively. The proposal copies them, plus its target,
@@ -1314,6 +1316,7 @@ copy.
 ├── neo4j.auth                per-install random Neo4j password, mode 0600
 ├── embedding-state.json      embedding attempt/quarantine ledger (D54); operational, not authority
 ├── extraction-state.json     extraction pipeline journal: tasks, leases, attempts, decisions (D55)
+├── materialization-state.json  materialization custody and replay intent (D53)
 ├── objects/                  Payload bytes (§2). Part of the authority
 ├── spool/                    transient remember() queue while Neo4j is unavailable (docs/02 §4)
 ├── tmp/dream/                bounded disposable GDS exports
@@ -1325,14 +1328,18 @@ The parent directory also holds the fixed, root-hash-namespaced writer pointer
 and backup/restore activation journals; they remain discoverable while the
 data root is renamed (docs/02).
 
-The two state files hold pipeline bookkeeping, never memory. Each is a
+The three state files hold pipeline bookkeeping, never memory. Each is a
 single JSON document rewritten atomically (temporary name plus rename) on
 every change and schema-validated on load. `embedding-state.json` keeps an
 entry only while an Episode lacks its profile's vector (§4, D54).
-`extraction-state.json` keeps one entry per extraction pipeline and prunes it
-once coverage has sealed the source and materialization is terminal, so the
+`extraction-state.json` keeps one entry per extraction pipeline, including
+relation premises, verdicts and attempt failures in
+`ExtractionJournalEntry.relations`, and prunes it once coverage has sealed the
+source and materialization is terminal, so the
 file stays bounded by in-flight work rather than growing with the corpus
-(docs/02 §5, D55). Neither file is part of the backup authority: losing one
+(docs/02 §5, D55). `materialization-state.json` keeps operation custody and
+replay intent until the source settles. None is part of the backup authority:
+losing one
 re-drives unsealed work and forgets failure history, and the structured
 audit log lines are the durable record of what happened.
 
@@ -1343,10 +1350,9 @@ unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_
           · ExtractionGeneration.id · ExtractionCoverage.key
           · RecallReceipt.recall_id · RecallFeedback.id · RecallOutcome.recall_id
           · ActivePolicy.policy_id · ConflictAdjacency(generation, fact_id, peer_id)
-          · EntityWitness(generation, policy_revision, entity_id)
           · InvalidationEvidence.id
           · InvalidationMarker(generation, target_id, evidence_id)
-          · EchoLineage.episode_id
+          · Fact(generation, meaning_digest, primary_episode_id) (`fact_identity`)
           · AdjudicationAttempt.attempt_id · AdjudicationProposal.proposal_id
           · AdjudicationReview.review_id · AdjudicationConsumption.proposal_id
           · AdjudicationCorrection.correction_id
@@ -1363,9 +1369,11 @@ unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_
           · EmbeddingQualification.qualification_id
           · EmbeddingBuild.embedding_profile_id
           · EmbeddingBuildSource(embedding_model_id, stream, generation)
-          · HubArc(hub_id, link_id) · OriginHead.origin_key · Meta.key (single node, key = 'meta')
+          · HubArc(hub_id, link_id) · Meta.key (single node, key = 'meta')
 range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Element.schema · Element.generation
           composite Episode(session_key, time_utc, ingest_seq)
+          composite Episode(origin_key, ingest_seq) (`episode_origin_head`: newest revision per origin)
+          composite Entity(witness_generation, witness_policy_revision) (`entity_witness`)
           composite Fact(generation, primary_episode_id, time_utc, id)
           composite HubArc(hub_id, rank) · Outbox.processed_at
           composite EmbeddingVector(episode_id, profile_id) (missing-vector discovery, §4)
@@ -1432,13 +1440,13 @@ SET allowed
   Episode.{utility_weight, utility_reward_sum} utility cache from outcome Hits only
   Element.m_cache                              mass snapshot for ordering, refreshed by maintenance (docs/06 §2)
   Entity.visible_from_utc                      min visible mention time, updated on active backfill
-  EntityWitness.earliest_allowed_from          min allowed mention time for its (generation, policy_revision), same rule
+  Entity.{witness_generation,
+          witness_policy_revision}             current-generation/policy-revision witness marker, set with an allowed mention
   ConductingArcCoverage.state                  rebuild availability/publication barrier
   Element.embedding_m_<modelhex>               backfill; write-once null → vector
   RELATES_TO.embedding_g<N>_m_<modelhex>        generation-partitioned relationship vector
   Outbox.{state, attempts, next_retry_at,
           error, processed_at}                 sequencer/blocked-head cursor
-  OriginHead.revision_key                      CAS head cache, rebuilt from the immutable revision chain
   Generation.{state, next_ingest_seq,
                covered_ingest_seq}              build/cutover lifecycle
   EmbeddingCoverage.{covered_ingest_seq, health,
@@ -1461,14 +1469,13 @@ CREATE/DELETE allowed in caches
   HubArc                                       maintenance rebuild
   ProfileCache                                 dreaming rebuild
   ActivePolicy                                 fold immutable policy Episode events
-  EntityWitness                                per (generation, policy_revision) earliest allowed mention time
   ConflictAdjacency                            bounded conflict completion and policy-aware summaries
   InvalidationMarker                           replay retained content-free evidence/target mappings
   AdjudicationCorrectionMap                    per-build old/new correction mapping (§4)
   TranslationMapping                           per-build one-to-one language pairing (§4)
 DELETE allowed in retained control state
   expired RecallReceipt / RecallFeedback        explicit receipt TTL; never removes Hit outcomes
-                                                EchoLineage, adjudication attempt/proposal/review/
+                                                Episode lineage properties, adjudication attempt/proposal/review/
                                                 correction and embedding resolution/qualification
                                                 records are retained authority and are never deleted here
 never SET on any Episode
@@ -1490,8 +1497,8 @@ hash + bounded Fact authority/list↔link agreement + Hit ledger ↔ cache repla
 agreement + utility sufficient-statistic replay + policy event/cache agreement
 + unexpired receipt/feedback exact-once constraints and captured attribution
 + invalidation evidence/marker replay and generation validity preservation
-+ EchoLineage existence for version-2 Episodes only, no lineage row required or
-  materialized for a version-1 Episode, digest agreement with its Episode, bounded parent/root
++ lineage properties for version-2 Episodes only, none required or
+  materialized for a version-1 Episode, `lineage_digest` agreement with the stored body, bounded parent/root
   arrays, `context_digests` equal to the parent receipts' stored
   `selection_digest` values, Fact lineage-copy agreement, and each synthesis
   reproducing the bounded support-union rule (§3.3)

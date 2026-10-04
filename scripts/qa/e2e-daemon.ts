@@ -19,6 +19,7 @@ import { RpcRememberParams, type RpcStatusResult } from "../../packages/protocol
 import { maskSecrets } from "../../packages/backfill/src/secrets.ts";
 import { loadProviderConfig } from "../../app/anamnesis/config.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
+import { ModelTask } from "../../packages/protocol/src/extraction.ts";
 
 const execute = promisify(execFile);
 const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
@@ -69,12 +70,19 @@ interface Cursor { event: string; buffered: Arrival[]; waiters: Waiter[] }
  * a status read after the latest idle transition also covers every earlier one. */
 function lineStream(child: ChildProcess) {
   const counts: Record<string, number> = {}, cursors = new Set<Cursor>();
+  const materializations = new Map<string, { duplicates: number; refused: number }>();
   let closed = false;
   createInterface({ input: child.stdout! }).on("line", text => {
     let line: DaemonLine;
     try { line = JSON.parse(text) as DaemonLine; } catch { counts["non_json"] = (counts["non_json"] ?? 0) + 1; return; }
     const event = typeof line["event"] === "string" ? line["event"] : "unknown";
     counts[event] = (counts[event] ?? 0) + 1;
+    if (event === "extraction.pipeline.materialized") {
+      materializations.set(ModelTask.shape.id.parse(line["pipeline_id"]), {
+        duplicates: ModelTask.shape.attempts.parse(line["duplicates"]),
+        refused: ModelTask.shape.attempts.parse(line["refused"]),
+      });
+    }
     const arrival = { line, at: Date.now() };
     for (const cursor of cursors) {
       if (cursor.event !== event) continue;
@@ -85,6 +93,7 @@ function lineStream(child: ChildProcess) {
   child.once("close", () => { closed = true; for (const cursor of cursors) for (const waiter of cursor.waiters.splice(0)) waiter.reject(new Error("daemon_closed")); });
   return {
     counts: () => ({ ...counts }),
+    materializations: () => [...materializations.values()],
     subscribe(event: string) {
       const cursor: Cursor = { event, buffered: [], waiters: [] };
       cursors.add(cursor);
@@ -212,7 +221,9 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     driver = neo4j.driver(env.ANAMNESIS_NEO4J_URI, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
     await ready(startedAt); await startDaemon();
     // Subscribed before the first remember: no idle transition emitted during or after ingest can be missed.
-    const idle = lines!.subscribe("workers_idle");
+    assert.ok(lines, "daemon event stream required");
+    const activeLines = lines;
+    const idle = activeLines.subscribe("workers_idle");
     client = await connect();
     // The daemon destroys sockets idle for 30s (daemon.ts socket.setTimeout); the workers stage waits far longer between
     // idle transitions, so every request goes through a connection that is reopened when the previous one was closed.
@@ -318,12 +329,14 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     const quarantined = Object.values(ledger.episodes).filter(entry => entry.state === "quarantined").length;
     summary.vectors = vectors; summary.embedding = { vectors, quarantined, lane: final.workers.embedding };
     assert.equal(vectors, count, "vectors_not_equal_episodes");
-    // Relation links are the relation judge's verdicts: CONTRASTS/INVALIDATES Fact->Fact links plus duplicate custody operations
-    // (a "duplicate" verdict suppresses the Fact and leaves a content-free MaterializationOperation keyed duplicate:<occurrence>).
+    // Relation links are the relation judge's verdicts: CONTRASTS/INVALIDATES Fact->Fact links plus duplicate custody entries.
     const byType = Object.fromEntries((await driver.executeQuery("MATCH (:Fact)-[l]->(:Fact) RETURN type(l) AS type, count(l) AS n")).records.map(row => [String(row.get("type")), Number(row.get("n"))]));
     const contrasts = byType["CONTRASTS"] ?? 0, invalidates = byType["INVALIDATES"] ?? 0;
-    const duplicates = await countQuery("MATCH (o:MaterializationOperation) WHERE o.occurrence_key STARTS WITH 'duplicate:' RETURN count(o) AS count");
-    const refused = await countQuery("MATCH (o:MaterializationOperation) WHERE o.occurrence_key STARTS WITH 'refused:' RETURN count(o) AS count");
+    // Both operational files prune covered sources. The already-subscribed
+    // daemon audit stream retains the terminal duplicate/refusal counts.
+    const outcomes = activeLines.materializations();
+    const duplicates = outcomes.reduce((total, value) => total + value.duplicates, 0);
+    const refused = outcomes.reduce((total, value) => total + value.refused, 0);
     summary.relation_links = { contrasts, invalidates, duplicates, total: contrasts + invalidates + duplicates, fact_links_by_type: byType, refused_claims: refused };
     summary.extraction_lane = { completed_total: extraction.completed_total, failed_total: extraction.failed_total, last_error: extraction.last_error };
     summary.workers = { status: final.workers, idle_events: idleEvents, trail_tail: trail.slice(-8) };

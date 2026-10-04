@@ -92,6 +92,7 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
     return response.json();
   };
   const engineOptions = { ...options, objectsRoot: root, extractionJournalPath: join(root, 'extraction-state.json'),
+    materializationStatePath: join(root, 'materialization-state.json'),
     extractionProvider: new HttpExtractionProvider({ endpoint, model: 'qa', model_incarnation: incarnation }),
     semanticReviewProvider: { profileId: hash('independent-semantic-judge'),
       resolve: async input => SemanticResolution.parse(await semanticRequest('resolve_semantic', input)),
@@ -126,7 +127,7 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
     entities: await query('MATCH (e:Entity) RETURN properties(e) AS entity ORDER BY e.id'),
     links: await query("MATCH (a)-[l]->(b) WHERE type(l) IN ['DERIVED_FROM','MENTIONS'] RETURN a.id AS a,b.id AS b,properties(l) AS link ORDER BY l.id"),
     arcs: await query('MATCH (a:ConductingArc) RETURN properties(a) AS arc ORDER BY a.source_id,a.link_id'),
-    operations: await query('MATCH (o:MaterializationOperation) RETURN properties(o) AS operation ORDER BY o.id'),
+    operations: await engine.store.materializationState.list(),
     consumptions: await query('MATCH (c:AdjudicationConsumption) RETURN properties(c) AS consumption ORDER BY c.proposal_id'),
   });
   const original = await query('MATCH (e:Episode {id:$id}) RETURN properties(e) AS episode', { id: source.id });
@@ -154,6 +155,7 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
   await noWrite(() => engine.materializeRetainedClaim({ ...authorized, generation_id: uuid() }, context), /semantic_candidate_mismatch/);
   const first = await engine.materializeRetainedClaim(authorized, context);
   assert.equal(first.created, true);
+  assert.deepEqual((await engine.store.materializationState.get(authorized.operation_id)).fact_ids, [first.fact_id]);
   const uuid7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   assert.match(first.fact_id, uuid7); assert.match(first.link_id, uuid7);
   const stored = await snapshot();
@@ -219,6 +221,10 @@ test('retained claim produces one Fact and immutable retry identity', async t =>
   await engine.close(); engine = new Engine(engineOptions);
   await engine.init(); await engine.claimWriterEpoch();
   assert.deepEqual(await engine.materializeRetainedClaim(authorized, context), { ...first, created: false });
+  assert.equal(await engine.store.materializationState.get(authorized.operation_id), undefined);
+  await noWrite(() => engine.materializeRetainedClaim({
+    ...authorized, semantic_claim: { ...authorized.semantic_claim, confidence: 0.2 },
+  }, context), /materialization_conflict/);
   assert.deepEqual(await engine.proposeRetainedClaim(proposalInput, context), proposal);
   assert.equal(semanticCalls, callsBeforeReopen);
   assert.deepEqual(await semanticSnapshot(), beforeReopen);

@@ -34,15 +34,15 @@ function coveredRow(row: CoveredRow, seq: number, generationId: string, entry: E
   return { task, attempt };
 }
 
-type CoveredSource = Neo4jRecord<{ id: string; seq: number; operations: number }>;
+type CoveredSource = Neo4jRecord<{ id: string; seq: number }>;
 
 /** The existing access-index prerequisites must be online; this does not certify
  * nonexistent generation-scoped derived indexes or an ordered query plan. */
 async function checkAccessIndexesTx(tx: ManagedTransaction): Promise<void> {
   const indexes = await tx.run(`SHOW INDEXES YIELD name,state WHERE name IN $names RETURN name,state`, {
-    names: ["conducting_arc_source_link", "conducting_arc_coverage", "extraction_coverage_key", "extraction_generation_id", "meta_key", "fact_generation_id", "entity_generation_key"],
+    names: ["conducting_arc_source_link", "conducting_arc_coverage", "extraction_coverage_key", "extraction_generation_id", "meta_key", "fact_generation_id", "entity_generation_key", "entity_witness"],
   });
-  if (indexes.records.length !== 7 || indexes.records.some(index => index.get("state") !== "ONLINE")) throw new GraphAccessError("ordered_probe_unavailable");
+  if (indexes.records.length !== 8 || indexes.records.some(index => index.get("state") !== "ONLINE")) throw new GraphAccessError("ordered_probe_unavailable");
 }
 
 /** Every DERIVED_FROM link of the generation names its Fact, source and link id, within the bounded view. */
@@ -55,8 +55,10 @@ async function derivedLinksBadTx(tx: ManagedTransaction, generation: string, max
 /** Several Facts may mention one Entity; the witness requirement is per distinct entity at the current policy revision. */
 async function entityWitnessesBadTx(tx: ManagedTransaction, generation: string, policyRevision: number, maxDerived: number): Promise<boolean> {
   const entities = await tx.run(`MATCH (f:Element:Fact {generation:$generation}) UNWIND coalesce(f.entity_ids,[]) AS entity
-    WITH DISTINCT entity OPTIONAL MATCH (w:EntityWitness {entity_id:entity,generation:$generation,policy_revision:$policy})
-    RETURN entity,count(w) AS witnesses LIMIT $limit`, { generation, policy: neo4j.int(policyRevision), limit: neo4j.int(maxDerived + 1) });
+    WITH DISTINCT entity LIMIT $limit
+    OPTIONAL MATCH (w:Entity {witness_generation:$generation,witness_policy_revision:$policy})
+    USING INDEX w:Entity(witness_generation,witness_policy_revision) WHERE w.id=entity
+    RETURN entity,count(w) AS witnesses`, { generation, policy: neo4j.int(policyRevision), limit: neo4j.int(maxDerived + 1) });
   return entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
 }
 
@@ -196,18 +198,21 @@ export class ActivationStore {
   }
   /** Every covered source carries materialization custody or an explicitly sealed omission, within the bounded custody view. */
   private async derivedCustodyBadTx(tx: ManagedTransaction, target: Generation, sources: CoveredSource[], maxDerived: number): Promise<boolean> {
-    const operationRows = await tx.run(`MATCH (o:MaterializationOperation {generation:$generation})
-      RETURN o.source_episode_id AS source,o.semantic_profile_id AS profile,o.fact_id AS fact,o.link_id AS link LIMIT $limit`, { generation: target.id, limit: neo4j.int(maxDerived + 1) });
+    const facts = await tx.run(`MATCH (f:Fact {generation:$generation})
+      OPTIONAL MATCH (f)-[l:DERIVED_FROM]->(e:Episode)
+      RETURN f.primary_episode_id AS source,f.id AS fact,l.id AS link,e.id AS linked_source LIMIT $limit`,
+      { generation: target.id, limit: neo4j.int(maxDerived + 1) });
     let missing = false;
-    for (const source of sources) if (source.get("operations") === 0) {
+    for (const source of sources) {
       const entry = await this.core.extractionJournal.byWorkKey(`${target.id}:${source.get("id")}`);
-      // Readiness invariant: sealing admits only terminal pipelines and success
-      // writes custody in that transaction. A pruned covered source without
-      // custody therefore denotes a sealed omission, not missing work.
-      if (entry ? !extractionEntryOmission(entry) : source.get("seq") > target.covered_ingest_seq) missing = true;
+      // A covered entry remains only while materialization is unsettled. Once
+      // pruned, both coverage partitions seal its positive or negative outcome.
+      if (entry ? !extractionEntryOmission(entry) && !await this.materialization.sourceCustodyTx(tx, target.id, source.get("id"))
+        : source.get("seq") > target.covered_ingest_seq) missing = true;
     }
-    const overflow = sources.length > 256 || operationRows.records.length > maxDerived;
-    const malformed = operationRows.records.some(row => typeof row.get("source") !== "string" || typeof row.get("fact") !== "string" || typeof row.get("link") !== "string");
+    const overflow = sources.length > 256 || facts.records.length > maxDerived;
+    const malformed = facts.records.some(row => typeof row.get("source") !== "string" || typeof row.get("fact") !== "string"
+      || typeof row.get("link") !== "string" || row.get("source") !== row.get("linked_source"));
     return missing || overflow || malformed;
   }
   /** Serving readiness is derived only from persisted, generation-scoped
@@ -217,9 +222,8 @@ export class ActivationStore {
    * derived link and entity witness must be in order, and the selected
    * embedding profile must cover every source. Returns the unmet prerequisites. */
   private async activationCausesTx(tx: ManagedTransaction, target: Generation, policy: PolicyState, live: number): Promise<string[]> {
-    const sources = await tx.run<{ id: string; seq: number; operations: number }>(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
-      OPTIONAL MATCH (o:MaterializationOperation {generation:$generation,source_episode_id:e.id})
-      RETURN e.id AS id,e.ingest_seq AS seq,count(o) AS operations LIMIT 257`, { seq: live, generation: target.id });
+    const sources = await tx.run<{ id: string; seq: number }>(`MATCH (e:Element:Episode) WHERE e.ingest_seq > 0 AND e.ingest_seq <= $seq
+      RETURN e.id AS id,e.ingest_seq AS seq LIMIT 257`, { seq: live });
     // The source partition is bounded at 256, but each source can retain up to
     // 64 claims. Derived custody rows use their own bounded overflow sentinel.
     const maxDerived = 256 * 64;

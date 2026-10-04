@@ -13,6 +13,7 @@ import { type InstallationContext, PolicyEvent, policySelector, policyBody, type
 import { type QueryParameters, recordsToObjects } from "./records.ts";
 import { EmbeddingLedger } from "./embedding-ledger.ts";
 import { ExtractionJournal, journalAttempt } from "./extraction-journal.ts";
+import { MaterializationState } from "./materialization-state.ts";
 
 export interface StoreOptions {
   uri: string;
@@ -25,6 +26,7 @@ export interface StoreOptions {
   embeddingProvider?: EmbeddingProvider;
   embeddingLedgerPath?: string;
   extractionJournalPath?: string;
+  materializationStatePath?: string;
   audit?: (event: string, fields: Record<string, unknown>) => void;
   tokenizers?: Tokenizers;
   recallDefaultBytes?: number;
@@ -72,6 +74,7 @@ export class StoreCore {
   readonly embeddingProvider: EmbeddingProvider | undefined;
   readonly embeddingLedger: EmbeddingLedger;
   readonly extractionJournal: ExtractionJournal;
+  readonly materializationState: MaterializationState;
   readonly audit: (event: string, fields: Record<string, unknown>) => void;
   readonly tokenizers: Tokenizers;
   readonly recallDefaultBytes: number;
@@ -82,6 +85,7 @@ export class StoreCore {
     this.embeddingProvider = opts.embeddingProvider;
     this.embeddingLedger = new EmbeddingLedger(opts.embeddingLedgerPath);
     this.extractionJournal = new ExtractionJournal(opts.extractionJournalPath);
+    this.materializationState = new MaterializationState(opts.materializationStatePath);
     this.audit = opts.audit ?? (() => {});
     this.tokenizers = opts.tokenizers ?? new Map();
     this.recallDefaultBytes = z.number().int().min(0).max(1024 * 1024).parse(opts.recallDefaultBytes ?? 65536);

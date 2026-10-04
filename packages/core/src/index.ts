@@ -34,6 +34,6 @@ export { ObjectStore } from "./objects.ts";
 export { RecallError, type Tokenizers } from "./recall.ts";
 export { ExtractionScheduler, type ExtractionTurn } from "./extraction-scheduler.ts";
 export { PacedExtractionProvider } from "./paced-extraction-provider.ts";
-export { elementDigest, verifyLineageRetry } from "./store/digest.ts";
+export { elementDigest, verifyLineageRetry, verifyEpisodeLineage } from "./store/digest.ts";
 export { DurableSpool, type SpoolEntry } from "./spool.ts";
 export { backoffMs, managedRestartDelayMs, modelTaskRetryDelayMs } from "./backoff.ts";
