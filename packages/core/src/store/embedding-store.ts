@@ -97,23 +97,17 @@ export class EmbeddingStore {
     const request = RpcEmbeddingRecoverParams.parse(input), provider = this.core.embeddingProvider;
     if (!provider) throw new RecallError("embedding_not_configured");
     const profileId = embeddingProfileId(provider.profile);
-    const prior = await this.priorAttempt(request.operation_id);
-    if (prior && (prior.episode_id !== request.episode_id || prior.profile_id !== profileId))
-      throw new ReceiptError("idempotency_conflict");
-    const prepared = await this.episodeInput(request.episode_id);
-    if (prior) {
-      if (prior.input_revision !== prepared.revision || prior.input_digest !== prepared.digest)
-        throw new ReceiptError("idempotency_conflict");
-      return prior;
-    }
+    const { prior, prepared } = await this.replayOrInput(request, profileId);
+    if (prior) return prior;
     const previous = await this.core.embeddingLedger.get(request.episode_id);
     const held = await this.core.run<VectorRow>(
       `MATCH (v:EmbeddingVector {episode_id:$id,profile_id:$profile}) ${VECTOR_RETURN}`, { id: request.episode_id, profile: profileId });
     if (held[0]) {
       // The Episode already holds this profile's vector: the attempt that wrote it is the answer. The provider
       // is not called and the submitted id, having done no work, is recorded nowhere; a replay returns the same
-      // attempt and the id's status stays unknown. A lingering ledger entry is stale and goes with it.
-      if (previous) await this.core.embeddingLedger.delete(request.episode_id);
+      // attempt and the id's status stays unknown. A lingering entry of this profile is stale and goes with it;
+      // another profile's entry is that profile's history and stays.
+      if (previous?.profile_id === profileId) await this.core.embeddingLedger.delete(request.episode_id);
       return await this.vectorAttempt(held[0]);
     }
     // Another profile's entry lends no deferral budget: the first attempt under this profile replaces it.
@@ -131,6 +125,18 @@ export class EmbeddingStore {
       await this.recordFailure(request.episode_id, result, previous?.profile_id === profileId ? previous : null, deferrals);
     }
     return result;
+  }
+
+  /** The recorded attempt an operation id replays, or the Episode's current input when the id is new. */
+  private async replayOrInput(request: RpcEmbeddingRecoverParams, profileId: string):
+    Promise<{ prior: RpcEmbeddingAttempt | null; prepared: EpisodeInput }> {
+    const prior = await this.priorAttempt(request.operation_id);
+    if (prior && (prior.episode_id !== request.episode_id || prior.profile_id !== profileId))
+      throw new ReceiptError("idempotency_conflict");
+    const prepared = await this.episodeInput(request.episode_id);
+    if (prior && (prior.input_revision !== prepared.revision || prior.input_digest !== prepared.digest))
+      throw new ReceiptError("idempotency_conflict");
+    return { prior, prepared };
   }
 
   private recordFailure(episodeId: string, result: RpcEmbeddingAttempt, previous: EmbeddingLedgerEntry | null, deferrals: number): Promise<void> {
@@ -227,12 +233,17 @@ export class EmbeddingStore {
     if (!provider) return { drained: 0, reason: "embeddings_disabled" };
     const profileId = embeddingProfileId(provider.profile);
     const entries = await this.core.embeddingLedger.list();
-    // An entry whose Episode already holds this profile's vector is stale: a process loss between the vector
-    // commit and the entry's deletion, or a seeded ledger. Quarantined, it would hide the Episode from the scan
-    // below and never be visited by `due`, so every drain first reconciles the ledger against the graph.
-    const stale = new Set((await this.core.run<{ id: string }>(
-      `UNWIND $ids AS id MATCH (:EmbeddingVector {episode_id:id,profile_id:$profile}) RETURN DISTINCT id`,
-      { ids: entries.map(([id]) => id), profile: profileId })).map(row => row.id));
+    // An entry whose Episode already holds the vector of the entry's own profile is stale: a process loss between
+    // the vector commit and the entry's deletion, or a seeded ledger. Quarantined, it would hide the Episode from
+    // the scan below and never be visited by `due`, so every drain first reconciles the ledger against the graph.
+    const byProfile = new Map<string, string[]>();
+    for (const [id, entry] of entries) byProfile.set(entry.profile_id, [...byProfile.get(entry.profile_id) ?? [], id]);
+    const stale = new Set<string>();
+    for (const [profile, ids] of byProfile) {
+      for (const row of await this.core.run<{ id: string }>(
+        `UNWIND $ids AS id MATCH (:EmbeddingVector {episode_id:id,profile_id:$profile}) RETURN DISTINCT id`, { ids, profile }))
+        stale.add(row.id);
+    }
     for (const id of stale) await this.core.embeddingLedger.delete(id);
     // Only this profile's recorded failures hide an Episode from the scan; another profile's entry is
     // superseded by the first attempt under this one.

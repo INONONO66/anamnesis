@@ -188,7 +188,8 @@ describe.serial("embedding lane on isolated Neo4j", () => {
     // under this profile and the unembedded one under another profile.
     state.mode = "ok";
     const embedded = await episode("ledger-stale");
-    expect(await engine.drainEmbeddingOutbox(100)).toMatchObject({ drained: 1 });
+    const foreignHeld = await episode("ledger-foreign-held");
+    expect(await engine.drainEmbeddingOutbox(100)).toMatchObject({ drained: 2 });
     const unembedded = await episode("ledger-foreign");
     const profileId = embeddingProfileId(profile), otherProfile = "f".repeat(64);
     const quarantine = (episodeId: string, profile_id: string) => ({
@@ -200,7 +201,11 @@ describe.serial("embedding lane on isolated Neo4j", () => {
         state: "quarantined", reason: "provider_rejected", detail: null,
       }],
     });
-    const episodes = { [embedded]: quarantine(embedded, profileId), [unembedded]: quarantine(unembedded, otherProfile) };
+    // ...and a third, embedded under this profile, that another profile quarantined: that profile's history.
+    const episodes = {
+      [embedded]: quarantine(embedded, profileId), [unembedded]: quarantine(unembedded, otherProfile),
+      [foreignHeld]: quarantine(foreignHeld, otherProfile),
+    };
     const staleOperation = episodes[embedded]!.attempts[0]!.operation_id;
     const seededPath = join(root, "seeded-embedding-state.json");
     await writeFile(seededPath, JSON.stringify({ version: 1, episodes }));
@@ -214,14 +219,20 @@ describe.serial("embedding lane on isolated Neo4j", () => {
       const result = await seeded.drainEmbeddingOutbox(100);
 
       // Then the other profile's entry did not hide its Episode, the stale entry is gone without a provider
-      // call for its Episode, and the stale operation id is no longer reported.
+      // call for its Episode, the stale operation id is no longer reported, and the other profile's entry
+      // for the Episode this profile already serves is left as that profile's history.
       expect(result).toMatchObject({ drained: 1, quarantined: 0, deferred: 0 });
-      const vectors = await query<{ id: string }>(
-        "MATCH (v:EmbeddingVector {profile_id:$profile}) WHERE v.episode_id IN [$a,$b] RETURN v.episode_id AS id ORDER BY id",
-        { profile: profileId, a: embedded, b: unembedded });
-      expect(vectors.map(row => row.id)).toEqual([embedded, unembedded].sort());
-      expect(JSON.parse(await readFile(seededPath, "utf8"))).toEqual({ version: 1, episodes: {} });
+      const vectors = await query<{ id: string; count: number }>(
+        "MATCH (v:EmbeddingVector {profile_id:$profile}) WHERE v.episode_id IN [$a,$b,$c] RETURN v.episode_id AS id, count(v) AS count ORDER BY id",
+        { profile: profileId, a: embedded, b: unembedded, c: foreignHeld });
+      expect(vectors).toEqual([embedded, unembedded, foreignHeld].sort().map(id => ({ id, count: 1 })));
+      expect(JSON.parse(await readFile(seededPath, "utf8"))).toEqual({ version: 1, episodes: { [foreignHeld]: episodes[foreignHeld] } });
       expect(await seeded.embeddingStatus(staleOperation, context)).toEqual({ state: "unknown", operation_id: staleOperation });
+      const calls = state.calls;
+      const recovered = await seeded.recoverEmbedding({ episode_id: foreignHeld, operation_id: uuidv7() }, context);
+      expect(recovered).toMatchObject({ state: "succeeded", episode_id: foreignHeld, profile_id: profileId });
+      expect(state.calls).toBe(calls);
+      expect(JSON.parse(await readFile(seededPath, "utf8"))).toEqual({ version: 1, episodes: { [foreignHeld]: episodes[foreignHeld] } });
     } finally {
       await seeded.close();
     }
