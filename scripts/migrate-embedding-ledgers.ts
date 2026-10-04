@@ -185,41 +185,27 @@ export async function main(options: MigrationOptions = {}): Promise<MigrationRes
   const line = (step: string, values: Record<string, unknown>) => output(JSON.stringify({ step, ...values }));
 
   try {
-    const inspection = await session.run<{
-      embeddingAttempts: number;
-      outbox: number;
-      constraints: string[];
-      indexes: string[];
-    }>(`
-      CALL {
-        MATCH (a:EmbeddingAttempt) RETURN count(a) AS embeddingAttempts
-      }
-      CALL {
-        MATCH (o:Outbox) RETURN count(o) AS outbox
-      }
-      CALL {
-        SHOW CONSTRAINTS YIELD name
-        WHERE name = 'embedding_attempt_id'
-        RETURN collect(name) AS constraints
-      }
-      CALL {
-        SHOW INDEXES YIELD name
-        WHERE name = 'outbox_pending'
-        RETURN collect(name) AS indexes
-      }
-      RETURN embeddingAttempts, outbox, constraints, indexes
+    const inspection = await session.run<{ embeddingAttempts: number; outbox: number }>(`
+      CALL { MATCH (a:EmbeddingAttempt) RETURN count(a) AS embeddingAttempts }
+      CALL { MATCH (o:Outbox) RETURN count(o) AS outbox }
+      RETURN embeddingAttempts, outbox
     `);
     const inspected = inspection.records[0];
     if (!inspected) throw new Error("Neo4j returned no migration inspection row");
     const embeddingAttempts = numberValue(inspected.get("embeddingAttempts"), "EmbeddingAttempt count");
     const outbox = numberValue(inspected.get("outbox"), "Outbox count");
-    const constraints = inspected.get("constraints");
-    const indexes = inspected.get("indexes");
+    // Neo4j 5 rejects SHOW inside a CALL subquery, so the schema checks are standalone statements.
+    const constraints = await session.run<{ name: string }>(
+      "SHOW CONSTRAINTS YIELD name WHERE name = 'embedding_attempt_id' RETURN name",
+    );
+    const indexes = await session.run<{ name: string }>(
+      "SHOW INDEXES YIELD name WHERE name = 'outbox_pending' RETURN name",
+    );
     line("inspect", {
       embedding_attempts: embeddingAttempts,
       outbox,
-      embedding_attempt_constraint: Array.isArray(constraints) && constraints.includes("embedding_attempt_id"),
-      outbox_pending_index: Array.isArray(indexes) && indexes.includes("outbox_pending"),
+      embedding_attempt_constraint: constraints.records.length > 0,
+      outbox_pending_index: indexes.records.length > 0,
     });
 
     const quarantined = await session.run<{
