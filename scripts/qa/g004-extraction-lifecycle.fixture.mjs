@@ -10,7 +10,6 @@ import { createInterface } from 'node:readline';
 import neo4j from 'neo4j-driver';
 const uuid = () => `01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 import { Engine } from '../../packages/core/src/engine.ts';
-import { GenerationReadinessError } from '../../packages/core/src/store.ts';
 import { canonicalExtractionBody, extractionBodyDigest } from '../../packages/protocol/src/extraction.ts';
 import { RpcResponse } from '../../packages/protocol/src/rpc.ts';
 const context = { principal: 'installation', commit_mode: 'receipt' };
@@ -21,7 +20,7 @@ const generation = () => ({ id: uuid(), stream: 'extraction', incarnation, state
 async function setup() {
   const root = await mkdtemp('/tmp/g004-life-');
   let now = 100;
-  const engine = new Engine({ ...options, objectsRoot: root, clock: () => now });
+  const engine = new Engine({ ...options, objectsRoot: root, extractionJournalPath: root + '/extraction-state.json', clock: () => now });
   const driver = neo4j.driver(options.uri, neo4j.auth.basic('neo4j', options.password), { disableLosslessIntegers: true });
   const query = async (cypher, params = {}) => (await driver.executeQuery(cypher, params)).records.map(r => r.toObject());
   await query('MATCH (n) DETACH DELETE n');
@@ -41,7 +40,10 @@ async function queued(f, sourceId, g = generation()) {
 }
 const acquire = (f, task) => f.store.leaseModelTask({ task_id: task.id, expected_version: task.version, worker_id: 'qa', lease_ms: 10 }, context);
 const completion = (task, output = claimOutput()) => ({ id: task.attempt_id, task_id: task.id, expected_version: task.version, lease_epoch: task.lease.epoch, state: 'succeeded', reason: null, disposition: 'retain', spans: output.spans, output });
-const snapshot = f => f.query('MATCH (n) RETURN elementId(n) AS id,labels(n) AS labels,properties(n) AS props ORDER BY id');
+const snapshot = async f => ({
+  graph: await f.query('MATCH (n) RETURN elementId(n) AS id,labels(n) AS labels,properties(n) AS props ORDER BY id'),
+  journal: await f.store.extractionJournal.list(),
+});
 
 test('installation context is required before any extraction mutation', async () => {
   const f = await setup();
@@ -75,8 +77,8 @@ test('policy changes during a leased task are revalidated before retained output
     await f.engine.setPolicy({ policy_id: uuid(), selector: { episode_id: id }, scope: 'content' }, context);
     const result = await f.store.recordExtractionAttempt(completion(leased), context);
     assert.equal(result.state, 'cancelled'); assert.equal(result.reason, 'policy_denied'); assert.equal(result.output, null); assert.deepEqual(result.spans, []);
-    const rows = await f.query('MATCH (a:ExtractionAttempt {id:$id}) RETURN properties(a) AS props', { id: result.id });
-    assert.equal(JSON.stringify(rows).includes('bounded fixture claim'), false);
+    const entry = await f.store.extractionJournal.byAttempt(result.id);
+    assert.equal(JSON.stringify(entry.attempts.find(attempt => attempt.id === result.id)).includes('bounded fixture claim'), false);
     await assert.rejects(f.store.getExtractionAttempt(result.id, context), /policy_denied/);
     await assert.rejects(f.store.createModelTask({ id: uuid(), generation_id: task.generation_id, source_id: id, kind: 'claim', model: 'qa-http', model_incarnation: incarnation }, context), /policy_denied/);
     console.log(JSON.stringify({ checkpoint: 'policy-revalidated', result }));
@@ -125,7 +127,7 @@ test('task CAS fences concurrent acquisition, expiry, cancellation, worker loss 
     await assert.rejects(f.store.retryModelTask({ task_id: task.id, expected_version: cancelled.version }, context), /invalid_transition/);
     const other = await queued(f, await f.source()); const lost = await acquire(f, other.task);
     await assert.rejects(f.store.settleModelTask({ task_id: lost.id, expected_version: lost.version, lease_epoch: lost.lease.epoch, reason: 'worker_lost' }, context), /worker_still_owned/);
-    const replacement = new Engine({ ...options, objectsRoot: f.root, clock: () => 110 });
+    const replacement = new Engine({ ...options, objectsRoot: f.root, extractionJournalPath: f.root + '/extraction-state.json', clock: () => 110 });
     try {
       await replacement.claimWriterEpoch();
       await assert.rejects(f.store.recordExtractionAttempt(completion(lost), context), /stale_writer_epoch/);
@@ -205,7 +207,7 @@ test('cutover rejects real remembered ingest beyond explicit target coverage', a
   } finally { await f.close(); }
 });
 
-test('caught-up audit coverage refuses unavailable activation proofs without mutations', async () => {
+test('caught-up empty coverage activates without creating derived records', async () => {
   const f = await setup();
   try {
     const g = {...generation(),state:'catching_up'}; await f.store.createExtractionGeneration(g,context);
@@ -214,13 +216,10 @@ test('caught-up audit coverage refuses unavailable activation proofs without mut
     assert.equal(indexes.length, 7); assert.ok(indexes.every(index => index.state === 'ONLINE'));
     assert.deepEqual(await f.query('MATCH (f:Element:Fact) OPTIONAL MATCH (w:EntityWitness) OPTIONAL MATCH ()-[i:INVALIDATES]->() RETURN count(DISTINCT f) AS facts,count(DISTINCT w) AS witnesses,count(DISTINCT i) AS invalidations'), [{ facts: 0, witnesses: 0, invalidations: 0 }]);
     assert.deepEqual(await f.query('MATCH (o:MaterializationOperation) RETURN count(o) AS count'), [{ count: 0 }]);
-    const before = await snapshot(f);
-    await assert.rejects(f.engine.cutoverExtractionGeneration({generation_id:g.id,expected_generation_id:null,expected_selector_version:0},context), error => {
-      assert.ok(error instanceof GenerationReadinessError); assert.equal(error.name,'GenerationReadinessError'); assert.equal(error.code,'activation_prerequisite_unavailable');
-      assert.deepEqual(error.prerequisites,['selected_model_embedding_coverage']);
-      console.log(JSON.stringify({checkpoint:'activation-fail-closed',code:error.code,prerequisites:error.prerequisites})); return true;
-    });
-    assert.deepEqual(await snapshot(f),before);
+    const active = await f.engine.cutoverExtractionGeneration({generation_id:g.id,expected_generation_id:null,expected_selector_version:0},context);
+    assert.equal(active.state,'active');
+    assert.deepEqual(await f.query('MATCH (o:MaterializationOperation) RETURN count(o) AS count'),[{count:0}]);
+    console.log(JSON.stringify({checkpoint:'empty-coverage-activation',generation_id:active.id}));
   } finally { await f.close(); }
 });
 

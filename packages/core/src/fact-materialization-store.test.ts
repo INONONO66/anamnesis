@@ -32,7 +32,8 @@ async function setup(metadata: boolean, lineage = true) {
       decisions: input.claim_context!.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence,
         ...(metadata && claim_index === 0 ? { confidence: 0.81 } : {}) })) };
   } };
-  const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider });
+  const options = { uri, password, objectsRoot: root, extractionProvider: provider, extractionJournalPath: join(root, "extraction-state.json") };
+  const engine = new Engine(options);
   await query("MATCH (n) DETACH DELETE n");
   await engine.init(); await engine.claimWriterEpoch();
   const generation = { id: uuidv7(), stream: "extraction", incarnation, state: "catching_up" as const, covered_ingest_seq: 0, created_at: 100, updated_at: 100 };
@@ -42,7 +43,7 @@ async function setup(metadata: boolean, lineage = true) {
   const source = lineage ? await engine.remember(episode, { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context }) : await engine.remember(episode);
   const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: source.id }, context);
   const run = () => engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "qa", lease_ms: 30000 }, context);
-  return { engine, query, source, generation, run, async close() { await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
+  return { engine, query, source, generation, task, options, run, async close() { await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
 test("legacy audit claims do not fabricate confidence, entities or semantic permission", async () => {
@@ -120,4 +121,39 @@ test("judge-approved claims share validated Fact writes, real entities, time and
     expect(derived.every(item => item.channels.includes("bm25") && item.relevance > 0)).toBe(true);
     expect(recalled.diagnostics.ppr_used).toBe(true);
   } finally { await f.close(); }
+}, 120000);
+
+test("journal decision and premise tampering still refuses extraction audit reads", async () => {
+  const f = await setup(false);
+  try {
+    const result = await f.run();
+    if (result.state !== "known" || !result.judge_attempt) throw new Error("completed pipeline required");
+    const entry = await f.engine.store.extractionJournal.get(f.task.id);
+    if (!entry?.judge_input) throw new Error("judge premise required");
+    await f.engine.store.extractionJournal.set(f.task.id, { ...entry, decisions: entry.decisions.slice(1) });
+    await expect(f.engine.store.readExtractionPipeline(f.task.id, context)).rejects.toThrow("extraction_audit_conflict");
+    await f.engine.store.extractionJournal.set(f.task.id, { ...entry, judge_input: { ...entry.judge_input,
+      claim_context: { ...entry.judge_input.claim_context, body_digest: "0".repeat(64) } } });
+    await expect(f.engine.store.readExtractionDecisions(result.judge_attempt.id, context)).rejects.toThrow("extraction_audit_conflict");
+    await f.engine.store.extractionJournal.set(f.task.id, entry);
+    expect(await f.engine.store.readExtractionPipeline(f.task.id, context)).toEqual(result);
+  } finally { await f.close(); }
+}, 120000);
+
+test("completion replay survives restart and conflicting request versions stay rejected", async () => {
+  const f = await setup(false);
+  let replacement: Engine | undefined;
+  try {
+    const result = await f.run();
+    if (result.state !== "known" || !result.judge || !result.judge_attempt?.lease || !result.judge_attempt.output) throw new Error("completed judge required");
+    const attempt = result.judge_attempt;
+    const completion = { task_id: result.judge.id, expected_version: result.judge.version - 1, id: attempt.id,
+      lease_epoch: result.judge_attempt.lease.epoch, state: "succeeded" as const, reason: null,
+      disposition: attempt.disposition, output: attempt.output, spans: attempt.spans };
+    replacement = new Engine(f.options);
+    await replacement.claimWriterEpoch();
+    expect(await replacement.store.recordExtractionAttempt(completion, context)).toEqual(attempt);
+    await expect(replacement.store.recordExtractionAttempt({ ...completion, expected_version: completion.expected_version + 1 }, context)).rejects.toThrow("attempt_conflict");
+    await expect(f.engine.store.recordExtractionAttempt(completion, context)).rejects.toThrow("stale_writer_epoch");
+  } finally { await replacement?.close(); await f.close(); }
 }, 120000);

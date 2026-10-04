@@ -217,3 +217,25 @@ test("backup evidence covers originals without mutating history and refuses inco
     expect(await f.engine.store.authoritySnapshot(context)).toEqual(snapshot);
   } finally { await f.close(); }
 }, 180000);
+
+test("coverage retains pending relation work until custody commits and readiness follows pruning", async () => {
+  const f = await setup();
+  try {
+    const first = await f.ingest("Alice prefers dark mode [2026-09-01].");
+    await first.run();
+    const second = await f.ingest("Alice prefers light mode [2026-09-02].");
+    f.faults.push("throw");
+    expect(await second.run()).toMatchObject({ state: "known", relation_judge: "pending" });
+    for (const partition of ["episodes", "active_extraction"] as const)
+      await f.engine.store.recordExtractionCoverage({ generation_id: f.generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: 2 }, context);
+    expect(await f.engine.store.readExtractionPipeline(first.task.id, context)).toEqual({ state: "unknown", pipeline_id: first.task.id });
+    expect(await f.engine.store.extractionJournal.get(second.task.id)).toMatchObject({ sealed_ingest_seq: 2 });
+    const cutover = { generation_id: f.generation.id, expected_generation_id: null, expected_selector_version: 0 };
+    await expect(f.engine.store.cutoverExtractionGeneration(cutover, context)).rejects.toThrow("activation_prerequisite_unavailable");
+    expect(await second.run()).toMatchObject({ state: "known", relation_judge: "complete", semantic_writes: true });
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+    expect(await f.engine.store.readExtractionPipeline(second.task.id, context)).toEqual({ state: "unknown", pipeline_id: second.task.id });
+    expect((await f.engine.store.cutoverExtractionGeneration(cutover, context)).state).toBe("active");
+    expect(await f.query("MATCH (f:Fact) RETURN count(f) AS count")).toEqual([{ count: 2 }]);
+  } finally { await f.close(); }
+}, 180000);

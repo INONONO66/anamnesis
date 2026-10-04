@@ -1,10 +1,10 @@
 import { SCHEMA_ID } from "@anamnesis/protocol";
 import neo4j, { type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { MemoryElement, MemoryLink, ExtractionAttempt, ModelTask } from "@anamnesis/protocol";
+import { MemoryElement, MemoryLink, Generation, type ExtractionAttempt, type ModelTask } from "@anamnesis/protocol";
 import { SemanticClaimValidationError, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "@anamnesis/protocol";
 import { canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
-import { ExtractionJudgeInput, ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from "@anamnesis/protocol";
+import { ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from "@anamnesis/protocol";
 import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "@anamnesis/protocol";
 import { ExtractionModelOutput } from "@anamnesis/protocol";
 import { z } from "zod";
@@ -15,6 +15,7 @@ import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ExtractionStore } from "./extraction-store.ts";
 import type { ElementStore } from "./element-store.ts";
+import type { ExtractionJournalEntry } from "./extraction-journal.ts";
 
 /** Only model-reported confidence admits a claim to semantic writes. Audit-only
  * output (no confidence) stays an auditable decision and never becomes a Fact. */
@@ -74,14 +75,14 @@ export class MaterializationStore {
     if (generation.state === "active" && selection.generation_id !== generation.id) throw new Error("semantic_generation_unselected");
     const head = await this.extraction.extractionHeadTx(tx, source.id);
     if (head !== source.revision_key) throw new Error("stale_materialization");
-    const judge = await this.core.extractionRecordTx(tx, "ExtractionAttempt", request.judge_attempt_id, ExtractionAttempt);
+    const judge = await this.core.extractionAttempt(request.judge_attempt_id);
     if (judge.state !== "succeeded" || judge.generation_id !== generation.id || judge.source_id !== source.id
       || judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest
       || judge.source_ingest_seq !== source.ingest_seq || judge.policy_context.revision !== policy.policy_revision) throw new Error("stale_materialization");
     const decisions = await this.extraction.extractionDecisionsTx(tx, judge);
     const decision = decisions[request.claim_index];
     if (!decision || !["retain", "correct"].includes(decision.disposition)) throw new Error("audit_decision_refused");
-    const premise = await this.core.extractionRecordTx(tx, "ExtractionJudgeInput", judge.id, ExtractionJudgeInput);
+    const premise = await this.core.extractionJudgeInput(judge.id);
     if (premise.source_head_revision !== head || premise.policy_revision !== policy.policy_revision) throw new Error("stale_materialization");
     const candidates = await this.semanticCandidatesTx(tx, generation.id, policy);
     return SemanticReviewPremises.parse({ request, request_digest: extractionBodyDigest(request), judge_profile_id: profile,
@@ -398,6 +399,9 @@ export class MaterializationStore {
     if (this.core.relationJudge && await this.bindVerdictsTx(tx, admitted, pass)) return { semantic_writes: false, relation_judge: "pending" };
     const { factIds, refused, duplicates } = await this.writeAdmittedClaimsTx(tx, admitted, pass, policy);
     const created = await custodyRecordTx(tx, custody, pass, { factIds, refused, duplicates });
+    this.core.audit("extraction.pipeline.materialized", { pipeline_id: pipeline.claim.id, generation_id: judge.generation_id,
+      source_id: judge.source_id, task_id: judge.task_id, kind: "judge", semantic_writes: created,
+      relation_judge: relationJudge, facts: factIds.length, refused: refused.length, duplicates: duplicates.length });
     return { semantic_writes: created, relation_judge: relationJudge };
   }
   /** One validated claim's relation premise: its ACTIVE same-entity Facts of the
@@ -457,13 +461,9 @@ export class MaterializationStore {
     return { duplicate_of, links, decisions };
   }
   async readExtractionPipelineTx(tx: ManagedTransaction,id: string): Promise<ExtractionPipeline> {
-    const rows = await tx.run(`MATCH (p:ExtractionPipeline {id:$id}) RETURN p.judge_task_id AS judge`,{id});
-    if (!rows.records[0]) return {state:'unknown',pipeline_id:id};
-    const claim = await this.core.extractionRecordTx(tx,'ModelTask',id,ModelTask);
-    const judgeId = rows.records[0].get('judge');
-    const judge = judgeId ? await this.core.extractionRecordTx(tx,'ModelTask',z.uuidv7().parse(judgeId),ModelTask) : null;
-    const terminal = async(task:ModelTask|null) => task?.attempt_id && task.state !== 'leased' ? this.core.extractionRecordTx(tx,'ExtractionAttempt',task.attempt_id,ExtractionAttempt) : null;
-    const claimAttempt = await terminal(claim), judgeAttempt = await terminal(judge);
+    const entry = await this.core.extractionJournal.get(id);
+    if (!entry?.claim.pipeline) return {state:'unknown',pipeline_id:id};
+    const { claim, judge, claim_attempt: claimAttempt, judge_attempt: judgeAttempt } = entry;
     const decisions = judgeAttempt ? await this.extraction.extractionDecisionsTx(tx,judgeAttempt) : [];
     const materialized = judgeAttempt && judgeAttempt.state === "succeeded"
       ? await this.materializeExtractionPipelineTx(tx, { claim, claim_attempt: claimAttempt, judge, judge_attempt: judgeAttempt, decisions }, await this.core.receiptLockTx(tx))
@@ -471,13 +471,38 @@ export class MaterializationStore {
     return ExtractionPipeline.parse({state:'known',pipeline_id:id,mode:'claim-judge-audit-v1',semantic_writes:materialized.semantic_writes,claim,claim_attempt:claimAttempt,judge,judge_attempt:judgeAttempt,decisions,
       ...(materialized.relation_judge ? { relation_judge: materialized.relation_judge } : {})});
   }
+  /** Retention invariant: both coverage partitions committed the terminal source;
+   * custody (including content-free custody) or a sealed omission makes replay unnecessary.
+   * No custody means relation verdicts may still be pending, so that entry stays. */
+  async pruneExtractionJournal(context: InstallationContext, filter: { generation_id?: string; pipeline_id?: string }): Promise<void> {
+    await this.core.extractionTx(context, async tx => {
+      for (const [id, entry] of await this.core.extractionJournal.list()) {
+        if ((filter.generation_id && entry.generation_id !== filter.generation_id) || (filter.pipeline_id && id !== filter.pipeline_id)) continue;
+        const generation = await this.core.extractionRecordTx(tx, "ExtractionGeneration", entry.generation_id, Generation);
+        if (entry.claim.source_ingest_seq > generation.covered_ingest_seq) continue;
+        const sealed = { ...entry, sealed_ingest_seq: generation.covered_ingest_seq };
+        const omission = extractionEntryOmission(entry);
+        const standalone = !entry.claim.pipeline && entry.claim_attempt !== null && !["queued", "leased"].includes(entry.claim.state);
+        const custody = await tx.run(`MATCH (o:MaterializationOperation {occurrence_key:$key}) RETURN o.id AS id`,
+          { key: extractionBodyDigest([entry.generation_id, entry.source_id]) });
+        if (!omission && !standalone && !custody.records.length) {
+          if (entry.sealed_ingest_seq !== sealed.sealed_ingest_seq) await this.core.extractionJournal.set(id, sealed);
+          continue;
+        }
+        await this.core.extractionJournal.delete(id);
+        const task = entry.judge ?? entry.claim;
+        this.core.audit("extraction.pipeline.pruned", { pipeline_id: id, generation_id: entry.generation_id,
+          source_id: entry.source_id, task_id: task.id, kind: task.kind === "claim" ? "claim" : "judge", sealed_ingest_seq: sealed.sealed_ingest_seq });
+      }
+    });
+  }
   /** Seals a validated-but-unjudged source as a terminal omission (D53): the relation judge has failed on every
    * premise at least `min_failures` times, so the source's custody operation is written content-free with the
    * omission recorded, no Fact is written, and coverage/activation see custody like any refused source. Idempotent;
    * refuses while a verdict is still owed within budget or when the pipeline is not at the relation stage. */
   async sealFactRelationOmission(request: { pipeline_id: string; min_failures: number }, context: InstallationContext): Promise<{ sealed: boolean; failures: number }> {
     const pipelineId = z.uuidv7().parse(request.pipeline_id), minFailures = z.number().int().positive().parse(request.min_failures);
-    return this.core.extractionTx(context, async (tx, policy) => {
+    const result = await this.core.extractionTx(context, async (tx, policy) => {
       const pipeline = await this.readExtractionPipelineTx(tx, pipelineId);
       if (pipeline.state !== "known" || !pipeline.judge || pipeline.judge.state !== "succeeded") throw new Error("invalid_transition");
       await this.core.authorizeEpisodesTx(tx, [pipeline.claim.source_id], policy);
@@ -495,8 +520,13 @@ export class MaterializationStore {
           result: canonicalExtractionBody({ created: false, facts: 0, refused: [], omitted: "relation_judge_exhausted", failures, occurrences }), key: custody,
           source: pipeline.claim.source_id, generation: pipeline.claim.generation_id, profile: pipeline.judge.model,
           fact: `suppressed:${pipeline.claim.source_id}`, link: `suppressed:${pipeline.claim.source_id}` });
+      this.core.audit("extraction.pipeline.materialized", { pipeline_id: pipelineId, generation_id: pipeline.claim.generation_id,
+        source_id: pipeline.claim.source_id, task_id: pipeline.judge.id, kind: "judge", semantic_writes: false,
+        relation_judge: "omitted", facts: 0, refused: 0, duplicates: 0 });
       return { sealed: true, failures };
     });
+    await this.pruneExtractionJournal(context, { pipeline_id: pipelineId });
+    return result;
   }
   /** Relation premises of one pipeline that still owe a verdict (candidates present, none recorded). */
   async pendingFactRelationInputs(pipelineId: string, context: InstallationContext): Promise<{ key: string; context: FactRelationContext }[]> {
@@ -535,4 +565,19 @@ export class MaterializationStore {
         { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation, reported: input.reported_model ?? null });
     });
   }
+}
+
+/** Only a matching immutable failed/cancelled attempt is a coverable omission. */
+export function extractionEntryOmission(entry: ExtractionJournalEntry) {
+  for (const [stage, task, attempt] of [
+    ["claim", entry.claim, entry.claim_attempt],
+    ["judge", entry.judge, entry.judge_attempt],
+  ] as const) {
+    if (stage === "judge" && entry.claim.state !== "succeeded") continue;
+    if (task && attempt && (task.state === "failed" || task.state === "cancelled")
+      && attempt.state === task.state && attempt.id === task.attempt_id && attempt.task_id === task.id) {
+      return { pipeline_id: entry.claim.id, stage, attempt_id: attempt.id, state: attempt.state, reason: attempt.reason };
+    }
+  }
+  return null;
 }

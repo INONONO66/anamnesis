@@ -12,7 +12,7 @@ import { v7 as uuidv7 } from "uuid";
 import type { Engine } from "./engine.ts";
 import type { ExtractionProvider } from "./extraction.ts";
 import { GenerationReadinessError, type InstallationContext } from "./store.ts";
-import { Generation, ModelTask } from "@anamnesis/protocol";
+import { Generation, type ModelTask } from "@anamnesis/protocol";
 import type { ExtractionPipeline } from "@anamnesis/protocol";
 
 /** "waiting": pipelines are in flight and their settlement wakes the lane; "more": re-arm immediately. */
@@ -46,12 +46,12 @@ const LEASE_MS = 90000;
 type Outcome = "completed" | "failed";
 type Known = Extract<ExtractionPipeline, { state: "known" }>;
 type Action = Outcome | "run" | "pending" | "unresolved" | { kind: "retry" | "settle" | "cancel"; task: ModelTask };
-interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null; task: string | null }
+interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null }
 
 /** The engine surface the scheduler drives: the daemon passes its Engine, pure tests a scripted fake. */
 export type SchedulerEngine = Pick<Engine, "readExtractionSelection" | "cutoverExtractionGeneration" | "createExtractionPipeline" | "runExtractionPipeline"> & {
   readonly store: Pick<Engine["store"], "getExtractionGeneration" | "createExtractionGeneration" | "recordExtractionCoverage" | "readExtractionPipeline"
-    | "factRelationFailures" | "sealFactRelationOmission" | "retryModelTask" | "cancelModelTask" | "settleModelTask">;
+    | "factRelationFailures" | "sealFactRelationOmission" | "retryModelTask" | "cancelModelTask" | "settleModelTask" | "getExtractionTaskByWorkKey">;
 };
 
 const PARTITIONS = ["episodes", "active_extraction"] as const;
@@ -113,8 +113,7 @@ export class ExtractionScheduler {
     const generation = await this.writableGeneration();
     const rows = await this.read<ScanRow>(`MATCH (m:Meta {key:'meta'})
       OPTIONAL MATCH (e:Element:Episode) WHERE e.ingest_seq > $from AND e.ingest_seq <= m.ingest_seq
-      OPTIONAL MATCH (t:ModelTask {work_key:$generation+':'+e.id})
-      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,t.body AS task ORDER BY seq LIMIT ${COVERAGE_STEP}`,
+      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq ORDER BY seq LIMIT ${COVERAGE_STEP}`,
       { from: generation.covered_ingest_seq, generation: generation.id });
     this.live = rows[0]?.live ?? generation.covered_ingest_seq;
     const { prefix, open } = this.scanWindow(generation, rows);
@@ -133,7 +132,7 @@ export class ExtractionScheduler {
       if (open && row.seq === prefix + 1 && this.outcomes.has(key)) { prefix = row.seq; continue; }
       open = false;
       if (this.inFlight.has(key) || this.outcomes.has(key) || this.inFlight.size >= this.maxInFlight) continue;
-      this.start(generation, key, row.id, row.task);
+      this.start(generation, key, row.id);
     }
     return { prefix, open };
   }
@@ -179,8 +178,9 @@ export class ExtractionScheduler {
     }
   }
 
-  private start(generation: Generation, key: string, episodeId: string, task: string | null): void {
-    const drive = this.drive(generation, episodeId, task ? ModelTask.parse(JSON.parse(task)) : null)
+  private start(generation: Generation, key: string, episodeId: string): void {
+    const drive = this.engine.store.getExtractionTaskByWorkKey(key, this.context)
+      .then(task => this.drive(generation, episodeId, task))
       .then(result => {
         if (!result) return false;
         this.outcomes.set(key, result.outcome);

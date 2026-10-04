@@ -1,4 +1,4 @@
-import neo4j, { type ManagedTransaction } from "neo4j-driver";
+import { type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { ExtractionAttempt, Generation, ModelTask } from "@anamnesis/protocol";
 import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, ExtractionSelection, canonicalExtractionBody, extractionBodyDigest, type ExtractionFailureDetail } from "@anamnesis/protocol";
@@ -11,6 +11,7 @@ import { receiptTime, receiptHash, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, type PolicyState, requireInstallation } from "./policy.ts";
 import type { StoreCore } from "./core.ts";
 import type { ConductingStore } from "./conducting-store.ts";
+import { journalAttempt, type ExtractionJournalEntry } from "./extraction-journal.ts";
 
 /** Internal lease request: the engine names the provider that will run the task (never an RPC caller). */
 const LeaseModelTaskWithProvider = LeaseModelTask.extend({ provider: z.strictObject({ model: ModelTask.shape.model, model_incarnation: ModelTask.shape.model_incarnation }).optional() });
@@ -36,6 +37,15 @@ function checkAttemptOutput(request: CompleteExtractionAttempt, task: ModelTask,
 export class ExtractionStore {
   constructor(private readonly core: StoreCore, private readonly conducting: ConductingStore) {}
 
+  private async taskEntry(taskId: string): Promise<ExtractionJournalEntry> {
+    const entry = await this.core.extractionJournal.byTask(taskId);
+    if (!entry) throw new Error("unknown_ModelTask");
+    return entry;
+  }
+  private audit(event: string, entry: ExtractionJournalEntry, task: ModelTask, fields: Record<string, unknown>): void {
+    this.core.audit(event, { pipeline_id: entry.claim.id, generation_id: entry.generation_id, source_id: entry.source_id,
+      task_id: task.id, kind: task.kind === "claim" ? "claim" : "judge", ...fields });
+  }
   private async extractionSourceTx(tx: ManagedTransaction, sourceId: string) {
     const rows = await tx.run<{ content: string; revision: string; seq: number }>(
       `MATCH (e:Element:Episode {id:$id}) RETURN e.content AS content,e.revision_key AS revision,e.ingest_seq AS seq`, { id: sourceId });
@@ -81,38 +91,45 @@ export class ExtractionStore {
       await this.core.writableExtractionGenerationTx(tx, request.generation_id);
       await this.core.authorizeEpisodesTx(tx, [request.source_id], policy);
       const source = await this.extractionSourceTx(tx, request.source_id);
-      const oldRows = await tx.run<{ body: string; digest: string }>(`MATCH (t:ModelTask {id:$id}) RETURN t.body AS body,t.creation_digest AS digest`, { id: request.id });
-      const old = oldRows.records[0];
+      const old = await this.core.extractionJournal.byTask(request.id);
       if (old) {
-        if (old.get("digest") !== digest) throw new Error("task_conflict");
-        const task = ModelTask.parse(JSON.parse(old.get("body")));
+        if (old.claim.id !== request.id || old.creation_digest !== digest) throw new Error("task_conflict");
+        const task = old.claim;
         await this.validateExtractionSourceTx(tx, task);
         return task;
       }
       const workKey = `${request.generation_id}:${request.source_id}`;
-      const work = await tx.run(`MATCH (t:ModelTask {work_key:$key}) RETURN t.id AS id`, { key: workKey });
-      if (work.records.length) throw new Error("task_conflict");
+      if (await this.core.extractionJournal.byWorkKey(workKey)) throw new Error("task_conflict");
       const now = receiptTime.parse(this.core.clock());
       const task = ModelTask.parse({ ...request, source_revision: source.source_revision, source_ingest_seq: source.source_ingest_seq, body_digest: source.body_digest,
         attempt_id: null, state: "queued", lease: null, policy_context: null, attempts: 0, version: 0, created_at: now, updated_at: now });
       await this.extractionNotCoveredTx(tx, task);
-      await tx.run(`CREATE (:ModelTask {id:$id,work_key:$key,generation_id:$generation,source_id:$source,source_ingest_seq:$seq,creation_digest:$digest,body:$body,state:'queued'})`,
-        { id: task.id, key: workKey, generation: task.generation_id, source: task.source_id, seq: task.source_ingest_seq, digest, body: canonicalExtractionBody(task) });
-      if (task.pipeline) await tx.run(`CREATE (:ExtractionPipeline {id:$id,generation_id:$generation,source_id:$source,source_ingest_seq:$seq})`,
-        {id:task.id,generation:task.generation_id,source:task.source_id,seq:task.source_ingest_seq});
+      const entry: ExtractionJournalEntry = { work_key: workKey, generation_id: task.generation_id, source_id: task.source_id,
+        claim: task, claim_attempt: null, judge: null, judge_input: null, judge_attempt: null, decisions: [], attempts: [],
+        sealed_ingest_seq: null, creation_digest: digest, request_digests: {} };
+      await this.core.extractionJournal.set(task.id, entry);
+      this.audit("extraction.task.created", entry, task, { work_key: workKey });
       return task;
     });
   }
   async getExtractionTask(id: string, context: InstallationContext): Promise<ModelTask> {
     return this.core.extractionTx(context, async (tx, policy) => {
-      const task = await this.core.extractionRecordTx(tx, "ModelTask", z.uuidv7().parse(id), ModelTask);
+      const task = await this.core.extractionTask(z.uuidv7().parse(id));
       await this.core.authorizeEpisodesTx(tx, [task.source_id], policy);
       return task;
     });
   }
+  async getExtractionTaskByWorkKey(workKey: string, context: InstallationContext): Promise<ModelTask | null> {
+    return this.core.extractionTx(context, async (tx, policy) => {
+      const entry = await this.core.extractionJournal.byWorkKey(workKey);
+      if (!entry) return null;
+      await this.core.authorizeEpisodesTx(tx, [entry.source_id], policy);
+      return entry.claim;
+    });
+  }
   async getExtractionAttempt(id: string, context: InstallationContext): Promise<ExtractionAttempt> {
     return this.core.extractionTx(context, async (tx, policy) => {
-      const attempt = await this.core.extractionRecordTx(tx, "ExtractionAttempt", z.uuidv7().parse(id), ExtractionAttempt);
+      const attempt = await this.core.extractionAttempt(z.uuidv7().parse(id));
       await this.core.authorizeEpisodesTx(tx, [attempt.source_id], policy);
       return attempt;
     });
@@ -122,9 +139,9 @@ export class ExtractionStore {
     return receiptHash.parse(rows.records[0]?.get('head'));
   }
   private async extractionClaimContextTx(tx: ManagedTransaction, id: string): Promise<ExtractionClaimContext> {
-    const task = await this.core.extractionRecordTx(tx,'ModelTask',id,ModelTask);
+    const task = await this.core.extractionTask(id);
     if (task.pipeline !== 'claim-judge-audit-v1' || task.kind !== 'claim' || task.state !== 'succeeded' || !task.attempt_id) throw new ExtractionAuditError('extraction_audit_incomplete');
-    const attempt = await this.core.extractionRecordTx(tx,'ExtractionAttempt',task.attempt_id,ExtractionAttempt);
+    const attempt = await this.core.extractionAttempt(task.attempt_id);
     if (attempt.state !== 'succeeded' || !attempt.output || attempt.task_id !== task.id || attempt.generation_id !== task.generation_id
       || attempt.source_id !== task.source_id || attempt.source_revision !== task.source_revision || attempt.body_digest !== task.body_digest) throw new ExtractionAuditError('extraction_audit_conflict');
     const body = ExtractionModelOutput.parse(JSON.parse(attempt.output.canonical_body));
@@ -137,41 +154,34 @@ export class ExtractionStore {
   async createExtractionJudgeTask(input: {claim_task_id:string}, context: InstallationContext): Promise<ModelTask> {
     const request = z.strictObject({claim_task_id:z.uuidv7()}).parse(input);
     return this.core.extractionTx(context,async(tx,policy)=>{
-      const task = await this.core.extractionRecordTx(tx,'ModelTask',request.claim_task_id,ModelTask);
+      const task = await this.core.extractionTask(request.claim_task_id);
       await this.core.authorizeEpisodesTx(tx,[task.source_id],policy);
       await this.extractionClaimContextTx(tx,task.id);
-      const rows = await tx.run(`MATCH (p:ExtractionPipeline {id:$id}) RETURN p.judge_task_id AS judge`,{id:task.id});
-      if (!rows.records[0]) throw new ExtractionAuditError('extraction_audit_conflict');
-      const existing = rows.records[0].get('judge');
-      if (existing) return this.core.extractionRecordTx(tx,'ModelTask',z.uuidv7().parse(existing),ModelTask);
+      const entry = await this.taskEntry(task.id);
+      if (entry.judge) return entry.judge;
       await this.core.writableExtractionGenerationTx(tx,task.generation_id);
       await this.extractionNotCoveredTx(tx,task);
       const now = Math.max(task.updated_at,this.core.clock());
       const judge = ModelTask.parse({...task,id:uuidv7(),kind:'judge_claims',attempt_id:null,state:'queued',lease:null,policy_context:null,version:0,attempts:0,created_at:now,updated_at:now});
-      await tx.run(`CREATE (:ModelTask {id:$id,work_key:$key,generation_id:$generation,source_id:$source,source_ingest_seq:$seq,body:$body,state:'queued'})
-        WITH 1 AS ignored MATCH (p:ExtractionPipeline {id:$parent}) SET p.judge_task_id=$id`,
-        {id:judge.id,key:`${task.id}:judge`,generation:task.generation_id,source:task.source_id,seq:task.source_ingest_seq,body:canonicalExtractionBody(judge),parent:task.id});
+      await this.core.extractionJournal.set(task.id, { ...entry, judge });
+      this.audit("extraction.task.created", entry, judge, { work_key: `${task.id}:judge` });
       return judge;
     });
   }
-  async extractionDecisionsTx(tx: ManagedTransaction, attempt: ExtractionAttempt): Promise<ExtractionDisposition[]> {
-    // Exactly 65 composite point seeks, including one overflow sentinel. There
-    // is no suffix-order Top over an unbounded attempt partition.
-    const rows = await tx.run(`UNWIND range(0,64) AS index MATCH (d:ExtractionDisposition {judge_attempt_id:$id,claim_index:index})
-      USING INDEX SEEK d:ExtractionDisposition(judge_attempt_id,claim_index)
-      RETURN d.body AS body ORDER BY index`,{id:attempt.id});
-    const values = z.array(ExtractionDisposition).max(64).parse(rows.records.map(row=>JSON.parse(row.get('body'))));
+  async extractionDecisionsTx(_tx: ManagedTransaction, attempt: ExtractionAttempt): Promise<ExtractionDisposition[]> {
+    const entry = await this.core.extractionJournal.byAttempt(attempt.id);
+    const values = z.array(ExtractionDisposition).max(64).parse(entry?.decisions.filter(decision => decision.judge_attempt_id === attempt.id) ?? []);
     if (!attempt.output) { if (values.length) throw new ExtractionAuditError('extraction_audit_conflict'); return values; }
     const output = ExtractionModelOutput.parse(JSON.parse(attempt.output.canonical_body));
     if (output.task !== 'judge_claims') throw new ExtractionAuditError('extraction_audit_conflict');
-    const premise = await this.core.extractionRecordTx(tx,'ExtractionJudgeInput',attempt.id,ExtractionJudgeInput);
+    const premise = await this.core.extractionJudgeInput(attempt.id);
     const expected = output.decisions.map(d=>({...d,judge_attempt_id:attempt.id,claim_attempt_id:premise.claim_context.attempt_id,claim_body_digest:premise.claim_context.body_digest}));
     if (canonicalExtractionBody(values) !== canonicalExtractionBody(expected)) throw new ExtractionAuditError('extraction_audit_conflict');
     return values;
   }
   async readExtractionDecisions(attemptId: string, context: InstallationContext): Promise<ExtractionDisposition[]> {
     return this.core.extractionTx(context,async(tx,policy)=>{
-      const attempt = await this.core.extractionRecordTx(tx,'ExtractionAttempt',z.uuidv7().parse(attemptId),ExtractionAttempt);
+      const attempt = await this.core.extractionAttempt(z.uuidv7().parse(attemptId));
       await this.core.authorizeEpisodesTx(tx,[attempt.source_id],policy);
       return this.extractionDecisionsTx(tx,attempt);
     });
@@ -184,10 +194,12 @@ export class ExtractionStore {
     if (task.lease.writer_epoch !== this.core.writerEpoch) throw new Error("ownership_lost");
     if (this.core.clock() >= task.lease.expires_at) throw new Error("lease_expired");
   }
-  private async saveExtractionTaskTx(tx: ManagedTransaction, task: ModelTask): Promise<ModelTask> {
+  private async saveExtractionTask(task: ModelTask): Promise<ModelTask> {
     const parsed = ModelTask.parse(task);
-    await tx.run(`MATCH (t:ModelTask {id:$id}) SET t.body=$body,t.state=$state,t.attempt_id=$attempt`,
-      { id: task.id, body: canonicalExtractionBody(parsed), state: task.state, attempt: task.attempt_id });
+    const entry = await this.taskEntry(task.id);
+    const attempt = (task.attempt_id === null ? undefined : journalAttempt(entry, task.attempt_id)) ?? null;
+    await this.core.extractionJournal.set(entry.claim.id, { ...entry,
+      ...(entry.claim.id === task.id ? { claim: parsed, claim_attempt: attempt } : { judge: parsed, judge_attempt: attempt }) });
     return parsed;
   }
   /** `provider` is the identity of the provider about to run the task; the leased task adopts it so a daemon whose
@@ -196,7 +208,7 @@ export class ExtractionStore {
     requireInstallation(context);
     const request = LeaseModelTaskWithProvider.parse(input);
     return this.core.extractionTx(context, async (tx, policy) => {
-      const task = await this.core.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
+      const task = await this.core.extractionTask(request.task_id);
       this.checkExtractionCAS(task, request.expected_version);
       if (task.state !== "queued" || task.attempts >= 1000 || (task.lost_leases ?? 0) >= 1000) throw new Error("invalid_transition");
       await this.core.writableExtractionGenerationTx(tx, task.generation_id);
@@ -204,37 +216,40 @@ export class ExtractionStore {
       await this.validateExtractionSourceTx(tx, task);
       await this.extractionNotCoveredTx(tx, task);
       const now = Math.max(task.updated_at, receiptTime.parse(this.core.clock()));
-      const leased = await this.saveExtractionTaskTx(tx, { ...task, ...request.provider, state: "leased", version: task.version + 1, attempts: task.attempts + 1, attempt_id: uuidv7(), updated_at: now,
+      const leased = ModelTask.parse({ ...task, ...request.provider, state: "leased", version: task.version + 1, attempts: task.attempts + 1, attempt_id: uuidv7(), updated_at: now,
         lease: { worker_id: request.worker_id, epoch: uuidv7(), writer_epoch: this.core.writerEpoch!, expires_at: now + request.lease_ms },
         policy_context: { revision: policy.policy_revision, authority: "installation" } });
+      const entry = await this.taskEntry(task.id);
+      let judgeInput = entry.judge_input;
       if (task.kind === 'judge_claims') {
-        const parent = await tx.run(`MATCH (p:ExtractionPipeline {judge_task_id:$id}) RETURN p.id AS id`, {id:task.id});
-        if (parent.records.length !== 1) throw new ExtractionAuditError('extraction_audit_conflict');
-        const pipelineId = z.uuidv7().parse(parent.records[0]!.get('id'));
+        const pipelineId = entry.claim.id;
         const claim = await this.extractionClaimContextTx(tx, pipelineId);
-        const premise = ExtractionJudgeInput.parse({task_id:task.id,attempt_id:leased.attempt_id,pipeline_id:pipelineId,
+        judgeInput = ExtractionJudgeInput.parse({task_id:task.id,attempt_id:leased.attempt_id,pipeline_id:pipelineId,
           source_head_revision:await this.extractionHeadTx(tx,task.source_id),policy_revision:policy.policy_revision,claim_context:claim});
-        await tx.run(`CREATE (:ExtractionJudgeInput {id:$id,body:$body})`, {id:leased.attempt_id,body:canonicalExtractionBody(premise)});
       }
+      await this.core.extractionJournal.set(entry.claim.id, { ...entry, judge_input: judgeInput,
+        ...(entry.claim.id === task.id ? { claim: leased, claim_attempt: null } : { judge: leased, judge_attempt: null, decisions: [] }) });
+      this.audit("extraction.task.leased", entry, leased, { attempt_id: leased.attempt_id, worker_id: request.worker_id,
+        lease_epoch: leased.lease?.epoch, lease_until: leased.lease?.expires_at });
       return leased;
     });
   }
   /** Source text leaves the database only after lease and current policy checks. */
   async extractionTaskInput(taskId: string, leaseEpoch: string, context: InstallationContext): Promise<{ task: ModelTask; text: string; claim_context?: ExtractionClaimContext }> {
     return this.core.extractionTx(context, async (tx, policy) => {
-      const task = await this.core.extractionRecordTx(tx, "ModelTask", z.uuidv7().parse(taskId), ModelTask);
+      const task = await this.core.extractionTask(z.uuidv7().parse(taskId));
       this.checkExtractionLease(task, z.uuidv7().parse(leaseEpoch));
       await this.core.authorizeEpisodesTx(tx, [task.source_id], policy);
       const source = await this.validateExtractionSourceTx(tx, task);
       if (task.kind === 'judge_claims') {
-        const premise = await this.core.extractionRecordTx(tx,'ExtractionJudgeInput',task.attempt_id!,ExtractionJudgeInput);
+        const premise = await this.core.extractionJudgeInput(task.attempt_id!);
         if (premise.policy_revision !== policy.policy_revision || premise.source_head_revision !== await this.extractionHeadTx(tx,task.source_id)) throw new ExtractionAuditError('extraction_audit_stale');
         return {task,text:source.content,claim_context:premise.claim_context};
       }
       return { task, text: source.content };
     });
   }
-  private async finishExtractionTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState,
+  private async finishExtractionTx(_tx: ManagedTransaction, task: ModelTask, policy: PolicyState,
     outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail" | "reported_model">, requestDigest: string): Promise<ExtractionAttempt> {
     const now = Math.max(task.updated_at, receiptTime.parse(this.core.clock()));
     const attempt = ExtractionAttempt.parse({ state: outcome.state, reason: outcome.reason, disposition: outcome.disposition, output: outcome.output, spans: outcome.spans,
@@ -243,19 +258,40 @@ export class ExtractionStore {
       id: task.attempt_id ?? uuidv7(), task_id: task.id,
       generation_id: task.generation_id, source_id: task.source_id, source_revision: task.source_revision, source_ingest_seq: task.source_ingest_seq, body_digest: task.body_digest,
       created_at: task.updated_at, updated_at: now, lease: task.lease, policy_context: { revision: policy.policy_revision, authority: "installation" } });
-    await tx.run(`CREATE (:ExtractionAttempt {id:$id,task_id:$task,generation_id:$generation,source_id:$source,source_ingest_seq:$seq,state:$state,request_digest:$digest,body:$body})`,
-      { id: attempt.id, task: task.id, generation: task.generation_id, source: task.source_id, seq: task.source_ingest_seq, state: attempt.state, digest: requestDigest, body: canonicalExtractionBody(attempt) });
-    await this.saveExtractionTaskTx(tx, { ...task, state: attempt.state, attempt_id: attempt.id, lease: null, version: task.version + 1, updated_at: now,
+    const entry = await this.taskEntry(task.id);
+    const terminal = ModelTask.parse({ ...task, state: attempt.state, attempt_id: attempt.id, lease: null, version: task.version + 1, updated_at: now,
       attempts: task.attempts + (task.attempt_id === null ? 1 : 0), policy_context: attempt.policy_context });
+    let decisions = entry.decisions;
+    if (task.kind === "judge_claims" && attempt.state === "succeeded" && attempt.output) {
+      const body = ExtractionModelOutput.parse(JSON.parse(attempt.output.canonical_body));
+      const premise = entry.judge_input;
+      if (body.task !== "judge_claims" || !premise) throw new ExtractionAuditError("extraction_audit_conflict");
+      decisions = body.decisions.map(decision => ExtractionDisposition.parse({ ...decision, judge_attempt_id: attempt.id,
+        claim_attempt_id: premise.claim_context.attempt_id, claim_body_digest: premise.claim_context.body_digest }));
+    }
+    const attempts = [...entry.attempts, attempt].slice(-32);
+    const requestDigests = { ...entry.request_digests, [attempt.id]: requestDigest };
+    // Bounded journal history; terminal audit lines outlive operational entries. The pinned claim and judge
+    // attempts (and their replay digests) outlive the history: a judge retried past 32 outcomes still reads its claim.
+    const stages = entry.claim.id === task.id ? { claim: terminal, claim_attempt: attempt } : { judge: terminal, judge_attempt: attempt, decisions };
+    const retained = { ...entry, ...stages, attempts };
+    const next: ExtractionJournalEntry = { ...retained,
+      request_digests: Object.fromEntries([retained.claim_attempt, retained.judge_attempt, ...attempts].flatMap((value): [string, string][] => {
+        const digest = value ? requestDigests[value.id] : undefined;
+        return value && digest !== undefined ? [[value.id, digest]] : [];
+      })) };
+    await this.core.extractionJournal.set(entry.claim.id, next);
+    this.audit("extraction.attempt.recorded", next, terminal, { attempt_id: attempt.id, state: attempt.state, reason: attempt.reason,
+      detail: attempt.detail ?? null, decisions: task.kind === "judge_claims" ? decisions.length : 0, body_digest: attempt.body_digest });
+    if (terminal.state === "cancelled") this.audit("extraction.task.cancelled", next, terminal, {});
     return attempt;
   }
   /** A replayed completion: the stored attempt for an identical request, re-authorized when it carries output. */
   private async replayedAttemptTx(tx: ManagedTransaction, request: CompleteExtractionAttempt, digest: string, policy: PolicyState): Promise<ExtractionAttempt | null> {
-    const oldRows = await tx.run<{ body: string; digest: string }>(`MATCH (a:ExtractionAttempt {id:$id}) RETURN a.body AS body,a.request_digest AS digest`, { id: request.id });
-    const old = oldRows.records[0];
-    if (!old) return null;
-    if (old.get("digest") !== digest) throw new Error("attempt_conflict");
-    const attempt = ExtractionAttempt.parse(JSON.parse(old.get("body")));
+    const entry = await this.core.extractionJournal.byAttempt(request.id);
+    const attempt = entry && journalAttempt(entry, request.id);
+    if (!attempt) return null;
+    if (entry?.request_digests?.[request.id] !== digest) throw new Error("attempt_conflict");
     if (attempt.output) await this.core.authorizeEpisodesTx(tx, [attempt.source_id], policy);
     return attempt;
   }
@@ -263,7 +299,7 @@ export class ExtractionStore {
    * decision set that does not match finish the attempt as failed, a matching one records each disposition. Null when
    * the attempt may finish as submitted. */
   private async judgeAttemptTx(tx: ManagedTransaction, task: ModelTask, policy: PolicyState, request: CompleteExtractionAttempt, digest: string): Promise<ExtractionAttempt | null> {
-    const premise = await this.core.extractionRecordTx(tx,'ExtractionJudgeInput',task.attempt_id!,ExtractionJudgeInput);
+    const premise = await this.core.extractionJudgeInput(task.attempt_id!);
     if (premise.policy_revision !== policy.policy_revision || premise.source_head_revision !== await this.extractionHeadTx(tx,task.source_id)) {
       return this.finishExtractionTx(tx,task,policy,{state:'failed',reason:'premises_changed',disposition:null,output:null,spans:[]},digest);
     }
@@ -276,11 +312,7 @@ export class ExtractionStore {
     if (body.task !== 'judge_claims') return refuse('normalize');
     if (body.claim_body_digest !== parent.body_digest) return refuse('digest');
     if (body.decisions.length !== parent.claims.length || body.decisions.some((d,i)=>d.claim_index !== i || canonicalExtractionBody(d.evidence) !== canonicalExtractionBody(parent.claims[i]!.evidence))) return refuse('judge_shape');
-    for (const d of body.decisions) {
-      const decision = ExtractionDisposition.parse({...d,judge_attempt_id:task.attempt_id,claim_attempt_id:parent.attempt_id,claim_body_digest:parent.body_digest});
-      await tx.run(`CREATE (:ExtractionDisposition {judge_attempt_id:$id,claim_index:$index,body:$body})`,
-        {id:task.attempt_id,index:neo4j.int(d.claim_index),body:canonicalExtractionBody(decision)});
-    }
+    // Decisions and the succeeded attempt are persisted by one journal rewrite.
     return null;
   }
   /** Exact completion replay returns the stored immutable outcome. Neither the
@@ -291,7 +323,7 @@ export class ExtractionStore {
     return this.core.extractionTx(context, async (tx, policy) => {
       const replayed = await this.replayedAttemptTx(tx, request, digest, policy);
       if (replayed) return replayed;
-      const task = await this.core.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
+      const task = await this.core.extractionTask(request.task_id);
       this.checkExtractionCAS(task, request.expected_version);
       this.checkExtractionLease(task, request.lease_epoch);
       if (task.attempt_id !== request.id) throw new Error("attempt_conflict");
@@ -316,7 +348,7 @@ export class ExtractionStore {
     requireInstallation(context);
     const request = ModelTaskCAS.parse(input);
     return this.core.extractionTx(context, async (tx, policy) => {
-      const task = await this.core.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
+      const task = await this.core.extractionTask(request.task_id);
       this.checkExtractionCAS(task, request.expected_version);
       if (!from.includes(task.state)) throw new Error("invalid_transition");
       return body(tx, policy, task, request);
@@ -329,14 +361,14 @@ export class ExtractionStore {
       // fresh content-free attempt record, so the settled lease attempt stays immutable and the attempt count is unchanged.
       const open = task.state === "queued" || task.state === "leased" ? task : { ...task, attempt_id: null, lease: null, attempts: task.attempts - 1 };
       await this.finishExtractionTx(tx, open, policy, { state: "cancelled", reason: "cancelled", output: null, disposition: null, spans: [] }, extractionBodyDigest({ action: "cancel", ...request }));
-      return this.core.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
+      return this.core.extractionTask(task.id);
     });
   }
   async settleModelTask(input: SettleModelTask, context: InstallationContext): Promise<ModelTask> {
     requireInstallation(context);
     const request = SettleModelTask.parse(input);
     return this.core.extractionTx(context, async (tx, policy) => {
-      const task = await this.core.extractionRecordTx(tx, "ModelTask", request.task_id, ModelTask);
+      const task = await this.core.extractionTask(request.task_id);
       this.checkExtractionCAS(task, request.expected_version);
       if (task.state !== "leased" || task.lease?.epoch !== request.lease_epoch) throw new Error("lease_conflict");
       if (request.reason === "expired" && this.core.clock() < task.lease.expires_at) throw new Error("lease_not_expired");
@@ -345,7 +377,9 @@ export class ExtractionStore {
       // lost lease instead, so a restart or an overrun on the last budgeted lease never becomes a terminal omission.
       const lost = { ...task, attempts: task.attempts - 1, lost_leases: (task.lost_leases ?? 0) + 1 };
       await this.finishExtractionTx(tx, lost, policy, { state: request.reason, reason: request.reason, output: null, disposition: null, spans: [] }, extractionBodyDigest(request));
-      return this.core.extractionRecordTx(tx, "ModelTask", task.id, ModelTask);
+      const settled = await this.core.extractionTask(task.id);
+      this.audit("extraction.task.settled", await this.taskEntry(task.id), settled, { attempt_id: settled.attempt_id, reason: request.reason });
+      return settled;
     });
   }
   private async extractionNotCoveredTx(tx: ManagedTransaction, task: ModelTask): Promise<void> {
@@ -358,7 +392,9 @@ export class ExtractionStore {
       await this.core.authorizeEpisodesTx(tx, [task.source_id], policy);
       await this.validateExtractionSourceTx(tx, task);
       await this.extractionNotCoveredTx(tx, task);
-      return this.saveExtractionTaskTx(tx, { ...task, state: "queued", attempt_id: null, lease: null, policy_context: null, version: task.version + 1, updated_at: Math.max(task.updated_at, this.core.clock()) });
+      const retried = await this.saveExtractionTask({ ...task, state: "queued", attempt_id: null, lease: null, policy_context: null, version: task.version + 1, updated_at: Math.max(task.updated_at, this.core.clock()) });
+      this.audit("extraction.task.retried", await this.taskEntry(task.id), retried, { attempts: retried.attempts });
+      return retried;
     });
   }
   async extractionSelectionTx(tx: ManagedTransaction): Promise<ExtractionSelection> {

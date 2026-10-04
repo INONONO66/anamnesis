@@ -35,6 +35,18 @@ replay, backup/restore and rebuild all run write-free over legacy rows. No
 Episode is reserialized, relabeled or given lineage in place, and there is no
 data migration in any stage (docs/01 §1, docs/08).
 
+### Neo4j holds memory only
+
+A cross-cutting cleanup moves every operational ledger out of the graph and
+into state-dir files plus structured audit log lines, leaving Neo4j with
+Episodes, Facts, Entities, links, vectors and the coverage cursors.
+
+| Goal | State | Contents | Docs |
+|---|---|---|---|
+| G2 | done (#244, #246) | embedding lane: `EmbeddingAttempt` and `Outbox` leave the graph; missing-vector scan; `embedding-state.json` ledger | 01 §4, 02 §3, D54 |
+| G3 | done (#249) | extraction lane: the five pipeline ledger labels and their seven constraints leave the graph; coverage-driven scan; `extraction-state.json` journal with sealed-entry pruning; `extraction.*` audit events | 01 §6, §7, 02 §5, D55 |
+| G4 | next | materialization custody and relation-judge records (`MaterializationOperation`, `FactRelationInput`, `FactRelationVerdict`), `EchoLineage`, `OriginHead`, `EntityWitness` | design pending |
+
 ## v0.1 — originals, forgetting, search
 
 **Goal**: Episodes go in and come out; what a caller confirms it adopted is

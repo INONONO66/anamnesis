@@ -9,6 +9,8 @@ import { modelTaskRetryDelayMs } from "./backoff.ts";
 import { ExtractionScheduler } from "./extraction-scheduler.ts";
 import { ExtractionProviderError, type ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
+import type { ExtractionJournalEntry } from "./store/extraction-journal.ts";
+import type { ModelTask } from "@anamnesis/protocol";
 
 const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
 const model = "qa-scheduler", incarnation = extractionBodyDigest(model);
@@ -39,12 +41,15 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
   const query = async (cypher: string, params: Record<string, unknown> = {}) =>
     (await driver.executeQuery(cypher, params)).records.map(row => row.toObject());
   let offset = 0, calls = 0;
+  const audit: { event: string; fields: Record<string, unknown> }[] = [];
+  const snapshots = new Map<string, ExtractionJournalEntry>();
   const clock = () => Date.now() + offset;
   const advance = (ms: number) => { offset += ms; };
   const provider = { model, modelIncarnation: incarnation, async extract(input: ExtractionProviderInput) {
     return behaviour(input, ++calls, { advance });
   } };
-  const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock });
+  const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock,
+    audit: (event, fields) => { audit.push({ event, fields }); } });
   await query("MATCH (n) DETACH DELETE n");
   await engine.init(); await engine.claimWriterEpoch();
   const wakes: number[] = [];
@@ -58,27 +63,42 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
     { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context });
   /** Moves the shared clock past every failed task's retry backoff (the persisted schedule, not the lane's timer). */
   const elapseBackoff = async () => {
-    const failed = (await query("MATCH (t:ModelTask) RETURN t.body AS body")).map(row => JSON.parse(String(row.body)) as { state: string; attempts: number; updated_at: number })
-      .filter(task => task.state === "failed");
+    const failed = (await engine.store.extractionJournal.list()).flatMap(([, entry]) => [entry.claim, entry.judge])
+      .filter((task): task is ModelTask => task?.state === "failed");
     if (failed.length === 0) return;
     const due = Math.max(...failed.map(task => task.updated_at + modelTaskRetryDelayMs(task.attempts)));
     offset = Math.max(offset, due - Date.now() + 1);
   };
   /** Turns until the lane is idle with the cursor at `target`, awaiting the real in-flight promises between turns; a failed
    * attempt's retry backoff elapses between turns. */
-  const settle = async (target: number, budget = 12) => {
+  const seen = new Set<string>();
+  const capture = async (onTerminal?: (id: string, entry: ExtractionJournalEntry) => Promise<void>) => {
+    for (const [id, entry] of await engine.store.extractionJournal.list()) {
+      snapshots.set(id, entry);
+      if (!onTerminal || seen.has(id)) continue;
+      const pipeline = await engine.store.readExtractionPipeline(id, context);
+      if (pipeline.state !== "known" || pipeline.relation_judge === "pending" ||
+        (pipeline.claim.state !== "cancelled" && pipeline.claim.state !== "failed" &&
+         pipeline.judge?.state !== "succeeded" && pipeline.judge?.state !== "cancelled" && pipeline.judge?.state !== "failed")) continue;
+      seen.add(id);
+      await onTerminal(id, entry);
+    }
+  };
+  const settle = async (target: number, budget = 12, onTerminal?: (id: string, entry: ExtractionJournalEntry) => Promise<void>) => {
     let status = scheduler.status();
     for (let turns = 0; turns < budget; turns++) {
       await Promise.allSettled([...(scheduler as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()]);
+      await capture(onTerminal);
       await scheduler.turn();
       await Promise.allSettled([...(scheduler as unknown as { inFlight: Map<string, Promise<void>> }).inFlight.values()]);
+      await capture(onTerminal);
       await elapseBackoff();
       status = scheduler.status();
       if (status.state !== "starting" && status.covered_ingest_seq === target && status.in_flight === 0) break;
     }
     return status;
   };
-  return { engine, scheduler, query, wakes, calls: () => calls, root, remember, settle,
+  return { engine, scheduler, query, wakes, audit, snapshots, calls: () => calls, root, remember, settle,
     async close() { await scheduler.close(); await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -91,16 +111,17 @@ test("a claim whose lease keeps expiring is sealed as a durable omission after t
     const status = await f.settle(1);
     expect(status).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 0, failed_total: 1 });
     expect(f.calls()).toBe(3); // maxLostLeases leases, each answered after its lease ran out
-    const tasks = await f.query("MATCH (t:ModelTask) RETURN t.state AS state, t.body AS body");
-    expect(tasks).toHaveLength(1);
-    const task = JSON.parse(String(tasks[0]!.body)) as { state: string; attempts: number; lost_leases: number; attempt_id: string };
+    const entries = [...f.snapshots.values()];
+    expect(entries).toHaveLength(1);
+    const task = entries[0]!.claim;
     expect(task.state).toBe("cancelled");
     expect([task.attempts, task.lost_leases]).toEqual([0, 3]); // no provider outcome was ever recorded against the budget
-    const attempts = await f.query("MATCH (a:ExtractionAttempt) RETURN a.state AS state ORDER BY a.id");
-    expect(attempts.map(row => row.state)).toEqual(["expired", "expired", "expired", "cancelled"]);
+    expect(entries[0]!.attempts.sort((a, b) => a.id.localeCompare(b.id)).map(attempt => attempt.state)).toEqual(["expired", "expired", "expired", "cancelled"]);
     const coverage = await f.query("MATCH (c:ExtractionCoverage) RETURN c.covered_ingest_seq AS covered ORDER BY c.key");
     expect(coverage).toEqual([{ covered: 1 }, { covered: 1 }]);
     expect(await f.query("MATCH (f:Fact) RETURN count(f) AS n")).toEqual([{ n: 0 }]);
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(1);
   } finally { await f.close(); }
 }, 60000);
 
@@ -112,7 +133,10 @@ test("relation judge exhausted on initial catch-up seals the source as a durable
   try {
     await f.remember("Alice likes dark mode");
     await f.remember("Alice likes light mode");
-    const status = await f.settle(2, 30);
+    const sealed: (boolean | string)[] = [];
+    const status = await f.settle(2, 30, async (id) => {
+      sealed.push(await f.engine.store.sealFactRelationOmission({ pipeline_id: id, min_failures: 4 }, context).then(r => r.sealed, error => String(error)));
+    });
     expect(status).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 1, failed_total: 1, last_error: null });
     expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
     const custody = await f.query("MATCH (o:MaterializationOperation) WHERE o.result CONTAINS 'relation_judge_exhausted' RETURN o.result AS result, o.fact_id AS fact");
@@ -129,10 +153,12 @@ test("relation judge exhausted on initial catch-up seals the source as a durable
     await f.scheduler.turn();
     expect(f.calls()).toBe(before);
     expect((await f.engine.readExtractionSelection(context)).generation_id).not.toBeNull();
-    // Idempotent and refuses to seal what is not exhausted.
-    const pipelines = await f.query("MATCH (p:ExtractionPipeline) RETURN p.id AS id ORDER BY id");
-    const sealed = await Promise.all(pipelines.map(row => f.engine.store.sealFactRelationOmission({ pipeline_id: String(row.id), min_failures: 4 }, context).then(r => r.sealed, error => String(error))));
+    // Idempotency and non-exhausted rejection were checked while each entry still existed, before coverage pruned it.
     expect(sealed.sort()).toEqual(["Error: invalid_transition", false]);
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(2);
+    expect(f.audit).toContainEqual(expect.objectContaining({ event: "extraction.pipeline.materialized",
+      fields: expect.objectContaining({ relation_judge: "omitted", facts: 0 }) }));
   } finally { await f.close(); }
 }, 60000);
 
@@ -153,7 +179,37 @@ test("a pipeline that succeeds on the last attempt of every stage completes inst
     expect(status).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 2, failed_total: 0, last_error: null });
     expect(failuresLeft).toEqual({ claim: 0, judge_claims: 0, judge_relations: 0 });
     expect((await f.query("MATCH (f:Fact) RETURN f.content AS content ORDER BY content")).map(row => row.content)).toEqual(["Alice likes dark mode", "Alice likes light mode"]);
-    const attempts = await f.query("MATCH (a:ExtractionAttempt) RETURN a.state AS state, count(*) AS n ORDER BY state");
-    expect(attempts).toEqual([{ state: "failed", n: 6 }, { state: "succeeded", n: 4 }]);
+    const attempts = [...f.snapshots.values()].flatMap(entry => entry.attempts);
+    expect(attempts.filter(attempt => attempt.state === "failed")).toHaveLength(6);
+    expect(attempts.filter(attempt => attempt.state === "succeeded")).toHaveLength(4);
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(2);
   } finally { await f.close(); }
 }, 60000);
+
+test("a judge retried past the 32-outcome history still reads its claim attempt and the pipeline completes", async () => {
+  // One succeeded claim plus 33 failed judge outcomes exceeds the bounded attempt history. Every judge lease re-reads
+  // the claim attempt by id (claim context), so the pinned claim and judge attempts must outlive the evicted history.
+  let judgeFailuresLeft = 33;
+  const f = await setup((input, calls, clock) => {
+    if (input.task === "judge_claims" && judgeFailuresLeft > 0) { judgeFailuresLeft--; throw new ExtractionProviderError("provider_unavailable"); }
+    return answer(input, calls, clock);
+  }, { maxAttempts: 35 });
+  try {
+    await f.remember("Alice likes dark mode");
+    const status = await f.settle(1, 120);
+    expect(status).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
+    expect(judgeFailuresLeft).toBe(0);
+    expect((await f.query("MATCH (f:Fact) RETURN f.content AS content")).map(row => row.content)).toEqual(["Alice likes dark mode"]);
+    const recorded = f.audit.filter(({ event }) => event === "extraction.attempt.recorded").map(({ fields }) => fields);
+    expect(recorded.filter(fields => fields["state"] === "failed")).toHaveLength(33);
+    expect(recorded.filter(fields => fields["state"] === "succeeded")).toHaveLength(2);
+    // The last snapshot before pruning: history bounded at 32, the claim attempt pinned outside it with its replay digest.
+    const [entry] = [...f.snapshots.values()];
+    expect(entry!.attempts).toHaveLength(32);
+    expect(entry!.attempts.some(attempt => attempt.id === entry!.claim_attempt!.id)).toBe(false);
+    expect(entry!.claim_attempt!.state).toBe("succeeded");
+    expect(Object.keys(entry!.request_digests ?? {})).toContain(entry!.claim_attempt!.id);
+    expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+  } finally { await f.close(); }
+}, 120000);

@@ -1,6 +1,6 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { RpcEmbeddingAttempt } from "@anamnesis/protocol";
+import { StateFile } from "./state-file.ts";
 
 const Entry = z.strictObject({
   profile_id: z.string().regex(/^[0-9a-f]{64}$/),
@@ -21,32 +21,21 @@ type LedgerFile = z.infer<typeof FileSchema>;
 /** A serial, write-through ledger. Only completed failures live here; successful
  * vectors are represented by the graph and have no ledger entry. */
 export class EmbeddingLedger {
-  private loaded: Promise<void> | undefined;
-  private data: LedgerFile = { version: 1, episodes: {} };
-  private writes: Promise<void> = Promise.resolve();
+  private readonly file: StateFile<EmbeddingLedgerEntry>;
 
-  constructor(private readonly path?: string) {}
-
-  private async load(): Promise<void> {
-    if (!this.loaded) this.loaded = (async () => {
-      if (!this.path) return;
-      try { this.data = FileSchema.parse(JSON.parse(await readFile(this.path, "utf8"))); }
-      catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
-        throw error;
-      }
-    })();
-    await this.loaded;
+  constructor(path?: string) {
+    this.file = new StateFile(path, {
+      parse: text => FileSchema.parse(JSON.parse(text)).episodes,
+      serialize: episodes => JSON.stringify({ version: 1, episodes } satisfies LedgerFile),
+    });
   }
 
   async get(id: string): Promise<EmbeddingLedgerEntry | undefined> {
-    await this.load(); await this.writes;
-    return this.data.episodes[id];
+    return (await this.file.entries())[id];
   }
 
   async list(): Promise<[string, EmbeddingLedgerEntry][]> {
-    await this.load(); await this.writes;
-    return Object.entries(this.data.episodes);
+    return Object.entries(await this.file.entries());
   }
 
   async due(profileId: string, now: number): Promise<[string, EmbeddingLedgerEntry][]> {
@@ -62,26 +51,10 @@ export class EmbeddingLedger {
   }
 
   async set(id: string, entry: EmbeddingLedgerEntry): Promise<void> {
-    await this.mutate(episodes => { episodes[id] = Entry.parse(entry); });
+    await this.file.mutate(episodes => { episodes[id] = Entry.parse(entry); });
   }
 
   async delete(id: string): Promise<void> {
-    await this.mutate(episodes => { delete episodes[id]; });
-  }
-
-  private async mutate(change: (episodes: LedgerFile["episodes"]) => void): Promise<void> {
-    await this.load();
-    const next = this.writes.catch(() => {}).then(async () => {
-      const episodes = { ...this.data.episodes };
-      change(episodes);
-      const updated: LedgerFile = { version: 1, episodes };
-      if (this.path) {
-        await writeFile(`${this.path}.tmp`, JSON.stringify(updated));
-        await rename(`${this.path}.tmp`, this.path);
-      }
-      this.data = updated;
-    });
-    this.writes = next;
-    await next;
+    await this.file.mutate(episodes => { delete episodes[id]; });
   }
 }

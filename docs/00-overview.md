@@ -91,10 +91,12 @@ exists yet, and the gates that will produce one are in
 3. **Only the cache layer is ever SET.** Hit cache, utility cache, active
    policy, Entity witness rows, ConductingArc, hub shortlist, `m_cache`,
    selectors. All of it must be deletable and regenerable. Operational
-   ledgers are leaving the graph: the embedding lane's state already lives
-   in `embedding-state.json` (D54), while the extraction Outbox and its
-   attempt records still sit in Neo4j until their own cutover. The target is
-   that Neo4j holds memory, not bookkeeping.
+   ledgers are leaving the graph: the embedding lane's state lives in
+   `embedding-state.json` (D54) and the extraction lane's tasks, attempts
+   and decisions in `extraction-state.json` (D55), with structured audit
+   log lines as the durable record; materialization custody and relation
+   judge records are next. The target is that Neo4j holds memory, not
+   bookkeeping.
    ConductingArc is nonsemantic endpoint access metadata rebuilt from retained
    physical links and maintained atomically with them. Its composite
    (source_id, link_id) index supplies ordered first-256 probes before filters;

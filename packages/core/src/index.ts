@@ -20,6 +20,7 @@ export type { ExtractionProvider } from "./extraction.ts";
 export type { EngineOptions } from "./engine.ts";
 
 export { EpisodeJournal, journaledRemember } from "./journal.ts";
+export { ExtractionJournal, type ExtractionJournalEntry } from "./store/extraction-journal.ts";
 export { materializeFacts, recallDerived } from "./fact-materialization.ts";
 export type { RetainedClaim, RetainedExtractionAttempt, RetainedEpisode, MaterializedFact, ConductingArc } from "./fact-materialization.ts";
 export { replayDynamics } from "./dynamics/state.ts";

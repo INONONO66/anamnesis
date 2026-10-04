@@ -18,7 +18,7 @@ changes.
                                                   ├─ objects/  spool/
                                                   ├─ write queue (serialized)
                                                   ├─ read pool  (recall, concurrent)
-                                                  ├─ extraction worker (Outbox consumer)
+                                                  ├─ extraction worker (coverage-driven scan, extraction-state.json journal)
                                                   ├─ maintenance (m_cache, hub shortlist — v0.2)
                                                   └─ dreaming (community, synthesis, profile — v0.3)
 ```
@@ -93,8 +93,9 @@ A single integer on `(:Meta {key: 'meta', structure_revision})`.
 
 **Not incremented on:** Hit or RecallReceipt CREATE, policy control Episode
 CREATE (uses `policy_revision`), hit/utility-cache / `m_cache` / shortlist SET,
-hidden-generation embedding backfill, extraction Outbox cursor, embedding
-ledger (`embedding-state.json`) writes,
+hidden-generation embedding backfill, extraction coverage advance, embedding
+ledger (`embedding-state.json`) and extraction journal
+(`extraction-state.json`) writes,
 BUILDING/CATCHING_UP generation writes, or
 GC of hidden RETIRED generations. These do not change the *serving structure*
 recall sees, so recall's consistency check must not trip on them. The
@@ -585,7 +586,41 @@ durable spool.
 
 ## 5. Cold path — extraction worker
 
-Consumes Outbox entries with `stage: extract`. Each target generation has one
+**Implemented lane (D55).** The shipped extraction scheduler finds its work
+by what coverage has not sealed: Episodes whose `ingest_seq` is above the
+generation's `ExtractionCoverage.covered_ingest_seq`, read in a bounded
+window in sequence order. There is no extraction queue label in the graph.
+The pipeline a scan resolves for an Episode (claim task, lease, attempts,
+judge task and input, up to 64 decisions) lives in the
+`extraction-state.json` journal under the runtime root, keyed by
+`pipeline_id` and looked up by work key `<generation_id>:<source_id>`.
+Leases, CAS on `expected_version`, retry and settle rules, replay of
+identical completions and the `stale_input`, `lease_expired`,
+`coverage_frozen`, `policy_denied`, `span_mismatch` and `provider_mismatch`
+fences are enforced against the journal entry inside the same transaction
+that still reads the Episode head, policy and writer epoch from the graph.
+Source text leaves the database only after lease and policy checks. A
+pipeline whose judge attempt succeeded materializes exactly as described
+below; materialization is idempotent through custody occurrence keys and
+Fact digest uniqueness. Coverage seals a source only once its pipeline is
+terminal (custody written, or a content-free omission for a failed or
+cancelled stage); the sealed entry is then pruned from the journal,
+`extraction.audit.status` answers `unknown` for it and a retry of one of
+its tasks fails with `unknown_ModelTask` ahead of the `coverage_frozen`
+fence. Every transition emits
+one structured audit line (`extraction.task.leased` before the provider
+call, `extraction.attempt.recorded`, `extraction.task.settled`,
+`extraction.pipeline.materialized`, `extraction.pipeline.pruned` and the
+rest), which is the durable record. A daemon lost between lease and attempt
+leaves a `leased` task in the file; the next scan finds the still-uncovered
+Episode, settles the task as `worker_lost` or `expired`, retries within the
+lost-lease budget and re-runs it.
+
+The rest of this section is the normative sequencer design that the lane
+grows into. Where it says "Outbox entry", read the coverage-driven scan
+above; the sequencing, policy and write rules are unchanged.
+
+Each target generation has one
 sequencer: only the entry whose `ingest_seq = Generation.next_ingest_seq` may
 run, so retry timing cannot reorder Entity resolution or contradiction
 decisions. LLM calls cannot sit inside a transaction.

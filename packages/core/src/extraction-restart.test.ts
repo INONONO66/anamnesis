@@ -13,6 +13,7 @@ import { ExtractionScheduler } from "./extraction-scheduler.ts";
 import { modelTaskRetryDelayMs } from "./backoff.ts";
 import { ExtractionProviderError, type ExtractionProvider, type ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
+import { ExtractionJournal, type ExtractionJournalEntry } from "./store/extraction-journal.ts";
 
 const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
 const model = "qa-restart", incarnationA = extractionBodyDigest("qa-restart:prompt-v1"), incarnationB = extractionBodyDigest("qa-restart:prompt-v2");
@@ -43,6 +44,15 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true });
   const query = async (cypher: string, params: Record<string, unknown> = {}): Promise<Row[]> => (await driver.executeQuery(cypher, params)).records.map(row => row.toObject());
   const read = async (cypher: string, params: Record<string, unknown>) => (await query(cypher, params)) as never;
+  const journalPath = join(root, "extraction-state.json");
+  const snapshots = new Map<string, ExtractionJournalEntry>();
+  const audit: { event: string; fields: Record<string, unknown> }[] = [];
+  // Read from disk afresh: Engine A's in-memory journal cannot observe Engine B's writes.
+  const entries = () => new ExtractionJournal(journalPath).list();
+  const tasks = async () => (await entries()).flatMap(([, entry]) => [entry.claim, entry.judge].filter(task => task !== null)).sort((a, b) => a.id.localeCompare(b.id));
+  const capturedTasks = () => [...snapshots.values()].flatMap(entry => [entry.claim, entry.judge].filter(task => task !== null)).sort((a, b) => a.id.localeCompare(b.id));
+  const capturedAttempts = () => [...snapshots.values()].flatMap(entry => entry.attempts).sort((a, b) => a.id.localeCompare(b.id));
+  const capture = async () => { for (const [id, entry] of await entries()) snapshots.set(id, entry); };
   let offset = 0;
   const clock = () => Date.now() + offset;
   let hung!: () => void, release!: (error: Error) => void;
@@ -52,7 +62,8 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     if (hangs(input)) { hung(); return stopped; }
     return answerA(input);
   } };
-  const engineA = new Engine({ uri, password, objectsRoot: root, extractionProvider: providerA, clock });
+  const engineA = new Engine({ uri, password, objectsRoot: root, extractionProvider: providerA, clock,
+    extractionJournalPath: journalPath, audit: (event, fields) => { audit.push({ event, fields }); } });
   await query("MATCH (n) DETACH DELETE n");
   await engineA.init(); await engineA.claimWriterEpoch();
   const schedulerA = new ExtractionScheduler(engineA, { provider: providerA, context, clock, maxAttempts: 4, maxInFlight: 1, read, wake: () => {} });
@@ -61,21 +72,21 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   const remember = (content: string) => engineA.remember({ content, time: { value: "2026-09-10T00:00:00Z", precision: "day" as const },
     origin: { source: root, session: root, actor: "user", record: String(++record) }, source_revision: "v1", expected_previous_revision_key: null },
     { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context });
-  const bodies = async (label: string) => (await query(`MATCH (n:${label}) RETURN n.body AS body ORDER BY n.id`)).map(row => JSON.parse(String(row.body)) as Record<string, unknown>);
   /** Moves the shared clock past every failed task's retry backoff (the persisted schedule, not the lane's timer). */
   const elapseBackoff = async () => {
-    const failed = (await bodies("ModelTask")).filter(task => task.state === "failed") as { attempts: number; updated_at: number }[];
+    const failed = (await tasks()).filter(task => task.state === "failed");
     const due = Math.max(...failed.map(task => task.updated_at + modelTaskRetryDelayMs(task.attempts)));
     offset = Math.max(offset, due - Date.now() + 1);
   };
   return {
-    query, bodies, remember,
+    query, tasks, capturedTasks, capturedAttempts, entries, audit, remember,
     /** Turns daemon A until the selected provider call is in flight (the state a SIGTERM/SIGKILL finds). A failed attempt
      * retries only after its backoff, so between turns the shared clock moves past every failed task's retry moment. */
     async runUntilHung() {
       for (let turns = 0; turns < 16; turns++) {
         await schedulerA.turn();
         const settled = await Promise.race([inFlightAtStop.then(() => "hung" as const), Promise.allSettled(inFlight(schedulerA)).then(() => "settled" as const)]);
+        await capture();
         if (settled === "hung") return;
         await elapseBackoff();
       }
@@ -84,7 +95,8 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     /** A fresh Engine claims the next writer epoch over the same database; its provider identity is `incarnation`. */
     async restart(incarnation: string) {
       const provider: ExtractionProvider = { model, modelIncarnation: incarnation, reportedModelIncarnation: reportedB, async extract(input) { return answer(input); } };
-      const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock });
+      const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock,
+        extractionJournalPath: journalPath, audit: (event, fields) => { audit.push({ event, fields }); } });
       await engine.init(); await engine.claimWriterEpoch();
       const scheduler = new ExtractionScheduler(engine, { provider, context, clock, maxAttempts: 4, maxInFlight: 1, read, wake: () => {} });
       daemons.push({ engine, scheduler });
@@ -92,16 +104,18 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     },
     /** Moves the shared clock past every live lease so the new daemon may settle what the old one lost. */
     async expireLeases() {
-      const leased = (await bodies("ModelTask")).filter(task => task.state === "leased") as { lease: { expires_at: number } }[];
-      const latest = Math.max(...leased.map(task => task.lease.expires_at));
+      const leased = (await tasks()).filter(task => task.state === "leased" && task.lease !== null);
+      const latest = Math.max(...leased.map(task => task.lease!.expires_at));
       offset = Math.max(offset, latest - Date.now() + 1);
     },
     /** Turns until the lane is idle with the cursor at `target`, awaiting the real in-flight promises between turns. */
     async settle(scheduler: ExtractionScheduler, target: number, budget = 30) {
       let status = scheduler.status();
       for (let turns = 0; turns < budget; turns++) {
+        await capture();
         await scheduler.turn();
         await Promise.allSettled(inFlight(scheduler));
+        await capture();
         status = scheduler.status();
         if (status.state !== "starting" && status.covered_ingest_seq === target && status.in_flight === 0) break;
       }
@@ -123,16 +137,22 @@ test("a judge lease in flight across a restart is settled and judged by the new 
   try {
     await f.remember("Alice likes dark mode");
     await f.runUntilHung();
-    const [claim, judge] = await f.bodies("ModelTask");
+    const [claim, judge] = await f.tasks();
     expect([claim!.state, judge!.state, judge!.kind, judge!.attempts]).toEqual(["succeeded", "leased", "judge_claims", 1]);
     const schedulerB = await f.restart(incarnationA);
     // The lost lease is left alone until it expires; then the new daemon settles it as worker_lost and retries.
     expect(await schedulerB.turn()).toBe("waiting");
     await Promise.allSettled(inFlight(schedulerB));
-    expect((await f.bodies("ModelTask"))[1]!.state).toBe("leased");
+    expect((await f.tasks())[1]!.state).toBe("leased");
     await f.expireLeases();
     expect(await f.settle(schedulerB, 1)).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
-    expect(attemptOutcomes(await f.bodies("ExtractionAttempt"))).toEqual([["succeeded", null], ["worker_lost", "worker_lost"], ["succeeded", null]]);
+    expect(attemptOutcomes(f.capturedAttempts())).toEqual([["succeeded", null], ["worker_lost", "worker_lost"], ["succeeded", null]]);
+    expect(await f.entries()).toEqual([]);
+    expect(f.audit).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "extraction.task.leased", fields: expect.objectContaining({ source_id: claim!.source_id, kind: "judge" }) }),
+      expect.objectContaining({ event: "extraction.task.settled", fields: expect.objectContaining({ source_id: claim!.source_id, reason: "worker_lost" }) }),
+    ]));
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(1);
     expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
   } finally { await f.close(); }
 }, 60000);
@@ -147,13 +167,15 @@ test("a judge lease in flight across a restart is judged by the new daemon even 
     // Before the fix: every retry failed provider_mismatch before calling the provider (the task pinned incarnation A),
     // the budget was spent in milliseconds and the Episode was sealed as a terminal omission.
     expect(await f.settle(schedulerB, 1)).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
-    expect(attemptOutcomes(await f.bodies("ExtractionAttempt"))).toEqual([["succeeded", null], ["worker_lost", "worker_lost"], ["succeeded", null]]);
-    const [claim, judge] = await f.bodies("ModelTask");
+    expect(attemptOutcomes(f.capturedAttempts())).toEqual([["succeeded", null], ["worker_lost", "worker_lost"], ["succeeded", null]]);
+    const [claim, judge] = f.capturedTasks();
     // The task records the provider that actually produced its attempt; the immutable claim keeps its own identity.
     expect([claim!.model_incarnation, judge!.model_incarnation, judge!.state]).toEqual([incarnationA, incarnationB, "succeeded"]);
     // The accepted judge answer is attributed to the model daemon B's upstream reported, not only to the configured alias.
-    expect((await f.bodies("ExtractionAttempt")).map(attempt => attempt.reported_model)).toEqual([undefined, undefined, reportedB]);
+    expect(f.capturedAttempts().map(attempt => attempt.reported_model)).toEqual([undefined, undefined, reportedB]);
     expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
+    expect(await f.entries()).toEqual([]);
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(1);
   } finally { await f.close(); }
 }, 60000);
 
@@ -169,16 +191,18 @@ test("a restart during the last budgeted judge lease is retried, not sealed: a l
   try {
     await f.remember("Alice likes dark mode");
     await f.runUntilHung();
-    const [, judge] = await f.bodies("ModelTask");
+    const [, judge] = await f.tasks();
     expect([judge!.state, judge!.attempts, judge!.lost_leases]).toEqual(["leased", 4, undefined]);
     const schedulerB = await f.restart(incarnationA);
     await f.expireLeases();
     expect(await f.settle(schedulerB, 1)).toMatchObject({ state: "active", covered_ingest_seq: 1, live_ingest_seq: 1, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
-    expect(attemptOutcomes(await f.bodies("ExtractionAttempt"))).toEqual([["succeeded", null], ["failed", "provider_unavailable"], ["failed", "provider_unavailable"], ["failed", "provider_unavailable"], ["worker_lost", "worker_lost"], ["succeeded", null]]);
+    expect(attemptOutcomes(f.capturedAttempts())).toEqual([["succeeded", null], ["failed", "provider_unavailable"], ["failed", "provider_unavailable"], ["failed", "provider_unavailable"], ["worker_lost", "worker_lost"], ["succeeded", null]]);
     // The lost lease returned its attempt to the budget and was counted on its own; the retry was the fourth provider outcome.
-    const [, settled] = await f.bodies("ModelTask");
+    const [, settled] = f.capturedTasks();
     expect([settled!.state, settled!.attempts, settled!.lost_leases]).toEqual(["succeeded", 4, 1]);
     expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
+    expect(await f.entries()).toEqual([]);
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(1);
   } finally { await f.close(); }
 }, 60000);
 
@@ -189,7 +213,8 @@ test("a relation judge in flight across a restart is judged by the new daemon ev
     await f.remember("Alice likes dark mode");
     await f.remember("Alice likes light mode");
     await f.runUntilHung();
-    const tasks = await f.bodies("ModelTask");
+    // The first source may already be covered and pruned when the second hangs.
+    const tasks = f.capturedTasks();
     expect(tasks.map(task => task.state)).toEqual(["succeeded", "succeeded", "succeeded", "succeeded"]);
     const schedulerB = await f.restart(incarnationB);
     expect(await f.settle(schedulerB, 2)).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
@@ -197,5 +222,7 @@ test("a relation judge in flight across a restart is judged by the new daemon ev
       .toEqual([{ candidates: 0, failures: 0, failure: null }, { candidates: 1, failures: 0, failure: null }]);
     expect(await f.query("MATCH (v:FactRelationVerdict) RETURN v.model_incarnation AS incarnation, v.reported_model AS reported")).toEqual([{ incarnation: incarnationB, reported: reportedB }]);
     expect((await f.query("MATCH (f:Fact) RETURN f.content AS content ORDER BY content")).map(row => row.content)).toEqual(["Alice likes dark mode", "Alice likes light mode"]);
+    expect(await f.entries()).toEqual([]);
+    expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(2);
   } finally { await f.close(); }
 }, 60000);

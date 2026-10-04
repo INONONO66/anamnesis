@@ -14,8 +14,9 @@ permits a different kind of write.
              Fact · Entity · Community · derived links · embedding
   caches     SET allowed. Can be dropped and regenerated at any time
              hit/utility cache · active policy · EntityWitness · session topology · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · OriginHead · selectors
-             (embedding attempt/quarantine state is not a graph layer at all; it lives in the
-             regenerable `embedding-state.json` ledger beside the runtime root, §4)
+             (embedding attempt/quarantine state and extraction pipeline state are not graph
+             layers at all; they live in the `embedding-state.json` ledger and the
+             `extraction-state.json` journal beside the runtime root, §4, §6)
   control    append-only RecallReceipt impressions and feedback acceptance records;
              durable until explicit receipt retention expiry, not semantic Episodes
              append-only InvalidationEvidence metadata, retained while its
@@ -1311,6 +1312,8 @@ copy.
 ├── daemon.lock/              atomic-mkdir lease + owner nonce/heartbeat
 ├── config.jsonc              calibration parameters and modes (docs/04 §9)
 ├── neo4j.auth                per-install random Neo4j password, mode 0600
+├── embedding-state.json      embedding attempt/quarantine ledger (D54); operational, not authority
+├── extraction-state.json     extraction pipeline journal: tasks, leases, attempts, decisions (D55)
 ├── objects/                  Payload bytes (§2). Part of the authority
 ├── spool/                    transient remember() queue while Neo4j is unavailable (docs/02 §4)
 ├── tmp/dream/                bounded disposable GDS exports
@@ -1322,10 +1325,22 @@ The parent directory also holds the fixed, root-hash-namespaced writer pointer
 and backup/restore activation journals; they remain discoverable while the
 data root is renamed (docs/02).
 
+The two state files hold pipeline bookkeeping, never memory. Each is a
+single JSON document rewritten atomically (temporary name plus rename) on
+every change and schema-validated on load. `embedding-state.json` keeps an
+entry only while an Episode lacks its profile's vector (§4, D54).
+`extraction-state.json` keeps one entry per extraction pipeline and prunes it
+once coverage has sealed the source and materialization is terminal, so the
+file stays bounded by in-flight work rather than growing with the corpus
+(docs/02 §5, D55). Neither file is part of the backup authority: losing one
+re-drives unsealed work and forgets failure history, and the structured
+audit log lines are the durable record of what happened.
+
 ## 7. Indexes and constraints
 
 ```text
 unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_key · Entity.entity_key · Payload.hash · Hit.idem_key
+          · ExtractionGeneration.id · ExtractionCoverage.key
           · RecallReceipt.recall_id · RecallFeedback.id · RecallOutcome.recall_id
           · ActivePolicy.policy_id · ConflictAdjacency(generation, fact_id, peer_id)
           · EntityWitness(generation, policy_revision, entity_id)
@@ -1369,6 +1384,12 @@ vector    Episode.embedding_m_<modelhex> (global, vec_episode_<indexhex>)
            · RELATES_TO.embedding_g<N>_m_<modelhex> (vec_rel_g<N>_<indexhex>)
            (one node/relationship index per generation and vector_index_id)
 ```
+
+No extraction task, attempt, pipeline, judge-input or decision label exists in
+the graph, and no constraint backs one; that state is the `extraction-state.json`
+journal (§6, D55). Of the extraction bookkeeping only `ExtractionGeneration` and
+`ExtractionCoverage` remain as nodes, because coverage is the cursor the
+scheduler resumes from.
 
 The global Episode memory indexes use a semantic-only technical label that
 excludes policy/control Episodes; an audit query may still use `:Element`.
