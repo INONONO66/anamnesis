@@ -45,8 +45,9 @@ async function seed(legacy = true): Promise<void> {
   await driver.executeQuery("CREATE (:ExtractionGeneration {id:'018f0d8d-7b6a-7cc0-8b42-000000000011'})");
   await driver.executeQuery("CREATE (:ExtractionCoverage {generation_id:'018f0d8d-7b6a-7cc0-8b42-000000000011',partition:'episodes',covered_ingest_seq:10})");
   await driver.executeQuery("CREATE (:ExtractionCoverage {generation_id:'018f0d8d-7b6a-7cc0-8b42-000000000011',partition:'active_extraction',covered_ingest_seq:10})");
-  await driver.executeQuery("CREATE (:Episode {id:$id,ingest_seq:1})", { id: lineage.episode_id });
-  await driver.executeQuery("CREATE (:Entity {id:'018f0d8d-7b6a-7cc0-8b42-000000000002'})");
+  // Engine-written Episodes and Entities are Elements; the migration joins through the `element_id` index.
+  await driver.executeQuery("CREATE (:Element:Episode {id:$id,ingest_seq:1})", { id: lineage.episode_id });
+  await driver.executeQuery("CREATE (:Element:Entity {id:'018f0d8d-7b6a-7cc0-8b42-000000000002'})");
   await driver.executeQuery("CREATE (:Fact {id:'018f0d8d-7b6a-7cc0-8b42-000000000003',generation:'018f0d8d-7b6a-7cc0-8b42-000000000011',meaning_digest:'digest',primary_episode_id:$id})", { id: lineage.episode_id });
   if (!legacy) return;
   await driver.executeQuery("CREATE (:EchoLineage $props)", { props: { ...lineage, body: canonicalExtractionBody(lineage), digest: extractionBodyDigest(lineage) } });
@@ -61,6 +62,7 @@ async function seed(legacy = true): Promise<void> {
 beforeEach(async () => {
   driver = neo4j.driver(db.uri, neo4j.auth.basic(db.user, db.password), { disableLosslessIntegers: true });
   await seed();
+  await driver.executeQuery("CREATE CONSTRAINT element_id IF NOT EXISTS FOR (n:Element) REQUIRE n.id IS UNIQUE");
   await driver.executeQuery("CREATE CONSTRAINT echo_lineage_episode IF NOT EXISTS FOR (n:EchoLineage) REQUIRE n.episode_id IS UNIQUE");
   await driver.executeQuery("CREATE CONSTRAINT origin_head_key IF NOT EXISTS FOR (n:OriginHead) REQUIRE n.origin_key IS UNIQUE");
   await driver.executeQuery("CREATE CONSTRAINT materialization_operation_id IF NOT EXISTS FOR (n:MaterializationOperation) REQUIRE n.id IS UNIQUE");
@@ -71,6 +73,7 @@ afterEach(async () => {
   for (const name of legacyConstraints) await driver.executeQuery(`DROP CONSTRAINT ${name} IF EXISTS`);
   for (const name of [...newIndexes, "relation_input_occurrence"]) await driver.executeQuery(`DROP INDEX ${name} IF EXISTS`);
   await driver.executeQuery("DROP CONSTRAINT fact_identity IF EXISTS");
+  await driver.executeQuery("DROP CONSTRAINT element_id IF EXISTS");
   await driver.close();
 }, 300000);
 
@@ -197,11 +200,12 @@ describe.serial("materialization ledger migration", () => {
 
   test.serial("refuses corrupt lineage on a later validation page without graph changes", async () => {
     const entries = Array.from({ length: 1000 }, (_, offset) => {
-      const id = `018f0d8d-7b6a-7cc0-8b42-${String(offset + 2).padStart(12, "0")}`;
+      // Element ids are unique across Episodes and Entities; keep the synthetic range clear of the seeded ids.
+      const id = `018f0d8d-7b6a-7cc0-8b42-${String(offset + 100_000).padStart(12, "0")}`;
       const body = { ...lineage, episode_id: id, root_episode_ids: [id] };
       return { id, props: { ...body, body: canonicalExtractionBody(body), digest: offset === 999 ? "f".repeat(64) : extractionBodyDigest(body) } };
     });
-    await driver.executeQuery("UNWIND $entries AS entry CREATE (e:Episode {id:entry.id,ingest_seq:2}) CREATE (l:EchoLineage) SET l = entry.props", { entries });
+    await driver.executeQuery("UNWIND $entries AS entry CREATE (e:Element:Episode {id:entry.id,ingest_seq:2}) CREATE (l:EchoLineage) SET l = entry.props", { entries });
     const before = await graphSnapshot();
     // 1001 rows at --batch 100 puts the corrupt row (highest episode_id) on the eleventh keyset page.
     await expect(migrate({ args: ["--dry-run", "--batch", "100"], output: () => undefined })).rejects.toThrow("copy_mismatch");

@@ -2,6 +2,9 @@ import neo4j from "neo4j-driver";
 import { canonicalExtractionBody, extractionBodyDigest, EchoLineage } from "@anamnesis/protocol";
 
 const LABELS = ["MaterializationOperation", "OriginHead", "EchoLineage", "FactRelationInput", "FactRelationVerdict", "EntityWitness"] as const;
+// Every Episode and Entity the engine writes is an Element, and `element_id` is the only id index: an id lookup
+// spelled `(e:Episode {id:...})` plans as a per-row label scan (billions of rows on production), so every join
+// below names `Element:Episode` / `Element:Entity`. Legacy ledgers carry no such index for FactRelationVerdict.
 const USAGE = "Usage: node dist/anamnesis-migrate-g4.mjs [--dry-run] [--batch <positive integer>]";
 type Counts = Record<typeof LABELS[number], number>;
 type Cursor = { readonly generation: string; readonly episodes: number; readonly active_extraction: number };
@@ -76,7 +79,7 @@ export async function main(options: Options = {}) {
   const uncovered = async () => {
     const custody = (label: string) => `MATCH (n:${label})
       WITH DISTINCT n.generation AS generation,n.source_episode_id AS source
-      OPTIONAL MATCH (e:Episode {id:source})
+      OPTIONAL MATCH (e:Element:Episode {id:source})
       OPTIONAL MATCH (c:ExtractionCoverage {generation_id:generation,partition:'episodes'})
       WITH generation,source,e.ingest_seq AS seq,c.covered_ingest_seq AS covered
       WHERE generation IS NULL OR source IS NULL OR seq IS NULL OR covered IS NULL OR seq > covered`;
@@ -121,13 +124,16 @@ export async function main(options: Options = {}) {
         && row.get("occurrence") === extractionBodyDigest([row.get("generation"), row.get("source")]))
         sealed.add(`${row.get("generation")}:${row.get("source")}`);
     }
-    const pendingRows = await session.run<{ id: string; generation: string; source: string }>(`MATCH (i:FactRelationInput)
-      WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
+    const verdicts = new Set((await session.run<{ key: string }>(
+      "MATCH (v:FactRelationVerdict) WHERE v.occurrence_key IS NOT NULL RETURN DISTINCT v.occurrence_key AS key")).records.map(row => row.get("key")));
+    const inputRows = await session.run<{ id: string; generation: string; source: string }>(`MATCH (i:FactRelationInput)
+      WHERE i.candidates > 0
       RETURN i.occurrence_key AS id,i.generation AS generation,i.source_episode_id AS source ORDER BY id`);
     const pending: string[] = [], sealedExhausted: string[] = [];
     let pendingCount = 0, sealedCount = 0;
-    for (const row of pendingRows.records) {
+    for (const row of inputRows.records) {
       const id = row.get("id"), sourceKey = `${row.get("generation")}:${row.get("source")}`;
+      if (verdicts.has(id)) continue;
       if (sealed.has(sourceKey)) {
         sealedCount++;
         if (sealedExhausted.length < 100) sealedExhausted.push(id);
@@ -157,28 +163,28 @@ export async function main(options: Options = {}) {
       WITH f.generation AS generation,f.meaning_digest AS meaning_digest,f.primary_episode_id AS primary_episode_id,count(f) AS duplicates
       WHERE duplicates > 1 RETURN count(*) AS count`);
     const witnessMissing = (await session.run<{ id: string }>(`MATCH (w:EntityWitness)
-      OPTIONAL MATCH (e:Entity) WHERE e.id = w.entity_id
+      OPTIONAL MATCH (e:Element:Entity) WHERE e.id = w.entity_id
       WITH w,e
       WHERE w.state <> 'COMPLETE' OR w.state IS NULL OR e IS NULL
         OR (e.witness_generation IS NOT NULL AND
           (NOT coalesce(e.witness_generation = w.generation,false)
            OR NOT coalesce(e.witness_policy_revision = w.policy_revision,false)))
       RETURN w.entity_id AS id LIMIT 20`)).records.map(row => row.get("id"));
-    const witnessJoined = await number(`MATCH (w:EntityWitness {state:'COMPLETE'}) MATCH (e:Entity) WHERE e.id = w.entity_id
+    const witnessJoined = await number(`MATCH (w:EntityWitness {state:'COMPLETE'}) MATCH (e:Element:Entity) WHERE e.id = w.entity_id
       RETURN count(DISTINCT e) AS count`);
     const existingWitness = await number(`MATCH (e:Entity) WHERE e.witness_generation IS NOT NULL RETURN count(e) AS count`);
 
     // Check every join before any write, including the live copy. A missing Episode must never be hidden by a
     // count of pre-existing lineage properties on an unrelated Episode.
     const lineageMissing = await session.run<{ id: string; episode: string | null; mode: string | null }>(`MATCH (l:EchoLineage)
-      WHERE NOT EXISTS { MATCH (e:Episode) WHERE e.id = l.episode_id }
-        OR EXISTS { MATCH (e:Episode) WHERE e.id = l.episode_id
+      WHERE NOT EXISTS { MATCH (e:Element:Episode) WHERE e.id = l.episode_id }
+        OR EXISTS { MATCH (e:Element:Episode) WHERE e.id = l.episode_id
           AND (e.lineage_mode IS NOT NULL AND
             (NOT coalesce(e.lineage_mode = l.lineage_mode,false) OR NOT coalesce(e.parent_recall_ids = l.parent_recall_ids,false)
              OR NOT coalesce(e.context_digests = l.context_digests,false) OR NOT coalesce(e.root_episode_ids = l.root_episode_ids,false)
              OR NOT coalesce(e.echo_depth = l.echo_depth,false) OR NOT coalesce(e.lineage_complete = l.complete,false))) }
       RETURN l.episode_id AS id,null AS episode,null AS mode LIMIT 20`);
-    const lineageJoined = await number(`MATCH (l:EchoLineage) MATCH (e:Episode) WHERE e.id = l.episode_id
+    const lineageJoined = await number(`MATCH (l:EchoLineage) MATCH (e:Element:Episode) WHERE e.id = l.episode_id
       RETURN count(DISTINCT e) AS count`);
     const existingLineage = await number(`MATCH (e:Episode) WHERE e.lineage_mode IS NOT NULL RETURN count(e) AS count`);
     const unrelatedLineage = (await session.run<{ id: string }>(`MATCH (e:Episode)
@@ -193,7 +199,7 @@ export async function main(options: Options = {}) {
       }>(
         `MATCH (l:EchoLineage)
          WHERE l.episode_id > $cursor
-         MATCH (e:Episode {id:l.episode_id})
+         MATCH (e:Element:Episode {id:l.episode_id})
          RETURN l.digest AS digest,l.body AS body,l.episode_id AS episode_id,l.lineage_mode AS lineage_mode,
            l.parent_recall_ids AS parent_recall_ids,l.context_digests AS context_digests,l.root_episode_ids AS root_episode_ids,
            l.echo_depth AS echo_depth,l.complete AS complete,e.lineage_digest AS episode_digest
@@ -230,7 +236,7 @@ export async function main(options: Options = {}) {
       && witnessMissing.length === 0 && witnessJoined === before.EntityWitness && existingWitness <= before.EntityWitness;
     if (!dryRun && gatesPass) {
       await session.run(`MATCH (l:EchoLineage) CALL (l) {
-        MATCH (e:Episode) WHERE e.id = l.episode_id
+        MATCH (e:Element:Episode) WHERE e.id = l.episode_id
         SET e.lineage_mode=l.lineage_mode,e.parent_recall_ids=l.parent_recall_ids,
             e.context_digests=l.context_digests,e.root_episode_ids=l.root_episode_ids,
             e.echo_depth=l.echo_depth,e.lineage_complete=l.complete,e.lineage_digest=l.digest
@@ -243,7 +249,7 @@ export async function main(options: Options = {}) {
       let cursor = "", verified = 0;
       while (true) {
         const rows = await session.run<{ id: string; digest: string | null; body: string; matches: boolean }>(
-          `MATCH (l:EchoLineage) MATCH (e:Episode {id:l.episode_id})
+          `MATCH (l:EchoLineage) MATCH (e:Element:Episode {id:l.episode_id})
            WHERE l.episode_id > $cursor
            RETURN l.episode_id AS id,e.lineage_digest AS digest,l.body AS body,
              coalesce(e.lineage_mode = l.lineage_mode,false) AND coalesce(e.parent_recall_ids = l.parent_recall_ids,false)
@@ -277,12 +283,12 @@ export async function main(options: Options = {}) {
       throw new Error("copy_mismatch: EntityWitness has incomplete, missing or conflicting Entities");
     }
     if (!dryRun && gatesPass) await session.run(`MATCH (w:EntityWitness {state:'COMPLETE'}) CALL (w) {
-      MATCH (e:Entity) WHERE e.id = w.entity_id
+      MATCH (e:Element:Entity) WHERE e.id = w.entity_id
       SET e.witness_generation=w.generation,e.witness_policy_revision=w.policy_revision
     } IN TRANSACTIONS OF ${batch} ROWS`);
     const witnessCount = dryRun || !gatesPass ? before.EntityWitness : await number("MATCH (e:Entity) WHERE e.witness_generation IS NOT NULL RETURN count(e) AS count");
     // Every witness row is re-read against its Entity after the copy; the pre-copy gate already proved the join is complete.
-    const witnessMismatchQuery = `MATCH (w:EntityWitness) MATCH (e:Entity) WHERE e.id = w.entity_id
+    const witnessMismatchQuery = `MATCH (w:EntityWitness) MATCH (e:Element:Entity) WHERE e.id = w.entity_id
         AND (NOT coalesce(e.witness_generation = w.generation,false)
           OR NOT coalesce(e.witness_policy_revision = w.policy_revision,false))`;
     const witnessMismatchCount = dryRun || !gatesPass ? 0 : await number(`${witnessMismatchQuery} RETURN count(w) AS count`);
