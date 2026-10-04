@@ -237,7 +237,10 @@ export class EmbeddingStore {
     // the vector commit and the entry's deletion, or a seeded ledger. Quarantined, it would hide the Episode from
     // the scan below and never be visited by `due`, so every drain first reconciles the ledger against the graph.
     const byProfile = new Map<string, string[]>();
-    for (const [id, entry] of entries) byProfile.set(entry.profile_id, [...byProfile.get(entry.profile_id) ?? [], id]);
+    for (const [id, entry] of entries) {
+      const ids = byProfile.get(entry.profile_id);
+      if (ids) ids.push(id); else byProfile.set(entry.profile_id, [id]);
+    }
     const stale = new Set<string>();
     for (const [profile, ids] of byProfile) {
       for (const row of await this.core.run<{ id: string }>(
