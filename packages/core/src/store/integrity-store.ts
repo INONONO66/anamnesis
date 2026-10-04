@@ -136,6 +136,21 @@ export class IntegrityStore {
     const quarantined = (await this.core.embeddingLedger.list())
       .filter(([, entry]) => entry.state === "quarantined" && (profile === null || entry.profile_id === profile))
       .map(([id]) => id);
+    // `$profile IS NULL OR v.profile_id=$profile` inside the EXISTS defeats the
+    // (episode_id, profile_id) index: the planner falls back to a label scan of
+    // every EmbeddingVector per Episode (production: 133k x 126k, killed after
+    // 6 minutes; the ops client gives up at 30 s). The
+    // profile branch seeks the composite index; without a provider the embedded
+    // ids are collected once and anti-joined in memory.
+    const pending = profile === null
+      ? `CALL () { MATCH (v:EmbeddingVector) RETURN collect(DISTINCT v.episode_id) AS embedded }
+         MATCH (e:Element:Episode)
+         WHERE NOT e.id IN $quarantined AND NOT e.id IN embedded
+         RETURN count(e) AS pending`
+      : `MATCH (e:Element:Episode)
+         WHERE NOT e.id IN $quarantined
+           AND NOT EXISTS { MATCH (:EmbeddingVector {episode_id:e.id, profile_id:$profile}) }
+         RETURN count(e) AS pending`;
     const rows = await this.core.run<{
       elements: number;
       links: number;
@@ -143,13 +158,7 @@ export class IntegrityStore {
     }>(
       `CALL () { MATCH (e:Element) RETURN count(e) AS elements }
        CALL () { MATCH (:Element)-[l]->(:Element) RETURN count(l) AS links }
-       CALL () { MATCH (e:Element:Episode)
-                 WHERE NOT e.id IN $quarantined
-                   AND NOT EXISTS {
-                     MATCH (v:EmbeddingVector {episode_id:e.id})
-                     WHERE $profile IS NULL OR v.profile_id=$profile
-                   }
-                 RETURN count(e) AS pending }
+       CALL () { ${pending} }
        RETURN elements, links, pending`,
       { profile, quarantined },
     );
