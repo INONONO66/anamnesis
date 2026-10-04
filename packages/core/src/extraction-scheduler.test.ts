@@ -10,6 +10,7 @@ import { ExtractionScheduler } from "./extraction-scheduler.ts";
 import { ExtractionProviderError, type ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
 import type { ExtractionJournalEntry } from "./store/extraction-journal.ts";
+import type { MaterializationStateEntry } from "./store/materialization-state.ts";
 import type { ModelTask } from "@anamnesis/protocol";
 
 const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
@@ -43,6 +44,7 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
   let offset = 0, calls = 0;
   const audit: { event: string; fields: Record<string, unknown> }[] = [];
   const snapshots = new Map<string, ExtractionJournalEntry>();
+  const operationSnapshots = new Map<string, MaterializationStateEntry>();
   const clock = () => Date.now() + offset;
   const advance = (ms: number) => { offset += ms; };
   const provider = { model, modelIncarnation: incarnation, async extract(input: ExtractionProviderInput) {
@@ -50,6 +52,10 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
   } };
   const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock,
     audit: (event, fields) => { audit.push({ event, fields }); } });
+  const saveOperation = engine.store.materializationState.set.bind(engine.store.materializationState);
+  engine.store.materializationState.set = async (id, entry) => { await saveOperation(id, entry); operationSnapshots.set(id, structuredClone(entry)); };
+  const saveEntry = engine.store.extractionJournal.set.bind(engine.store.extractionJournal);
+  engine.store.extractionJournal.set = async (id, entry) => { await saveEntry(id, entry); snapshots.set(id, structuredClone(entry)); };
   await query("MATCH (n) DETACH DELETE n");
   await engine.init(); await engine.claimWriterEpoch();
   const wakes: number[] = [];
@@ -98,7 +104,7 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
     }
     return status;
   };
-  return { engine, scheduler, query, wakes, audit, snapshots, calls: () => calls, root, remember, settle,
+  return { engine, scheduler, query, wakes, audit, snapshots, operationSnapshots, calls: () => calls, root, remember, settle,
     async close() { await scheduler.close(); await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -139,14 +145,16 @@ test("relation judge exhausted on initial catch-up seals the source as a durable
     });
     expect(status).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 1, failed_total: 1, last_error: null });
     expect(await f.query("MATCH (f:Fact) RETURN f.content AS content")).toEqual([{ content: "Alice likes dark mode" }]);
-    const custody = await f.query("MATCH (o:MaterializationOperation) WHERE o.result CONTAINS 'relation_judge_exhausted' RETURN o.result AS result, o.fact_id AS fact");
+    const custody = [...f.operationSnapshots.values()].filter(entry => "omitted" in entry.result && entry.result.omitted === "relation_judge_exhausted");
     expect(custody).toHaveLength(1);
-    const result = JSON.parse(String(custody[0]!.result)) as { created: boolean; facts: number; omitted: string; failures: number; occurrences: string[] };
+    const result = custody[0]?.result;
     expect(result).toMatchObject({ created: false, facts: 0, omitted: "relation_judge_exhausted", failures: 4 });
+    if (!result || !("occurrences" in result) || !result.occurrences) throw new Error("missing omission occurrences");
     expect(result.occurrences).toHaveLength(1);
-    expect(String(custody[0]!.fact)).toMatch(/^suppressed:/);
+    expect(custody[0]?.fact_ids).toEqual([]);
     // The first Episode's premise had no candidates (failures 0, judged trivially); only the second owed a verdict.
-    const inputs = await f.query("MATCH (i:FactRelationInput) RETURN i.candidates AS candidates, i.failures AS failures ORDER BY candidates");
+    const inputs = [...f.snapshots.values()].flatMap(entry => entry.relations?.verdicts ?? [])
+      .map(verdict => ({ candidates: verdict.context.candidates.length, failures: verdict.failures })).sort((a, b) => a.candidates - b.candidates);
     expect(inputs).toEqual([{ candidates: 0, failures: 0 }, { candidates: 1, failures: 4 }]);
     // The seal is terminal: another turn neither calls the provider again nor changes the lane.
     const before = f.calls();
@@ -156,6 +164,7 @@ test("relation judge exhausted on initial catch-up seals the source as a durable
     // Idempotency and non-exhausted rejection were checked while each entry still existed, before coverage pruned it.
     expect(sealed.sort()).toEqual(["Error: invalid_transition", false]);
     expect(await f.engine.store.extractionJournal.list()).toEqual([]);
+    expect(await f.engine.store.materializationState.list()).toEqual([]);
     expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(2);
     expect(f.audit).toContainEqual(expect.objectContaining({ event: "extraction.pipeline.materialized",
       fields: expect.objectContaining({ relation_judge: "omitted", facts: 0 }) }));

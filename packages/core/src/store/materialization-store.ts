@@ -31,6 +31,10 @@ function admittedClaims(decisions: ExtractionDisposition[], claimOutput: Extract
 }
 type AdmittedClaim = ReturnType<typeof admittedClaims>[number];
 
+function pendingRelations(entry: ExtractionJournalEntry | undefined) {
+  return (entry?.relations?.verdicts ?? []).filter(verdict => verdict.context.candidates.length > 0 && verdict.judgements === null);
+}
+
 /** What one materialization pass over a source shares between its claims. Entities first seen in the pass keep one
  * allocated id per entity_key, so two claims of one source share a single new Entity whichever is written first. */
 interface MaterializationPass {
@@ -453,20 +457,19 @@ export class MaterializationStore {
     return { semantic_writes: created, relation_judge: relationJudge };
   }
   /** One validated claim's relation premise: its ACTIVE same-entity Facts of the
-   * generation (cap 16), persisted once per occurrence as a `FactRelationInput` so
+   * generation (cap 16), persisted once per occurrence in the extraction journal so
    * the provider's verdict binds to a fixed digest. Returns the recorded judgements,
    * `[]` when there is nobody to compare against, or "pending" while the verdict is owed. */
   private async factRelationVerdictTx(tx: ManagedTransaction, input: {
     occurrence: string; pipeline_id: string; source: SemanticReviewPremises["source"]; generation: string; validated: ValidatedSemanticClaim;
   }): Promise<FactRelationJudgement[] | "pending"> {
     const { occurrence, generation, validated } = input;
-    const known = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) OPTIONAL MATCH (v:FactRelationVerdict {occurrence_key:$key})
-      RETURN i.candidates AS candidates, v.judgements AS judgements`, { key: occurrence });
-    const row = known.records[0];
-    if (row) {
-      if (row.get("candidates") === 0) return [];
-      const judgements = row.get("judgements");
-      return typeof judgements === "string" ? z.array(FactRelationJudgement).parse(JSON.parse(judgements)) : "pending";
+    const entry = await this.core.extractionJournal.get(input.pipeline_id);
+    if (!entry) throw new ExtractionAuditError("extraction_audit_conflict");
+    const known = entry.relations?.verdicts.find(verdict => verdict.key === occurrence);
+    if (known) {
+      if (known.context.candidates.length === 0) return [];
+      return known.judgements ?? "pending";
     }
     // Vector neighbours are not consulted: no Fact vector index exists in this schema.
     const rows = await tx.run(`MATCH (f:Fact {generation:$generation})-[:MENTIONS]->(e:Entity) WHERE e.id IN $entities
@@ -476,8 +479,13 @@ export class MaterializationStore {
     const candidates = rows.records.map(record => ({ id: record.get("id"), text: record.get("text"), time: { value: record.get("value"), precision: record.get("precision") } }));
     const body = { fact: { text: validated.claim.content, time: validatedFactTime(validated, input.source) }, candidates };
     const context = FactRelationContext.parse({ body_digest: extractionBodyDigest(body), ...body });
-    await tx.run(`CREATE (:FactRelationInput {occurrence_key:$key,pipeline_id:$pipeline,source_episode_id:$source,generation:$generation,body_digest:$digest,context:$context,candidates:$count,last_failure:null,failures:0})`,
-      { key: occurrence, pipeline: input.pipeline_id, source: input.source.id, generation, digest: context.body_digest, context: canonicalExtractionBody(context), count: neo4j.int(candidates.length) });
+    const verdicts = [...(entry.relations?.verdicts ?? []), {
+      key: occurrence, context, judgements: null, failures: 0, last_failure: null, last_failure_detail: null,
+      model: null, model_incarnation: null, reported_model: null,
+    }];
+    await this.core.extractionJournal.set(input.pipeline_id, { ...entry, relations: {
+      context_digest: extractionBodyDigest(verdicts.map(({ key, context }) => ({ key, context_digest: context.body_digest }))), verdicts,
+    } });
     return candidates.length ? "pending" : [];
   }
   /** Mechanical application of relation verdicts, read-only: the confidence floor,
@@ -568,13 +576,12 @@ export class MaterializationStore {
       await this.core.authorizeEpisodesTx(tx, [pipeline.claim.source_id], policy);
       await this.core.writableExtractionGenerationTx(tx, pipeline.claim.generation_id);
       const custody = extractionBodyDigest([pipeline.claim.generation_id, pipeline.claim.source_id]);
-      const pending = await tx.run(`MATCH (i:FactRelationInput {pipeline_id:$pipeline}) WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
-        RETURN i.occurrence_key AS occurrence, i.failures AS failures ORDER BY occurrence`, { pipeline: pipelineId });
-      const failures = pending.records.reduce((max, row) => Math.max(max, Number(row.get("failures") ?? 0)), 0);
+      const pending = pendingRelations(await this.core.extractionJournal.get(pipelineId));
+      const failures = pending.reduce((max, verdict) => Math.max(max, verdict.failures), 0);
       if (pipeline.relation_judge === "omitted") return { sealed: false, failures };
       if (pipeline.relation_judge !== "pending") throw new Error("invalid_transition");
       if (failures < minFailures) throw new Error("relation_omission_premature");
-      const occurrences = pending.records.map(row => String(row.get("occurrence")));
+      const occurrences = pending.map(verdict => verdict.key).sort();
       await this.recordMaterialization({ operationId: uuidv7(),
         digest: extractionBodyDigest({ generation: pipeline.claim.generation_id, source: pipeline.claim.source_id, judge: pipeline.judge.id, omitted: "relation_judge_exhausted", occurrences }),
         occurrence: custody, source: { id: pipeline.claim.source_id, ingest_seq: pipeline.claim.source_ingest_seq }, generation: pipeline.claim.generation_id },
@@ -590,38 +597,36 @@ export class MaterializationStore {
   /** Relation premises of one pipeline that still owe a verdict (candidates present, none recorded). */
   async pendingFactRelationInputs(pipelineId: string, context: InstallationContext): Promise<{ key: string; context: FactRelationContext }[]> {
     return this.core.extractionTx(context, async (tx, policy) => {
-      const rows = await tx.run(`MATCH (i:FactRelationInput {pipeline_id:$pipeline}) WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
-        RETURN i.occurrence_key AS key, i.context AS context, i.source_episode_id AS source ORDER BY key`, { pipeline: z.uuidv7().parse(pipelineId) });
-      const sources = new Set<string>(rows.records.map(row => String(row.get("source"))));
-      if (sources.size) await this.core.authorizeEpisodesTx(tx, [...sources], policy);
-      return rows.records.map(row => ({ key: String(row.get("key")), context: FactRelationContext.parse(JSON.parse(String(row.get("context")))) }));
+      const entry = await this.core.extractionJournal.get(z.uuidv7().parse(pipelineId));
+      const pending = pendingRelations(entry);
+      if (entry && pending.length) await this.core.authorizeEpisodesTx(tx, [entry.source_id], policy);
+      return pending.map(verdict => ({ key: verdict.key, context: verdict.context })).sort((a, b) => a.key.localeCompare(b.key));
     });
   }
   /** Highest recorded provider-failure count among the premises of one pipeline that still owe a verdict;
    * the scheduler seals a source whose relation judge keeps failing as a terminal omission (D53). */
   async factRelationFailures(pipelineId: string, context: InstallationContext): Promise<number> {
-    return this.core.extractionTx(context, async tx => {
-      const rows = await tx.run(`MATCH (i:FactRelationInput {pipeline_id:$pipeline}) WHERE i.candidates > 0 AND NOT EXISTS { MATCH (:FactRelationVerdict {occurrence_key:i.occurrence_key}) }
-        RETURN coalesce(max(i.failures), 0) AS failures`, { pipeline: z.uuidv7().parse(pipelineId) });
-      return Number(rows.records[0]?.get("failures") ?? 0);
+    return this.core.extractionTx(context, async () => {
+      const entry = await this.core.extractionJournal.get(z.uuidv7().parse(pipelineId));
+      return pendingRelations(entry).reduce((max, verdict) => Math.max(max, verdict.failures), 0);
     });
   }
   /** Records the provider's answer for one premise: a verdict bound to the premise
    * digest (written once), or the failure reason that keeps the pipeline pending. */
   async recordFactRelationVerdict(input: { key: string } & ({ judgements: FactRelationJudgement[]; model: string; model_incarnation: string; reported_model?: string } | { failure: string; detail?: ExtractionFailureDetail }), context: InstallationContext): Promise<void> {
     await this.core.extractionTx(context, async (tx, policy) => {
-      const premise = await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) RETURN i.source_episode_id AS source, i.body_digest AS digest`, { key: input.key });
-      const row = premise.records[0];
-      if (!row) throw new ExtractionAuditError("extraction_audit_conflict");
-      await this.core.authorizeEpisodesTx(tx, [String(row.get("source"))], policy);
-      if ("failure" in input) {
-        await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=$failure, i.last_failure_detail=$detail, i.failures=coalesce(i.failures,0)+1`,
-          { key: input.key, failure: input.failure, detail: input.detail ?? null });
-        return;
-      }
-      await tx.run(`MATCH (i:FactRelationInput {occurrence_key:$key}) SET i.last_failure=null, i.last_failure_detail=null
-        MERGE (v:FactRelationVerdict {occurrence_key:$key}) ON CREATE SET v.body_digest=$digest, v.judgements=$judgements, v.model=$model, v.model_incarnation=$incarnation, v.reported_model=$reported`,
-        { key: input.key, digest: String(row.get("digest")), judgements: canonicalExtractionBody(z.array(FactRelationJudgement).max(16).parse(input.judgements)), model: input.model, incarnation: input.model_incarnation, reported: input.reported_model ?? null });
+      const entry = await this.core.extractionJournal.byRelation(input.key);
+      const relations = entry?.relations;
+      const premise = relations?.verdicts.find(verdict => verdict.key === input.key);
+      if (!entry || !relations || !premise) throw new ExtractionAuditError("extraction_audit_conflict");
+      await this.core.authorizeEpisodesTx(tx, [entry.source_id], policy);
+      const updated = "failure" in input
+        ? { ...premise, last_failure: input.failure, last_failure_detail: input.detail ?? null, failures: premise.failures + 1 }
+        : { ...premise, last_failure: null, last_failure_detail: null,
+          ...(premise.judgements === null ? { judgements: z.array(FactRelationJudgement).max(16).parse(input.judgements),
+            model: input.model, model_incarnation: input.model_incarnation, reported_model: input.reported_model ?? null } : {}) };
+      await this.core.extractionJournal.set(entry.claim.id, { ...entry,
+        relations: { ...relations, verdicts: relations.verdicts.map(verdict => verdict.key === input.key ? updated : verdict) } });
     });
   }
 }

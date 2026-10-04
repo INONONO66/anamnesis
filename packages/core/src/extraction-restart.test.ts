@@ -45,7 +45,12 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   const query = async (cypher: string, params: Record<string, unknown> = {}): Promise<Row[]> => (await driver.executeQuery(cypher, params)).records.map(row => row.toObject());
   const read = async (cypher: string, params: Record<string, unknown>) => (await query(cypher, params)) as never;
   const journalPath = join(root, "extraction-state.json");
+  const materializationStatePath = join(root, "materialization-state.json");
   const snapshots = new Map<string, ExtractionJournalEntry>();
+  const captureWrites = (engine: Engine) => {
+    const set = engine.store.extractionJournal.set.bind(engine.store.extractionJournal);
+    engine.store.extractionJournal.set = async (id, entry) => { await set(id, entry); snapshots.set(id, structuredClone(entry)); };
+  };
   const audit: { event: string; fields: Record<string, unknown> }[] = [];
   // Read from disk afresh: Engine A's in-memory journal cannot observe Engine B's writes.
   const entries = () => new ExtractionJournal(journalPath).list();
@@ -63,7 +68,8 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     return answerA(input);
   } };
   const engineA = new Engine({ uri, password, objectsRoot: root, extractionProvider: providerA, clock,
-    extractionJournalPath: journalPath, audit: (event, fields) => { audit.push({ event, fields }); } });
+    extractionJournalPath: journalPath, materializationStatePath, audit: (event, fields) => { audit.push({ event, fields }); } });
+  captureWrites(engineA);
   await query("MATCH (n) DETACH DELETE n");
   await engineA.init(); await engineA.claimWriterEpoch();
   const schedulerA = new ExtractionScheduler(engineA, { provider: providerA, context, clock, maxAttempts: 4, maxInFlight: 1, read, wake: () => {} });
@@ -80,6 +86,7 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   };
   return {
     query, tasks, capturedTasks, capturedAttempts, entries, audit, remember,
+    capturedRelations: () => [...snapshots.values()].flatMap(entry => entry.relations?.verdicts ?? []),
     /** Turns daemon A until the selected provider call is in flight (the state a SIGTERM/SIGKILL finds). A failed attempt
      * retries only after its backoff, so between turns the shared clock moves past every failed task's retry moment. */
     async runUntilHung() {
@@ -96,7 +103,8 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     async restart(incarnation: string) {
       const provider: ExtractionProvider = { model, modelIncarnation: incarnation, reportedModelIncarnation: reportedB, async extract(input) { return answer(input); } };
       const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider, clock,
-        extractionJournalPath: journalPath, audit: (event, fields) => { audit.push({ event, fields }); } });
+        extractionJournalPath: journalPath, materializationStatePath, audit: (event, fields) => { audit.push({ event, fields }); } });
+      captureWrites(engine);
       await engine.init(); await engine.claimWriterEpoch();
       const scheduler = new ExtractionScheduler(engine, { provider, context, clock, maxAttempts: 4, maxInFlight: 1, read, wake: () => {} });
       daemons.push({ engine, scheduler });
@@ -218,9 +226,11 @@ test("a relation judge in flight across a restart is judged by the new daemon ev
     expect(tasks.map(task => task.state)).toEqual(["succeeded", "succeeded", "succeeded", "succeeded"]);
     const schedulerB = await f.restart(incarnationB);
     expect(await f.settle(schedulerB, 2)).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 1, failed_total: 0, last_error: null });
-    expect(await f.query("MATCH (i:FactRelationInput) RETURN i.candidates AS candidates, i.failures AS failures, i.last_failure AS failure ORDER BY candidates"))
+    expect(f.capturedRelations().map(verdict => ({ candidates: verdict.context.candidates.length, failures: verdict.failures, failure: verdict.last_failure }))
+      .sort((a, b) => a.candidates - b.candidates))
       .toEqual([{ candidates: 0, failures: 0, failure: null }, { candidates: 1, failures: 0, failure: null }]);
-    expect(await f.query("MATCH (v:FactRelationVerdict) RETURN v.model_incarnation AS incarnation, v.reported_model AS reported")).toEqual([{ incarnation: incarnationB, reported: reportedB }]);
+    expect(f.capturedRelations().filter(verdict => verdict.judgements !== null)
+      .map(verdict => ({ incarnation: verdict.model_incarnation, reported: verdict.reported_model }))).toEqual([{ incarnation: incarnationB, reported: reportedB }]);
     expect((await f.query("MATCH (f:Fact) RETURN f.content AS content ORDER BY content")).map(row => row.content)).toEqual(["Alice likes dark mode", "Alice likes light mode"]);
     expect(await f.entries()).toEqual([]);
     expect(f.audit.filter(({ event }) => event === "extraction.pipeline.pruned")).toHaveLength(2);

@@ -1,6 +1,27 @@
-import { ExtractionAttempt, ExtractionDisposition, ExtractionJudgeInput, ModelTask } from "@anamnesis/protocol";
+import { ExtractionAttempt, ExtractionDisposition, ExtractionJudgeInput, ModelTask,
+  FactRelationContext, FactRelationJudgement, ExtractionFailureDetail, extractionBodyDigest } from "@anamnesis/protocol";
 import { z } from "zod";
 import { StateFile } from "./state-file.ts";
+
+const hash = z.string().regex(/^[0-9a-f]{64}$/);
+const RelationEntry = z.strictObject({
+  key: hash,
+  context: FactRelationContext.refine(({ body_digest, ...body }) => extractionBodyDigest(body) === body_digest, "relation context digest mismatch"),
+  judgements: z.array(FactRelationJudgement).max(16).nullable(),
+  failures: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  last_failure: z.string().nullable(), last_failure_detail: ExtractionFailureDetail.nullable(),
+  model: ModelTask.shape.model.nullable(), model_incarnation: hash.nullable(), reported_model: z.string().nullable(),
+}).refine(value => value.judgements === null || (
+  value.judgements.length === value.context.candidates.length
+  && new Set(value.judgements.map(judgement => judgement.candidate_id)).size === value.context.candidates.length
+  && value.judgements.every(judgement => value.context.candidates.some(candidate => candidate.id === judgement.candidate_id))
+), "relation candidate coverage mismatch");
+const Relations = z.strictObject({
+  context_digest: hash,
+  verdicts: z.array(RelationEntry).max(64),
+}).refine(value => new Set(value.verdicts.map(verdict => verdict.key)).size === value.verdicts.length
+  && value.context_digest === extractionBodyDigest(value.verdicts.map(({ key, context }) => ({ key, context_digest: context.body_digest }))),
+"relation premises digest mismatch");
 
 const Entry = z.strictObject({
   work_key: z.string(),
@@ -13,6 +34,7 @@ const Entry = z.strictObject({
   judge_attempt: ExtractionAttempt.nullable(),
   decisions: z.array(ExtractionDisposition).max(64),
   attempts: z.array(ExtractionAttempt).max(32),
+  relations: Relations.optional(),
   // Original requests cannot be reconstructed after provider adoption or a
   // server-rewritten outcome (policy denial, changed premises, judge mismatch).
   creation_digest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
@@ -66,6 +88,10 @@ export class ExtractionJournal {
 
   async byTask(taskId: string): Promise<ExtractionJournalEntry | undefined> {
     return (await this.list()).find(([, entry]) => entry.claim.id === taskId || entry.judge?.id === taskId)?.[1];
+  }
+
+  async byRelation(key: string): Promise<ExtractionJournalEntry | undefined> {
+    return (await this.list()).find(([, entry]) => entry.relations?.verdicts.some(verdict => verdict.key === key))?.[1];
   }
 
   async pending(generationId: string): Promise<[string, ExtractionJournalEntry][]> {

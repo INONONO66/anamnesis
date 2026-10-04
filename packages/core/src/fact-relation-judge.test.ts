@@ -54,7 +54,9 @@ async function setup() {
         return { candidate_id: candidate.id, ...verdict, reason: `${relation.fact.text} vs ${candidate.text}` };
       }) };
   } };
-  const engine = new Engine({ uri, password, objectsRoot: root, extractionProvider: provider });
+  const options = { uri, password, objectsRoot: root, extractionProvider: provider,
+    extractionJournalPath: join(root, "extraction-state.json"), materializationStatePath: join(root, "materialization-state.json") };
+  const engine = new Engine(options);
   await query("MATCH (n) DETACH DELETE n");
   await engine.init(); await engine.claimWriterEpoch();
   const generation = { id: uuidv7(), stream: "extraction", incarnation, state: "catching_up" as const, covered_ingest_seq: 0, created_at: 100, updated_at: 100 };
@@ -72,9 +74,13 @@ async function setup() {
     expect(rows).toHaveLength(1);
     return rows[0]!.p as Record<string, unknown>;
   };
-  const operations = async (sourceId: string) => (await query("MATCH (o:MaterializationOperation {source_episode_id:$source}) RETURN o.fact_id AS fact, o.result AS result ORDER BY o.fact_id", { source: sourceId }))
-    .map(row => ({ fact: String(row.fact), result: JSON.parse(String(row.result)) as Record<string, unknown> }));
-  return { engine, query, generation, ingest, factByContent, operations, relationInputs, faults, driver,
+  const operations = async (sourceId: string): Promise<{ fact: string; result: Record<string, unknown> }[]> =>
+    (await engine.store.materializationState.list()).filter(([, entry]) => entry.source_episode_id === sourceId)
+      .map(([, entry]) => ({ fact: "fact_id" in entry.result ? entry.result.fact_id
+        : "facts" in entry.result ? `${entry.result.created ? "custody" : "suppressed"}:${sourceId}` : entry.occurrence_key,
+      result: entry.result })).sort((a, b) => a.fact.localeCompare(b.fact));
+  const relations = async () => (await engine.store.extractionJournal.list()).flatMap(([, entry]) => entry.relations?.verdicts ?? []);
+  return { engine, query, generation, ingest, factByContent, operations, relations, relationInputs, faults, driver, options,
     async close() { await engine.close(); await driver.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -88,7 +94,7 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(firstResult.state === "known" && firstResult.semantic_writes).toBe(true);
     expect(f.relationInputs).toHaveLength(0);
     const dark = await f.factByContent("Alice prefers dark mode");
-    expect(await f.query("MATCH (p:FactRelationInput) RETURN p.candidates AS candidates")).toEqual([{ candidates: 0 }]);
+    expect((await f.relations()).map(verdict => verdict.context.candidates.length)).toEqual([0]);
 
     // E2: provider fails twice (transport, then a verdict bound to the wrong premise); the pipeline stays pending without writes.
     f.faults.push("throw", "digest");
@@ -99,11 +105,12 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
       expect(pending.state === "known" && pending.relation_judge).toBe("pending");
       expect(pending.state === "known" && pending.semantic_writes).toBe(false);
       expect(await f.query("MATCH (f:Fact) RETURN count(f) AS count")).toEqual([{ count: 1 }]);
-      expect(await f.query("MATCH (v:FactRelationVerdict) RETURN count(v) AS count")).toEqual([{ count: 0 }]);
+      expect((await f.relations()).filter(verdict => verdict.judgements !== null)).toHaveLength(0);
     }
     expect(f.relationInputs).toHaveLength(2);
-    expect(await f.query("MATCH (p:FactRelationInput {source_episode_id:$source}) RETURN p.candidates AS candidates, p.last_failure AS failure, p.last_failure_detail AS detail", { source: second.source.id }))
-      .toEqual([{ candidates: 1, failure: "provider_mismatch", detail: "digest" }]);
+    expect((await f.engine.store.extractionJournal.get(second.task.id))?.relations?.verdicts)
+      .toEqual([expect.objectContaining({ context: expect.objectContaining({ candidates: expect.arrayContaining([expect.objectContaining({ id: dark.id })]) }),
+        last_failure: "provider_mismatch", last_failure_detail: "digest", failures: 2 })]);
     const completed = await second.run();
     expect(completed.state === "known" && completed.relation_judge).toBe("complete");
     expect(completed.state === "known" && completed.semantic_writes).toBe(true);
@@ -131,9 +138,9 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(await second.run()).toEqual(completed);
     expect(await f.engine.store.authoritySnapshot(context)).toEqual(snapshot);
     expect(f.relationInputs).toHaveLength(3);
-    expect(await f.query("MATCH (v:FactRelationVerdict) RETURN count(v) AS count")).toEqual([{ count: 1 }]);
+    expect((await f.relations()).filter(verdict => verdict.judgements !== null)).toHaveLength(1);
     expect(await f.query("MATCH ()-[l:INVALIDATES]->() RETURN count(l) AS count")).toEqual([{ count: 1 }]);
-    expect(await f.query("MATCH (o:MaterializationOperation) RETURN count(o) AS count")).toEqual([{ count: 4 }]);
+    expect(await f.engine.store.materializationState.list()).toHaveLength(4);
 
     // E3: the invalidated Fact is no longer a candidate; invalidating an invalidator is refused, never chained.
     const third = await f.ingest("Alice prefers dark mode again [2026-09-03].");
@@ -174,6 +181,39 @@ test("relation judge gates validated Facts: invalidates, chain refusal, duplicat
     expect(await f.query("MATCH (g:ExtractionGeneration) RETURN g.state AS state")).toEqual([{ state: "active" }]);
     expect((await f.engine.checkConductingArcs()).issues).toEqual([]);
   } finally { await f.close(); }
+}, 180000);
+
+test("a persisted relation verdict reconciles after a crash before materialization", async () => {
+  const f = await setup();
+  let restarted: Engine | undefined;
+  try {
+    const first = await f.ingest("Alice prefers dark mode [2026-09-01].");
+    await first.run();
+    const second = await f.ingest("Alice prefers light mode [2026-09-02].");
+    const persist = f.engine.store.recordFactRelationVerdict.bind(f.engine.store);
+    f.engine.store.recordFactRelationVerdict = async (input, installation) => {
+      await persist(input, installation);
+      throw new Error("crash_after_verdict");
+    };
+    await expect(second.run()).rejects.toThrow("crash_after_verdict");
+    expect((await f.engine.store.extractionJournal.get(second.task.id))?.relations?.verdicts)
+      .toEqual([expect.objectContaining({ judgements: [expect.objectContaining({ relation: "invalidates" })] })]);
+    expect(await f.query("MATCH (f:Fact) RETURN count(f) AS n")).toEqual([{ n: 1 }]);
+    const calls = f.relationInputs.length;
+
+    restarted = new Engine(f.options);
+    await restarted.claimWriterEpoch();
+    const result = await restarted.runExtractionPipeline({ task_id: second.task.id, expected_version: second.task.version,
+      worker_id: "after-crash", lease_ms: 30000 }, context);
+
+    expect(result).toMatchObject({ state: "known", semantic_writes: true, relation_judge: "complete" });
+    expect(f.relationInputs).toHaveLength(calls);
+    expect(await f.query("MATCH (f:Fact) RETURN count(f) AS n")).toEqual([{ n: 2 }]);
+    expect(await f.query("MATCH (:Fact)-[l:INVALIDATES]->(:Fact) RETURN count(l) AS n")).toEqual([{ n: 1 }]);
+    expect(await restarted.runExtractionPipeline({ task_id: second.task.id, expected_version: second.task.version,
+      worker_id: "after-crash", lease_ms: 30000 }, context)).toEqual(result);
+    expect(await f.query("MATCH (f:Fact) RETURN count(f) AS n")).toEqual([{ n: 2 }]);
+  } finally { await restarted?.close(); await f.close(); }
 }, 180000);
 
 test("backup evidence covers originals without mutating history and refuses incomplete authority", async () => {
