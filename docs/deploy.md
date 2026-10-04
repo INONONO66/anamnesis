@@ -24,20 +24,24 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
 
 This one-shot migration runs from `/opt/anamnesis`. The production host has only `node`; `bun run build:runtime` bundles the script to `dist/anamnesis-migrate-240.mjs` (in a dev checkout, `bun scripts/migrate-embedding-ledgers.ts` takes the same flags). The `systemctl` steps need root; the migration itself runs as the `anamnesis` user so the ledger it writes is owned by the daemon. Quiesce the ingest timers before stopping the daemon, exactly as `deploy/vm/backup.sh` does: `anamnesis-ingest@.service` carries `Requires=anamnesis.service`, so a timer firing mid-migration would start the daemon again while its legacy ledgers are being copied.
 
+Run the steps one at a time in a root shell with `set -e`, so a stop that fails leaves the daemon untouched rather than migrating under a live process, and a migration that fails stops the sequence before the restart:
+
 ```sh
 # as root
+set -e
 timers=$(systemctl list-units --type=timer --state=active --plain --no-legend 'anamnesis-ingest@*' | awk '{print $1}')
 for t in $timers; do systemctl stop "$t"; done
 systemctl stop 'anamnesis-ingest@*.service' anamnesis
-runuser -u anamnesis -- sh -c '
-  cd /opt/anamnesis
-  set -a; . /etc/anamnesis/anamnesis.env; set +a
-  node dist/anamnesis-migrate-240.mjs --dry-run &&
-  node dist/anamnesis-migrate-240.mjs
-'
+runuser -u anamnesis -- sh -c 'cd /opt/anamnesis && set -a && . /etc/anamnesis/anamnesis.env && set +a && node dist/anamnesis-migrate-240.mjs --dry-run'
 ```
 
-The script first reports its JSON step lines, then writes the new ledger atomically to `${ANAMNESIS_RUNTIME_ROOT:-~/.anamnesis}/embedding-state.json` (normally `/var/lib/anamnesis/runtime/embedding-state.json`), removes the legacy schema objects, and deletes `EmbeddingAttempt` and `Outbox` nodes. Do not proceed past the dry run unless its counts are expected. With more than one embedding profile in the graph, pass `--profile <id>` for the daemon's active profile: without it the newest quarantine per Episode is seeded whichever profile it belongs to, and an entry for another profile does not keep the active lane from attempting that Episode once more.
+The dry run reports its JSON step lines (`inspect` with the `EmbeddingAttempt` and `Outbox` counts and whether the legacy constraint and index exist, `seed_ledger` with how many quarantines it would seed, `drop_schema` and `delete_legacy_ledgers` marked `dry_run`). Read them and continue only when they match what you expect; the real run is a separate command, never chained to the dry run:
+
+```sh
+runuser -u anamnesis -- sh -c 'cd /opt/anamnesis && set -a && . /etc/anamnesis/anamnesis.env && set +a && node dist/anamnesis-migrate-240.mjs'
+```
+
+It writes the new ledger atomically to `${ANAMNESIS_RUNTIME_ROOT:-~/.anamnesis}/embedding-state.json` (normally `/var/lib/anamnesis/runtime/embedding-state.json`), removes the legacy schema objects, and deletes `EmbeddingAttempt` and `Outbox` nodes. With more than one embedding profile in the graph, pass `--profile <id>` for the daemon's active profile: without it the newest quarantine per Episode is seeded whichever profile it belongs to, and an entry for another profile does not keep the active lane from attempting that Episode once more.
 
 Quarantined Episodes remain quarantined after the cutover. Re-drive selected ones after the daemon starts with `anamnesis-ops embed-requeue [--limit N]`; it removes their quarantine entries so the missing-vector scan can pick them up again.
 

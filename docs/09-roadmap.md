@@ -91,13 +91,15 @@ reading):
   roots and depth match its parents, overflow past 16 roots or depth 8 sets
   `complete=false` and `unknown`, and an echoed claim leaves `S`, `m`, utility
   and ranking bit-identical to the no-echo case.
-- embedding failure: a deterministic failure (`context_overflow`,
-  `wrong_dimension`, `malformed_response`, `client_error`) blocks the head
-  immediately, a lost worker lease closes its attempt `worker_lost`, three transient failures block
-  it after the fixed `[1000, 10000]` ms delays, the coverage cursor does not
-  move past the hole, and no later entry publishes a vector across it; an
-  authenticated retry or skip is the only way forward and each writes its
-  resolution record.
+- embedding failure (D54): a deterministic failure (`provider_rejected`,
+  `input_too_large`, `profile_mismatch`, `invalid_vector`, `stale_input`)
+  quarantines the Episode on its first attempt with one terminal record in
+  `embedding-state.json`; a transient failure defers with bounded backoff and
+  the ninth in a row quarantines as `provider_unavailable_exhausted`; a
+  quarantined Episode is never re-sent by the drain, and an authenticated
+  `embedding.recover` or `embedding.requeue` is the only way forward. The
+  generation-scoped head/cursor rule (`worker_lost`, terminal-prefix
+  coverage) is the design in 01 §4 and applies once that lane ships.
 
 ## v0.2 — derived layer, time, local PPR
 
