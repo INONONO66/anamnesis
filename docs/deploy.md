@@ -50,6 +50,31 @@ systemctl start anamnesis
 for t in $timers; do systemctl start "$t"; done
 ```
 
+## Migration: extraction ledgers out of Neo4j (G3)
+
+Run this one-shot migration from `/opt/anamnesis` after building `dist/anamnesis-migrate-g3.mjs` with `bun run build:runtime` in the development checkout. The production host runs the bundle with `node`. Stop **both `anamnesis.service` and `anamnesis-backup.timer`** before the dry run or live run: backups restart the daemon. Stop ingest timers and active ingest services as well, since an ingest service can start the daemon. In a root shell, run each step separately under `set -e`:
+
+```sh
+set -e
+timers=$(systemctl list-units --type=timer --state=active --plain --no-legend 'anamnesis-ingest@*' | awk '{print $1}')
+for t in $timers; do systemctl stop "$t"; done
+systemctl stop 'anamnesis-ingest@*.service' anamnesis-backup.timer anamnesis-backup.service anamnesis.service
+runuser -u anamnesis -- sh -c 'cd /opt/anamnesis && set -a && . /etc/anamnesis/anamnesis.env && set +a && node dist/anamnesis-migrate-g3.mjs --dry-run'
+```
+
+The `count_legacy` dry-run line should report `ExtractionDisposition=118343`, `ExtractionAttempt=102496`, `ModelTask=92115`, `ExtractionPipeline=47352`, and `ExtractionJudgeInput=47016` on the production snapshot. It should list exactly seven constraints: `extraction_attempt_id`, `extraction_disposition_key`, `extraction_judge_input_id`, `extraction_pipeline_id`, `extraction_pipeline_judge`, `model_task_id`, and `model_task_work_key`. Review the dry run before executing the live migration:
+
+```sh
+runuser -u anamnesis -- sh -c 'cd /opt/anamnesis && set -a && . /etc/anamnesis/anamnesis.env && set +a && node dist/anamnesis-migrate-g3.mjs'
+```
+
+The live run drops those seven constraints, deletes the five ledger labels in batches of 10,000 (override with `--batch N`), and emits `drop_schema`, `delete_legacy_ledgers`, and `verify` JSON lines. It exits non-zero if any legacy node or constraint remains. `ExtractionGeneration`, `ExtractionCoverage`, and their constraints survive. There is no journal seed: about 130 unsealed Episodes are re-driven by the scheduler after restart; materialization is idempotent.
+
+```sh
+systemctl start anamnesis.service anamnesis-backup.timer
+for t in $timers; do systemctl start "$t"; done
+```
+
 ## Optional TCP listener
 
 By default the daemon accepts RPC only on the Unix socket `<runtime root>/anamnesis.sock` (mode 0600), where filesystem permissions are the access control. Setting `ANAMNESIS_LISTEN` adds a TCP listener with identical framing and request handling; the socket keeps working unchanged. TCP has no filesystem check, so every TCP connection must prove possession of a bearer token before its first request.
