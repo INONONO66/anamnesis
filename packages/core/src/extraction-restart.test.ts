@@ -19,6 +19,9 @@ const context = { principal: "installation", commit_mode: "receipt", client_bind
 const model = "qa-restart", incarnationA = extractionBodyDigest("qa-restart:prompt-v1"), incarnationB = extractionBodyDigest("qa-restart:prompt-v2");
 const alice = { mention: "Alice", normalized_name: "Alice", entity_kind: "person" };
 const answer = (input: ExtractionProviderInput): unknown => {
+  if (input.task === "claim_window") return { task: "claim_window", episodes: input.episodes.map(({ id, text }) => ({
+    id, language: "en", modality: "text", claims: [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text }, confidence: 0.9, entities: [alice] }],
+  })) };
   const evidence = { start: 0, end: Buffer.byteLength(input.text), text: input.text };
   if (input.task === "claim") return { task: "claim", language: "en", modality: "text", claims: [{ text: input.text, evidence, confidence: 0.9, entities: [alice] }] };
   if (input.task === "judge_claims") return { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context!.body_digest,
@@ -60,11 +63,11 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   const capture = async () => { for (const [id, entry] of await entries()) snapshots.set(id, entry); };
   let offset = 0;
   const clock = () => Date.now() + offset;
-  let hung!: () => void, release!: (error: Error) => void;
+  let hung!: () => void, release!: () => void;
   const inFlightAtStop = new Promise<void>(resolve => { hung = resolve; });
-  const stopped = new Promise<never>((_, reject) => { release = reject; });
+  const stopped = new Promise<void>(resolve => { release = resolve; });
   const providerA: ExtractionProvider = { model, modelIncarnation: incarnationA, async extract(input) {
-    if (hangs(input)) { hung(); return stopped; }
+    if (hangs(input)) { hung(); await stopped; throw new Error("daemon stopped"); }
     return answerA(input);
   } };
   const engineA = new Engine({ uri, password, objectsRoot: root, extractionProvider: providerA, clock,
@@ -81,6 +84,7 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   /** Moves the shared clock past every failed task's retry backoff (the persisted schedule, not the lane's timer). */
   const elapseBackoff = async () => {
     const failed = (await tasks()).filter(task => task.state === "failed");
+    if (!failed.length) return;
     const due = Math.max(...failed.map(task => task.updated_at + modelTaskRetryDelayMs(task.attempts)));
     offset = Math.max(offset, due - Date.now() + 1);
   };
@@ -97,7 +101,7 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
         if (settled === "hung") return;
         await elapseBackoff();
       }
-      throw new Error("daemon A never reached the in-flight call");
+      throw new Error(`daemon A never reached the in-flight call: ${JSON.stringify(schedulerA.status())}`);
     },
     /** A fresh Engine claims the next writer epoch over the same database; its provider identity is `incarnation`. */
     async restart(incarnation: string) {
@@ -131,7 +135,7 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
     },
     async close() {
       // The old daemon's call returns after the epoch moved on: its drive fails the writer fence and settles without effect.
-      release(new Error("daemon stopped"));
+      release();
       for (const daemon of daemons) await daemon.scheduler.close();
       for (const daemon of daemons) await daemon.engine.close();
       await driver.close(); await rm(root, { recursive: true, force: true });
@@ -139,6 +143,28 @@ async function harness(hangs: (input: ExtractionProviderInput) => boolean, answe
   };
 }
 const attemptOutcomes = (attempts: Record<string, unknown>[]) => attempts.map(attempt => [attempt.state, attempt.reason]);
+
+test("a hung claim window restarts with per-Episode lost leases and exactly one Fact per source", async () => {
+  const f = await harness(input => input.task === "claim_window");
+  try {
+    await f.remember("Alice likes dark mode");
+    await f.remember("Alice keeps a paper calendar");
+    await f.runUntilHung();
+    expect((await f.tasks()).map(task => task.state)).toEqual(["leased", "leased"]);
+    const scheduler = await f.restart(incarnationB);
+    await f.expireLeases();
+    expect(await f.settle(scheduler, 2)).toMatchObject({
+      state: "active", covered_ingest_seq: 2, completed_total: 2, failed_total: 0, last_error: null,
+    });
+    expect(f.capturedAttempts().filter(attempt => attempt.state === "worker_lost")).toHaveLength(2);
+    expect(f.capturedTasks().filter(task => task.kind === "claim").map(task => [task.attempts, task.lost_leases])).toEqual([[1, 1], [1, 1]]);
+    const rows = await f.query("MATCH (f:Fact)-[:DERIVED_FROM]->(e:Episode) RETURN e.id AS episode,count(f) AS facts ORDER BY episode");
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => row.facts)).toEqual([1, 1]);
+    await f.settle(scheduler, 2);
+    expect(await f.query("MATCH (f:Fact) RETURN count(f) AS facts")).toEqual([{ facts: 2 }]);
+  } finally { await f.close(); }
+}, 60000);
 
 test("a judge lease in flight across a restart is settled and judged by the new daemon with the same provider identity", async () => {
   const f = await harness(input => input.task === "judge_claims");

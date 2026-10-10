@@ -369,7 +369,7 @@ export const RpcWorkersStatus = z.strictObject({
     /** The single writable generation the scheduler feeds. Watermarks are the last observed values; counters are per process lifetime. */
     z.strictObject({
       state: z.enum(["catching_up", "active"]), generation_id: z.uuidv7(), covered_ingest_seq: counter, live_ingest_seq: counter,
-      in_flight: counter.max(16), completed_total: counter, failed_total: counter, last_error: z.string().max(512).nullable(),
+      in_flight: counter.max(16), completed_total: counter, failed_total: counter, gated_total: counter, last_error: z.string().max(512).nullable(),
       pacing: RpcExtractionPacing,
     }),
   ]),

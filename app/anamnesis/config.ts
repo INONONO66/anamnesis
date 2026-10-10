@@ -11,7 +11,7 @@ const providerUrl = RpcEmbeddingAttempt.shape.model.refine(value => URL.canParse
 const providerName = RpcEmbeddingAttempt.shape.model.trim().min(1).max(256);
 const providerSecret = RpcEmbeddingAttempt.shape.model.refine(value => !/[\r\n]/.test(value));
 const providerPath = RpcEmbeddingAttempt.shape.model;
-export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v2.md", import.meta.url));
+export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v3.md", import.meta.url));
 export const DEFAULT_RELATION_PROMPT_FILE = fileURLToPath(new URL("./prompts/judge-relations.v1.md", import.meta.url));
 /** How the daemon meters its extraction provider: bounded in-flight pipelines plus a jittered minimum call interval. */
 export interface ExtractionPacingConfig { readonly maxInFlight: number; readonly minIntervalMs: number; readonly jitterFraction: number }
@@ -33,6 +33,9 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_LLM_DIALECT: providerName.refine(value => value === "openai_chat" || value === "anthropic_messages").transform(value => value as ExtractionDialect).optional(),
   ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
   ANAMNESIS_RELATION_PROMPT_FILE: providerPath.default(DEFAULT_RELATION_PROMPT_FILE),
+  ANAMNESIS_EXTRACTION_GATE: providerName.refine(value => value === "off" || value === "jev").default("off"),
+  ANAMNESIS_JEV_GATE_KEY_FILE: providerPath.default(join(homedir(), ".config/anamnesis/jev-vercel-gateway.key.json")),
+  ANAMNESIS_EXTRACTION_GATE_THRESHOLD: RpcExtractionPacing.shape.jitter_fraction.default(0.2),
   ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: RpcExtractionPacing.shape.max_in_flight.default(EXTRACTION_PACING_DEFAULTS.maxInFlight),
   ANAMNESIS_LLM_MIN_INTERVAL_MS: RpcExtractionPacing.shape.min_interval_ms.default(EXTRACTION_PACING_DEFAULTS.minIntervalMs),
   ANAMNESIS_LLM_JITTER_FRACTION: RpcExtractionPacing.shape.jitter_fraction.default(EXTRACTION_PACING_DEFAULTS.jitterFraction),
@@ -49,6 +52,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: numeric(env["ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT"]),
     ANAMNESIS_LLM_MIN_INTERVAL_MS: numeric(env["ANAMNESIS_LLM_MIN_INTERVAL_MS"]),
     ANAMNESIS_LLM_JITTER_FRACTION: numeric(env["ANAMNESIS_LLM_JITTER_FRACTION"]),
+    ANAMNESIS_EXTRACTION_GATE_THRESHOLD: numeric(env["ANAMNESIS_EXTRACTION_GATE_THRESHOLD"]),
   });
   if (!parsed.success) throw new Error(`invalid provider configuration: ${parsed.error.issues.map(issue => issue.path.join(".")).join(", ")}`);
   const config = parsed.data;
@@ -67,6 +71,9 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   const relationPromptFile = resolve(config.ANAMNESIS_RELATION_PROMPT_FILE);
   const relationPrompt = await fs.readFile(relationPromptFile, "utf8");
   if (!relationPrompt.trim()) throw new Error("empty ANAMNESIS_RELATION_PROMPT_FILE");
+  const gate = config.ANAMNESIS_EXTRACTION_GATE === "jev"
+    ? { kind: "jev" as const, keyFile: config.ANAMNESIS_JEV_GATE_KEY_FILE, threshold: config.ANAMNESIS_EXTRACTION_GATE_THRESHOLD }
+    : { kind: "off" as const };
   return {
     embedding: config.ANAMNESIS_EMBEDDING_BASE_URL === undefined ? undefined : {
       baseUrl: config.ANAMNESIS_EMBEDDING_BASE_URL,
@@ -78,6 +85,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
     promptFile, systemPrompt, relationPromptFile, relationPrompt,
+    gate,
     extractionPacing: { maxInFlight: config.ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT, minIntervalMs: config.ANAMNESIS_LLM_MIN_INTERVAL_MS, jitterFraction: config.ANAMNESIS_LLM_JITTER_FRACTION } satisfies ExtractionPacingConfig,
   };
 }

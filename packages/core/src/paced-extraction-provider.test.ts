@@ -33,6 +33,7 @@ function recordingProvider(fail?: string) {
   const provider: ExtractionProvider = {
     model: "haiku-fixture", modelIncarnation: "a".repeat(64),
     async extract(input: ExtractionProviderInput) {
+      if (input.task === "claim_window") throw new Error("single-task pacing fixture does not use windows");
       calls.push(input.text);
       if (input.text === fail) throw new Error(`provider_rejected:${input.text}`);
       return { echoed: input.text };

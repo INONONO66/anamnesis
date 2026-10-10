@@ -47,22 +47,24 @@ async function embedder(): Promise<{ server: Server; endpoint: string; calls: ()
 }
 
 /** Deterministic HttpExtractionProvider peer: one retained claim per Episode with entity metadata (so Facts
- * materialize), retain-all judge verdicts, "unrelated" relation verdicts; Episodes mentioning "poison" are rejected at the claim
- * stage, Episodes mentioning "venom" pass both claim stages and are rejected only at judge_relations. */
+ * materialize), retain-all judge verdicts, "unrelated" relation verdicts; a claim window holding an Episode mentioning "poison"
+ * is rejected at the claim stage, Episodes mentioning "venom" pass both claim stages and are rejected only at judge_relations. */
 async function extractor(): Promise<{ server: Server; endpoint: string; model: string; model_incarnation: string; rejected: () => number; relationRejected: () => number; calls: () => string[] }> {
   const model = "extraction-worker-fixture", model_incarnation = "f".repeat(64);
   let rejected = 0, relationRejected = 0; const calls: string[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk as Buffer);
-    const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { text: string; task: string;
+    const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { text: string; task: string; episodes?: Array<{ id: string; text: string }>;
       claim_context?: { body_digest: string; claims: Array<{ evidence: unknown }> }; relation_context?: { body_digest: string; fact: { text: string }; candidates: Array<{ id: string }> } };
     response.setHeader("content-type", "application/json");
-    calls.push(`${input.task}:${(input.relation_context?.fact.text ?? input.text).slice(-12)}:${input.relation_context?.candidates.length ?? ""}`);
-    if (input.task === "claim" && input.text.includes("poison")) { rejected++; response.statusCode = 400; response.end("{}"); return; }
+    const texts = input.episodes?.map(episode => episode.text) ?? [input.relation_context?.fact.text ?? input.text];
+    calls.push(`${input.task}:${texts.map(text => text.slice(-12)).join("+")}:${input.relation_context?.candidates.length ?? ""}`);
+    if (input.task === "claim_window" && texts.some(text => text.includes("poison"))) { rejected++; response.statusCode = 400; response.end("{}"); return; }
     if (input.task === "judge_relations" && input.relation_context!.fact.text.includes("venom")) { relationRejected++; response.statusCode = 400; response.end("{}"); return; }
-    const output = input.task === "claim"
-      ? { task: "claim", language: "en", modality: "text", claims: [{ text: input.text, evidence: { start: 0, end: Buffer.byteLength(input.text), text: input.text },
-          confidence: 0.9, entities: [{ mention: "worker", normalized_name: "worker", entity_kind: "person" }] }] } // Resolves against the Episode content, so later Facts of the same Entity are relation candidates.
+    // One claim quoting the whole Episode, which resolves against the Episode content, so later Facts of the same Entity are relation candidates.
+    const claims = (text: string) => [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text }, confidence: 0.9, entities: [{ mention: "worker", normalized_name: "worker", entity_kind: "person" }] }];
+    const output = input.task === "claim_window"
+      ? { task: "claim_window", episodes: input.episodes!.map(({ id, text }) => ({ id, language: "en", modality: "text", claims: claims(text) })) }
       : input.task === "judge_claims"
         ? { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context!.body_digest,
             decisions: input.claim_context!.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence, confidence: 0.8 })) }

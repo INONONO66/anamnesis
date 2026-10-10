@@ -7,8 +7,13 @@ export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;
 /** `judge_relations` compares one validated new Fact (`text`) against the
  * bounded candidates in `relation_context`; no Episode text is supplied. */
 export type ExtractionProviderInput = { text: string; task: "claim" | "judge" | "judge_claims" | "judge_relations";
-  claim_context?: import('../../protocol/src/extraction-audit.ts').ExtractionClaimContext;
-  relation_context?: import('../../protocol/src/extraction-audit.ts').FactRelationContext };
+  claim_context?: import('@anamnesis/protocol').ExtractionClaimContext;
+  relation_context?: import('@anamnesis/protocol').FactRelationContext }
+  | { task: "claim_window"; episodes: { id: string; text: string }[]; context: { id: string; text: string }[] };
+export function extractionInputBytes(input: ExtractionProviderInput): number {
+  const texts = input.task === "claim_window" ? [...input.episodes, ...input.context].map(episode => episode.text) : [input.text];
+  return texts.reduce((bytes, text) => bytes + Buffer.byteLength(text, "utf8"), 0);
+}
 /** `reportedModelIncarnation` is the identity the upstream reported on its accepted responses (a dated snapshot and
  * fingerprint); a provider that checks and pins it exposes it so accepted results can be attributed to the model that
  * actually answered, not only to the configured alias. Undefined until a response was accepted or when the transport
@@ -35,7 +40,7 @@ export class HttpExtractionProvider implements ExtractionProvider {
     this.model = this.config.model; this.modelIncarnation = this.config.model_incarnation;
   }
   async extract(input: ExtractionProviderInput): Promise<unknown> {
-    if (Buffer.byteLength(input.text, "utf8") > 65536) throw new ExtractionProviderError("input_too_large");
+    if (extractionInputBytes(input) > 65536) throw new ExtractionProviderError("input_too_large");
     const requestBody = JSON.stringify({ model: this.model, model_incarnation: this.modelIncarnation, ...input });
     if (Buffer.byteLength(requestBody, "utf8") > 262144) throw new ExtractionProviderError("input_too_large");
     const signal = AbortSignal.timeout(this.config.timeout_ms);
@@ -71,7 +76,7 @@ export class HttpExtractionProvider implements ExtractionProvider {
     if (!parsed.success) throw new ExtractionProviderError("provider_mismatch", "envelope");
     if (parsed.data.model !== this.model) throw new ExtractionProviderError("provider_mismatch", "model");
     if (parsed.data.model_incarnation !== this.modelIncarnation) throw new ExtractionProviderError("provider_mismatch", "incarnation");
-    validateModelOutput(parsed.data.output, input.task);
+    if (input.task !== "claim_window") validateModelOutput(parsed.data.output, input.task);
     return parsed.data.output;
   }
 }
@@ -80,6 +85,7 @@ export class DeterministicExtractionProvider implements ExtractionProvider {
   readonly model = "fixture";
   readonly modelIncarnation = createHash("sha256").update("fixture-v1").digest("hex");
   async extract(input: ExtractionProviderInput): Promise<unknown> {
+    if (input.task === "claim_window") return { task: "claim_window", episodes: input.episodes.map(({ id }) => ({ id, claims: [], language: "und", modality: "unknown" })) };
     if (input.task === "judge_claims") return { task: "judge_claims", claim_body_digest: input.claim_context?.body_digest,
       decisions: input.claim_context?.claims.map((claim, claim_index) => ({ claim_index, disposition: "unknown", evidence: claim.evidence })), language: "und", modality: "unknown" };
     return input.task === "claim" ? { task: "claim", claims: [], language: "und", modality: "unknown" }
@@ -91,7 +97,7 @@ export function validateProviderOutput(output: unknown): { canonical_body: strin
   if (Buffer.byteLength(canonical_body, "utf8") > 65536) throw new ExtractionProviderError("output_too_large");
   return { canonical_body, body_digest: extractionBodyDigest(output) };
 }
-export function validateModelOutput(value: unknown, task: ExtractionProviderInput["task"]) {
+export function validateModelOutput(value: unknown, task: Exclude<ExtractionProviderInput["task"], "claim_window">) {
   // Canonical domain/depth admission precedes recursive ABI validation.
   let encoded: ReturnType<typeof validateProviderOutput>;
   try { encoded = validateProviderOutput(value); }
@@ -104,6 +110,25 @@ export function validateModelOutput(value: unknown, task: ExtractionProviderInpu
   const disposition = body.task === "claim" ? body.claims.length ? "retain" : "suppress" : body.task === "judge_claims" || body.task === "judge_relations" ? "unknown" : body.disposition;
   if ((disposition === "retain" || disposition === "correct") && spans.length === 0) throw new ExtractionProviderError("provider_mismatch", "normalize");
   return { output: ExtractionOutput.parse({ ...encoded, spans, language: body.language, modality: body.modality }), disposition, spans };
+}
+/** The envelope owns target identity; each split body still goes through the ordinary claim validator. */
+export function splitExtractionWindow(value: unknown, ids: readonly string[]): unknown[] {
+  try { canonicalExtractionBody(value); }
+  catch (error) {
+    if (error instanceof ExtractionProviderError) throw error;
+    throw new ExtractionProviderError("provider_mismatch", "window_shape");
+  }
+  const envelope = z.strictObject({ task: z.literal("claim_window"),
+    episodes: z.array(z.object({ id: z.string() }).passthrough()).max(8) }).safeParse(value);
+  const mismatch = () => new ExtractionProviderError("provider_mismatch", "window_shape");
+  if (!envelope.success || envelope.data.episodes.some(episode => !ids.includes(episode.id))) return ids.map(mismatch);
+  return ids.map(id => {
+    const matches = envelope.data.episodes.filter(episode => episode.id === id);
+    const entry = matches[0];
+    if (matches.length !== 1 || !entry) return mismatch();
+    const { id: _id, ...body } = entry;
+    return { task: "claim", ...body };
+  });
 }
 export function validateSourceSpans(content: string, spans: z.infer<typeof ExtractionSpan>[]): void {
   const bytes = Buffer.from(content, "utf8");

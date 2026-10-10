@@ -24,6 +24,7 @@ async function setup(metadata: boolean, lineage = true, sameClaim = false) {
   const query = async (cypher: string, params: Record<string, unknown> = {}) =>
     (await driver.executeQuery(cypher, params)).records.map(row => row.toObject());
   const provider = { model, modelIncarnation: incarnation, async extract(input: ExtractionProviderInput) {
+    if (input.task === "claim_window") throw new Error("standalone audit fixture does not use windows");
     if (input.task === "claim") return { task: "claim", language: "en", modality: "text", claims: [
       { text: "Alice prefers dark mode", evidence, ...(metadata ? { confidence: 0.72, entities: [{ mention: "Alice", normalized_name: "Alice", entity_kind: "person" }], time: { value: "2025-01-01T00:00:00Z", precision: "year" } } : {}) },
       { text: sameClaim ? "Alice prefers dark mode" : "Alice prefers compact dark mode", evidence,

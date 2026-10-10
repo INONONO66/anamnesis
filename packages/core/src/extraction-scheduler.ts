@@ -11,6 +11,7 @@ import { modelTaskRetryDelayMs } from "./backoff.ts";
 import { v7 as uuidv7 } from "uuid";
 import type { Engine } from "./engine.ts";
 import type { ExtractionProvider } from "./extraction.ts";
+import { ExtractionGateError, type ExtractionGate } from "./extraction-gate.ts";
 import { GenerationReadinessError, type InstallationContext } from "./store.ts";
 import { Generation, type ModelTask } from "@anamnesis/protocol";
 import type { ExtractionPipeline } from "@anamnesis/protocol";
@@ -19,7 +20,7 @@ import type { ExtractionPipeline } from "@anamnesis/protocol";
 export type ExtractionTurn = "more" | "waiting" | "idle";
 export type ExtractionSchedulerStatus = { state: "starting" } | {
   state: "catching_up" | "active"; generation_id: string; covered_ingest_seq: number; live_ingest_seq: number;
-  in_flight: number; completed_total: number; failed_total: number; last_error: string | null;
+  in_flight: number; completed_total: number; failed_total: number; gated_total: number; last_error: string | null;
 };
 export interface ExtractionSchedulerOptions {
   provider: ExtractionProvider;
@@ -30,6 +31,10 @@ export interface ExtractionSchedulerOptions {
   wake(): void;
   workerId?: string;
   maxInFlight?: number;
+  gate?: ExtractionGate | undefined;
+  gateThreshold?: number | undefined;
+  windowMax?: number;
+  contextMax?: number;
   /** First attempt plus retries; a task failing this often is a terminal omission. */
   maxAttempts?: number;
   /** Leases lost without a provider outcome (a restart, an overrun) that a task may recover from; they never spend
@@ -46,17 +51,39 @@ const LEASE_MS = 90000;
 type Outcome = "completed" | "failed";
 type Known = Extract<ExtractionPipeline, { state: "known" }>;
 type Action = Outcome | "run" | "pending" | "unresolved" | { kind: "retry" | "settle" | "cancel"; task: ModelTask };
-interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null }
+interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null; session: string | null }
+type WindowRow = ScanRow & { id: string; seq: number };
+type Driven = { outcome: Outcome; fresh: boolean } | null;
 
 /** The engine surface the scheduler drives: the daemon passes its Engine, pure tests a scripted fake. */
-export type SchedulerEngine = Pick<Engine, "readExtractionSelection" | "cutoverExtractionGeneration" | "createExtractionPipeline" | "runExtractionPipeline"> & {
+export type SchedulerEngine = Pick<Engine, "readExtractionSelection" | "cutoverExtractionGeneration" | "createExtractionPipeline" | "runExtractionPipeline" | "runExtractionWindow"> & {
   readonly store: Pick<Engine["store"], "getExtractionGeneration" | "createExtractionGeneration" | "recordExtractionCoverage" | "readExtractionPipeline"
-    | "factRelationFailures" | "sealFactRelationOmission" | "retryModelTask" | "cancelModelTask" | "settleModelTask" | "getExtractionTaskByWorkKey">;
+    | "factRelationFailures" | "sealFactRelationOmission" | "retryModelTask" | "cancelModelTask" | "settleModelTask" | "getExtractionTaskByWorkKey" | "extractionContextInput">;
 };
 
 const PARTITIONS = ["episodes", "active_extraction"] as const;
 /** Scan window and coverage step; recordExtractionCoverage refuses larger batches. */
 const COVERAGE_STEP = 256;
+
+/** Balanced partitions keep a ten-Episode session at 5+5 rather than 8+2. */
+function extractionWindows(rows: WindowRow[], max: number): WindowRow[][] {
+  const sessions = new Map<string, WindowRow[]>();
+  for (const row of rows) {
+    const key = row.session ?? row.id;
+    const group = sessions.get(key) ?? [];
+    group.push(row);
+    sessions.set(key, group);
+  }
+  return [...sessions.values()].flatMap(group => {
+    const count = Math.ceil(group.length / max), size = Math.floor(group.length / count), remainder = group.length % count;
+    let offset = 0;
+    return Array.from({ length: count }, (_, index) => {
+      const window = group.slice(offset, offset + size + (index < remainder ? 1 : 0));
+      offset += window.length;
+      return window;
+    });
+  });
+}
 
 export class ExtractionScheduler {
   private readonly provider: ExtractionProvider;
@@ -68,6 +95,10 @@ export class ExtractionScheduler {
   private readonly maxAttempts: number;
   private readonly maxLostLeases: number;
   private readonly clock: () => number;
+  private readonly gate: ExtractionGate | undefined;
+  private readonly gateThreshold: number;
+  private readonly windowMax: number;
+  private readonly contextMax: number;
   /** work_key -> settlement; a drive removes itself before waking. */
   private readonly inFlight = new Map<string, Promise<void>>();
   /** work_key -> terminal outcome awaiting coverage. Dropped once sealed. */
@@ -76,6 +107,10 @@ export class ExtractionScheduler {
   private live = 0;
   private completed_total = 0;
   private failed_total = 0;
+  private gated_total = 0;
+  /** Oversized windows retry as single targets, including after adopting a persisted failure. */
+  private readonly singletons = new Set<string>();
+  private readonly rewindow = new Set<string>();
   private last_error: string | null = null;
   private closed = false;
   /** Earliest lease expiry the lane must revisit (a lease held by a lost writer or a previous incarnation). */
@@ -88,15 +123,22 @@ export class ExtractionScheduler {
     this.maxAttempts = options.maxAttempts ?? 4;
     this.maxLostLeases = options.maxLostLeases ?? 3;
     this.clock = options.clock ?? Date.now;
+    this.gate = options.gate;
+    this.gateThreshold = options.gateThreshold ?? 0.2;
+    this.windowMax = options.windowMax ?? 8;
+    this.contextMax = options.contextMax ?? 3;
+    if (!Number.isInteger(this.windowMax) || this.windowMax < 1 || this.windowMax > 8) throw new TypeError("windowMax must be 1..8");
+    if (!Number.isInteger(this.contextMax) || this.contextMax < 0 || this.contextMax > 3) throw new TypeError("contextMax must be 0..3");
+    if (!Number.isFinite(this.gateThreshold) || this.gateThreshold < 0 || this.gateThreshold > 1) throw new TypeError("gateThreshold must be 0..1");
   }
 
-  get inFlightCount(): number { return this.inFlight.size; }
+  get inFlightCount(): number { return new Set(this.inFlight.values()).size; }
 
   status(): ExtractionSchedulerStatus {
     if (!this.generation) return { state: "starting" };
     return { state: this.generation.state === "active" ? "active" : "catching_up", generation_id: this.generation.id,
-      covered_ingest_seq: this.generation.covered_ingest_seq, live_ingest_seq: this.live, in_flight: this.inFlight.size,
-      completed_total: this.completed_total, failed_total: this.failed_total, last_error: this.last_error };
+      covered_ingest_seq: this.generation.covered_ingest_seq, live_ingest_seq: this.live, in_flight: this.inFlightCount,
+      completed_total: this.completed_total, failed_total: this.failed_total, gated_total: this.gated_total, last_error: this.last_error };
   }
 
   recordError(error: unknown): void { this.last_error = String(error).slice(0, 512); }
@@ -113,7 +155,7 @@ export class ExtractionScheduler {
     const generation = await this.writableGeneration();
     const rows = await this.read<ScanRow>(`MATCH (m:Meta {key:'meta'})
       OPTIONAL MATCH (e:Element:Episode) WHERE e.ingest_seq > $from AND e.ingest_seq <= m.ingest_seq
-      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq ORDER BY seq LIMIT ${COVERAGE_STEP}`,
+      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,e.origin_session AS session ORDER BY seq LIMIT ${COVERAGE_STEP}`,
       { from: generation.covered_ingest_seq, generation: generation.id });
     this.live = rows[0]?.live ?? generation.covered_ingest_seq;
     const { prefix, open } = this.scanWindow(generation, rows);
@@ -126,19 +168,29 @@ export class ExtractionScheduler {
   /** Contiguous terminal prefix beyond the cursor; behind it, start whatever is neither settled nor in flight. */
   private scanWindow(generation: Generation, rows: ScanRow[]): { prefix: number; open: boolean } {
     let prefix = generation.covered_ingest_seq, open = true;
+    const pending: WindowRow[] = [];
     for (const row of rows) {
       if (row.id === null || row.seq === null) break;
       const key = `${generation.id}:${row.id}`;
       if (open && row.seq === prefix + 1 && this.outcomes.has(key)) { prefix = row.seq; continue; }
       open = false;
-      if (this.inFlight.has(key) || this.outcomes.has(key) || this.inFlight.size >= this.maxInFlight) continue;
-      this.start(generation, key, row.id);
+      if (this.inFlight.has(key) || this.outcomes.has(key)) continue;
+      pending.push({ ...row, id: row.id, seq: row.seq });
+    }
+    const windows = extractionWindows(pending, this.windowMax).flatMap(window =>
+      window.some(row => this.singletons.has(`${generation.id}:${row.id}`)) ? window.map(row => [row]) : [window]);
+    for (const window of windows) {
+      if (this.inFlightCount >= this.maxInFlight) break;
+      this.start(generation, window);
     }
     return { prefix, open };
   }
   private async advanceCoverage(generation: Generation, rows: ScanRow[], prefix: number): Promise<void> {
     await this.cover(generation, prefix);
-    for (const row of rows) if (row.seq !== null && row.seq <= prefix) this.outcomes.delete(`${generation.id}:${row.id}`);
+    for (const row of rows) if (row.seq !== null && row.seq <= prefix) {
+      const key = `${generation.id}:${row.id}`;
+      this.outcomes.delete(key); this.singletons.delete(key);
+    }
     generation.covered_ingest_seq = prefix;
   }
   /** False when an Episode committed between the scan and the cutover; the next turn covers it first. */
@@ -178,31 +230,93 @@ export class ExtractionScheduler {
     }
   }
 
-  private start(generation: Generation, key: string, episodeId: string): void {
-    const drive = this.engine.store.getExtractionTaskByWorkKey(key, this.context)
-      .then(task => this.drive(generation, episodeId, task))
-      .then(result => {
-        if (!result) return false;
-        this.outcomes.set(key, result.outcome);
-        if (result.fresh) { if (result.outcome === "completed") this.completed_total++; else this.failed_total++; }
-        return true;
-      }, error => { this.recordError(error); return true; }) // A thrown drive (e.g. lease_expired) left a retryable task; re-arm so the lane settles it.
-      .then(settled => { this.inFlight.delete(key); if (settled) this.wake(); });
-    this.inFlight.set(key, drive);
+  private start(generation: Generation, rows: WindowRow[]): void {
+    const keys = rows.map(row => `${generation.id}:${row.id}`);
+    const drive = this.driveWindow(generation, rows)
+      .catch(error => { this.recordError(error); return true; })
+      .then(settled => {
+        for (const key of keys) { this.inFlight.delete(key); if (this.rewindow.delete(key)) settled = true; }
+        if (settled) this.wake();
+      });
+    for (const key of keys) this.inFlight.set(key, drive);
+  }
+
+  private recordOutcome(key: string, result: Driven): boolean {
+    if (!result) return false;
+    this.outcomes.set(key, result.outcome);
+    if (result.fresh) { if (result.outcome === "completed") this.completed_total++; else this.failed_total++; }
+    return true;
+  }
+
+  private async driveWindow(generation: Generation, rows: WindowRow[]): Promise<boolean> {
+    const queued: ModelTask[] = [];
+    let settled = false;
+    for (const row of rows) {
+      const key = `${generation.id}:${row.id}`;
+      const existing = await this.engine.store.getExtractionTaskByWorkKey(key, this.context);
+      const claim = existing ?? await this.engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: row.id }, this.context);
+      if (this.closed) return settled;
+      if (claim.state === "queued") queued.push(claim);
+      else settled = this.recordOutcome(key, await this.drive(claim, existing === null)) || settled;
+    }
+    if (!queued.length || this.closed) return settled;
+    if (await this.skipWindow(queued)) return true;
+    // A byte-bound retry has no context: otherwise a preceding large Episode could make even a small lone target fail forever.
+    const context_ids = queued.some(task => this.singletons.has(`${generation.id}:${task.source_id}`))
+      ? [] : await this.contextIds(rows.filter(row => queued.some(task => task.source_id === row.id)));
+    const attempts = await this.engine.runExtractionWindow({ targets: queued.map(task => ({ task_id: task.id, expected_version: task.version })),
+      context_ids, worker_id: this.workerId, lease_ms: LEASE_MS }, this.context);
+    for (const attempt of attempts) if (attempt.reason === "input_too_large") this.singletons.add(`${generation.id}:${attempt.source_id}`);
+    for (const claim of queued) settled = this.recordOutcome(`${generation.id}:${claim.source_id}`, await this.drive(claim, true)) || settled;
+    return settled;
+  }
+
+  private async contextIds(rows: WindowRow[]): Promise<string[]> {
+    const first = rows[0];
+    if (!first || first.session === null || this.contextMax === 0) return [];
+    const preceding = await this.read<{ id: string }>(`MATCH (e:Element:Episode)
+      WHERE e.origin_session=$session AND e.ingest_seq < $before AND NOT e.id IN $targets
+      RETURN e.id AS id ORDER BY e.ingest_seq DESC LIMIT toInteger($limit)`,
+    { session: first.session, before: first.seq, targets: rows.map(row => row.id), limit: this.contextMax });
+    return preceding.map(row => row.id).reverse();
+  }
+
+  private async skipWindow(tasks: ModelTask[]): Promise<boolean> {
+    const gate = this.gate;
+    if (!gate) return false;
+    let scores: number[];
+    try {
+      const episodes = await this.engine.store.extractionContextInput(tasks.map(task => task.source_id), this.context);
+      scores = await gate.score(episodes);
+      if (episodes.length !== tasks.length || scores.length !== tasks.length || scores.some(score => !Number.isFinite(score) || score < 0 || score > 1))
+        throw new ExtractionGateError("gate_mismatch");
+    } catch (error) { this.recordError(error); return false; }
+    const window_score = Math.max(...scores);
+    if (window_score >= this.gateThreshold) return false;
+    const decided_at = this.clock();
+    for (const [index, task] of tasks.entries()) {
+      const score = scores[index];
+      if (score === undefined) throw new ExtractionGateError("gate_mismatch");
+      await this.engine.store.cancelModelTask({ task_id: task.id, expected_version: task.version, reason: "gate_skipped",
+        gate: { model: gate.model, score, window_score, threshold: this.gateThreshold, decided_at } }, this.context);
+      this.outcomes.set(`${task.generation_id}:${task.source_id}`, "failed");
+      this.gated_total++;
+    }
+    return true;
   }
 
   /** Runs one Episode's pipeline to a terminal outcome. `fresh` is false when the outcome was already
    * persisted (adopted after a restart); null leaves unresolved work for a later wake. */
-  private async drive(generation: Generation, episodeId: string, existing: ModelTask | null): Promise<{ outcome: Outcome; fresh: boolean } | null> {
-    const claim = existing ?? await this.engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: episodeId }, this.context);
+  private async drive(claim: ModelTask, fresh: boolean): Promise<Driven> {
     let pipeline = await this.engine.store.readExtractionPipeline(claim.id, this.context);
-    let fresh = existing === null;
     // Every stage is attempt-bounded: claim and judge each need at most one run plus one retry per attempt and a settle,
     // retry and run per lost lease; the relation stage at most one run per failure plus the seal. A pipeline that is
     // still open past this bound is a bug.
     const steps = this.maxAttempts * 5 + this.maxLostLeases * 6 + 2;
     for (let step = 0; step < steps; step++) {
       if (pipeline.state === "unknown" || this.closed) return null;
+      // Queued claims always return to the window scan, including retries after backoff or a lost lease.
+      if (this.queueClaimWindow(pipeline)) return null;
       const action = this.classify(pipeline);
       if (action === "completed" || action === "failed") return { outcome: action, fresh };
       // A live lease belongs to another writer or a previous incarnation: nothing settles it now, its expiry re-arms the lane.
@@ -233,6 +347,14 @@ export class ExtractionScheduler {
     // Unreachable by construction; the pipeline stays retryable for the next wake rather than being reported as an outcome it never reached.
     this.recordError(new Error(`pipeline ${claim.id} did not settle within ${steps} steps`));
     return null;
+  }
+
+  private queueClaimWindow(pipeline: Known): boolean {
+    const key = `${pipeline.claim.generation_id}:${pipeline.claim.source_id}`;
+    if (pipeline.claim_attempt?.reason === "input_too_large") this.singletons.add(key);
+    if (pipeline.claim.state !== "queued") return false;
+    this.rewindow.add(key);
+    return true;
   }
 
   private deferWake(at: number): void {

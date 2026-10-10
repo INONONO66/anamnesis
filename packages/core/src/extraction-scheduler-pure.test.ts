@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { modelTaskRetryDelayMs } from "./backoff.ts";
-import { ExtractionScheduler, type SchedulerEngine } from "./extraction-scheduler.ts";
+import { ExtractionScheduler, type SchedulerEngine, type ExtractionSchedulerOptions } from "./extraction-scheduler.ts";
 import type { ExtractionProvider } from "./extraction.ts";
 import { GenerationReadinessError, type InstallationContext } from "./store.ts";
-import type { Coverage, ExtractionPipeline, Generation, ModelTask } from "@anamnesis/protocol";
+import { ExtractionAttempt, type Coverage, type ExtractionPipeline, type Generation, type ModelTask } from "@anamnesis/protocol";
 
 const uuid = (n: number) => `01993000-0000-7000-8000-${String(n).padStart(12, "0")}`;
 const HEX = "a".repeat(64), GEN = uuid(1);
@@ -33,10 +33,12 @@ function generation(state: Generation["state"], covered_ingest_seq = 0): Generat
   return { id: GEN, stream: "extraction", incarnation: HEX, state, covered_ingest_seq, created_at: 0, updated_at: 0 };
 }
 
-interface Episode { id: string; seq: number; task?: ModelTask }
+interface Episode { id: string; seq: number; session: string; task?: ModelTask }
 
 class Harness {
   readonly calls: string[] = [];
+  readonly windows: string[][] = [];
+  readonly cancellations: Parameters<SchedulerEngine["store"]["cancelModelTask"]>[0][] = [];
   readonly engine: SchedulerEngine;
   selection: { generation_id: string | null; selector_version: number } = { generation_id: null, selector_version: 1 };
   readonly generations = new Map<string, Generation>();
@@ -77,7 +79,24 @@ class Harness {
         await this.holds.get(input.task_id);
         return this.next(this.owner.get(input.task_id) ?? input.task_id);
       },
+      runExtractionWindow: async input => {
+        record(`window:${input.targets.map(target => target.task_id).join(",")}`);
+        this.windows.push(input.targets.map(target => target.task_id));
+        const attempts: ExtractionAttempt[] = [];
+        for (const target of input.targets) {
+          if (this.exploding.has(target.task_id)) throw new Error("boom");
+          await this.holds.get(target.task_id);
+          const state = this.advance(target.task_id);
+          attempts.push(ExtractionAttempt.parse({ id: uuid(800), task_id: state.claim.id, generation_id: GEN,
+            source_id: state.claim.source_id, source_revision: HEX, source_ingest_seq: state.claim.source_ingest_seq,
+            body_digest: HEX, created_at: 0, updated_at: 0,
+            state: "failed", reason: "provider_unavailable", disposition: null, output: null, spans: [], lease: null,
+            policy_context: { revision: 1, authority: "installation" } }));
+        }
+        return attempts;
+      },
       store: {
+        extractionContextInput: async (ids: string[]) => ids.map(id => ({ id, text: `text of ${id}` })),
         getExtractionGeneration: async id => { record(`generation:${id}`); const found = this.generations.get(id); if (!found) throw new Error("unknown generation"); return found; },
         getExtractionTaskByWorkKey: async workKey => {
           const episode = this.episodes.find(e => `${GEN}:${e.id}` === workKey);
@@ -100,7 +119,7 @@ class Harness {
         factRelationFailures: async id => this.relationFailures.get(id) ?? 0,
         sealFactRelationOmission: async request => { record(`seal:${request.min_failures}`); this.next(request.pipeline_id); return { sealed: true, failures: request.min_failures }; },
         retryModelTask: async input => { record(`retry:${input.task_id}@${input.expected_version}`); return this.advance(input.task_id).claim; },
-        cancelModelTask: async input => { record(`cancel:${input.task_id}`); return this.advance(input.task_id).claim; },
+        cancelModelTask: async input => { record(`cancel:${input.task_id}`); this.cancellations.push(input); return this.advance(input.task_id).claim; },
         settleModelTask: async input => {
           record(`settle:${input.reason}:${input.task_id}`);
           if (input.reason === "worker_lost" && this.staleLeases.has(input.task_id)) throw new Error("lease epoch mismatch");
@@ -112,7 +131,9 @@ class Harness {
 
   /** Scripts the pipeline states a source moves through: the first is observed after create, each later one after a write. */
   script(source: Episode, ...states: ExtractionPipeline[]): void {
-    if (source.task) this.register(states, source.task.id); else this.sources.set(source.id, states);
+    const bound = states.map(state => state.state === "known"
+      ? { ...state, claim: { ...state.claim, source_id: source.id, source_ingest_seq: source.seq } } : state);
+    if (source.task) this.register(bound, source.task.id); else this.sources.set(source.id, bound);
   }
   private register(states: ExtractionPipeline[], id = states[0]?.pipeline_id): Known {
     const [first, ...rest] = states;
@@ -136,10 +157,12 @@ class Harness {
     let rows: Record<string, unknown>[];
     if (query.includes("state:'catching_up'")) rows = this.catchingUp.map(body => ({ body: JSON.stringify(body) }));
     else if (query.includes("ExtractionCoverage")) rows = PARTITIONS.map(partition => ({ partition, covered: this.coverage.get(`${params.generation}:${partition}`) ?? null }));
+    else if (query.includes("e.origin_session=$session")) rows = this.episodes.filter(e => e.session === params.session && e.seq < Number(params.before))
+      .sort((a, b) => b.seq - a.seq).slice(0, Number(params.limit)).map(e => ({ id: e.id }));
     else {
       const from = Number(params.from);
       rows = this.episodes.filter(e => e.seq > from && e.seq <= this.live).sort((a, b) => a.seq - b.seq).slice(0, WINDOW)
-        .map(e => ({ live: this.live, id: e.id, seq: e.seq }));
+        .map(e => ({ live: this.live, id: e.id, seq: e.seq, session: e.session }));
       if (rows.length === 0) rows = [{ live: this.live, id: null, seq: null }];
     }
     // The daemon's reader is generic over the row shape; the scripted rows carry exactly the columns each query names.
@@ -165,16 +188,17 @@ class Harness {
     return release;
   }
 
-  scheduler(options: { maxInFlight?: number; maxAttempts?: number; maxLostLeases?: number } = {}): ExtractionScheduler {
+  scheduler(options: Partial<ExtractionSchedulerOptions> = {}): ExtractionScheduler {
     return new ExtractionScheduler(this.engine, { provider, context, read: this.read, wake: this.wake, clock: this.clock, ...options });
   }
   episode(seq: number, task?: ModelTask): Episode {
-    const episode: Episode = { id: uuid(100 + seq), seq, ...(task ? { task } : {}) };
+    const episode: Episode = { id: uuid(100 + seq), seq, session: uuid(100 + seq), ...(task ? { task } : {}) };
     this.episodes.push(episode);
     this.live = Math.max(this.live, seq);
     return episode;
   }
 }
+const driven = (scheduler: ExtractionScheduler) => Promise.all([...scheduler["inFlight"].values()]);
 
 test("creates a catching-up generation, seeds both partitions, and cuts over once nothing is pending", async () => {
   const h = new Harness();
@@ -211,7 +235,7 @@ test("drives a fresh pipeline through claim and judge, seals coverage, and cuts 
   expect(await scheduler.turn()).toBe("waiting");
   expect(scheduler.inFlightCount).toBe(1);
   await h.woken(1);
-  expect(h.calls).toEqual(["selection", `create:${e1.id}`, `run:${claim.id}@3`, `run:${claim.id}@3`]);
+  expect(h.calls).toEqual(["selection", `create:${e1.id}`, `window:${claim.id}`, `run:${claim.id}@3`]);
   expect(scheduler.status()).toMatchObject({ completed_total: 1, failed_total: 0, in_flight: 0 });
   expect(await scheduler.turn()).toBe("more");
   expect(h.calls.slice(4)).toEqual(["selection", "cover:episodes:0->1", "cover:active_extraction:0->1", "selection", "cutover:null:1"]);
@@ -244,12 +268,16 @@ test("retries a failed claim only after its backoff elapses, waking the lane at 
   h.script(h.episode(1), known(claim), known(task(claim.id, "queued")), done(claim));
   const scheduler = h.scheduler();
   expect(await scheduler.turn()).toBe("waiting");
-  await h.woken(1);
+  await driven(scheduler);
   expect(h.calls.filter(c => !c.startsWith("selection"))).toEqual([`create:${uuid(101)}`]);
   h.now += 1;
   expect(await scheduler.turn()).toBe("waiting");
-  await h.woken(2);
-  expect(h.calls.slice(-2)).toEqual([`retry:${claim.id}@3`, `run:${claim.id}@3`]);
+  await driven(scheduler);
+  expect(h.calls.at(-1)).toBe(`retry:${claim.id}@3`);
+  expect(h.windows).toEqual([]);
+  await scheduler.turn();
+  await driven(scheduler);
+  expect(h.calls.at(-1)).toBe(`window:${claim.id}`);
   expect(scheduler.status()).toMatchObject({ completed_total: 1, failed_total: 0 });
 });
 
@@ -262,12 +290,16 @@ test("settles expired leases as worker_lost, falling back to expired when the le
   h.script(h.episode(2), known(stale), known(task(stale.id, "queued")), done(stale));
   const scheduler = h.scheduler();
   expect(await scheduler.turn()).toBe("waiting");
-  await h.woken(2);
+  await driven(scheduler);
   expect(h.calls.filter(c => c.startsWith("settle:"))).toEqual([`settle:worker_lost:${stale.id}`, `settle:expired:${stale.id}`]);
+  await scheduler.turn();
+  await driven(scheduler);
   expect(scheduler.status()).toMatchObject({ completed_total: 1 });
   h.now += 1;
   expect(await scheduler.turn()).toBe("waiting");
-  await h.woken(3);
+  await driven(scheduler);
+  await scheduler.turn();
+  await driven(scheduler);
   expect(h.calls.filter(c => c.startsWith("settle:")).slice(2)).toEqual([`settle:worker_lost:${held.id}`]);
   expect(scheduler.status()).toMatchObject({ completed_total: 2, failed_total: 0 });
 });
@@ -276,7 +308,7 @@ test("spends the lost-lease budget on retries, then cancels; exhausted attempts 
   const h = new Harness();
   h.catchingUp = [generation("catching_up")];
   const retry = task(uuid(307), "expired"), cancel = task(uuid(308), "worker_lost", { lost_leases: 1 });
-  const writesInAnyOrder = (calls: string[]) => calls.filter(c => /^(retry|cancel|run):/.test(c)).sort();
+  const writesInAnyOrder = (calls: string[]) => calls.filter(c => /^(retry|cancel|run|window):/.test(c)).sort();
   const spent = task(uuid(309), "failed", { attempts: 4 }), judged = task(uuid(310), "succeeded");
   h.script(h.episode(1), known(retry), known(task(retry.id, "queued")), done(retry));
   h.script(h.episode(2), known(cancel), known(task(cancel.id, "cancelled")));
@@ -284,8 +316,10 @@ test("spends the lost-lease budget on retries, then cancels; exhausted attempts 
   h.script(h.episode(4), known(judged, task(uuid(400), "queued", { kind: "judge" })), done(judged));
   const scheduler = h.scheduler({ maxLostLeases: 1 });
   expect(await scheduler.turn()).toBe("waiting");
-  await h.woken(4);
-  expect(writesInAnyOrder(h.calls)).toEqual(writesInAnyOrder([`retry:${retry.id}@3`, `run:${retry.id}@3`, `cancel:${cancel.id}`, `run:${judged.id}@3`]));
+  await driven(scheduler);
+  await scheduler.turn();
+  await driven(scheduler);
+  expect(writesInAnyOrder(h.calls)).toEqual(writesInAnyOrder([`retry:${retry.id}@3`, `window:${retry.id}`, `cancel:${cancel.id}`, `run:${judged.id}@3`]));
   expect(scheduler.status()).toMatchObject({ completed_total: 2, failed_total: 2 });
 });
 
@@ -306,7 +340,7 @@ test("runs pending relation verdicts, and seals the source as an omission once t
 test("leaves unknown pipelines and a closing scheduler alone, and reports a pipeline that never settles", async () => {
   const h = new Harness();
   h.catchingUp = [generation("catching_up")];
-  const vanishing = task(uuid(313), "queued"), stuck = task(uuid(314), "queued");
+  const vanishing = task(uuid(313), "succeeded"), stuck = task(uuid(314), "succeeded");
   h.script(h.episode(1), known(vanishing), { state: "unknown", pipeline_id: vanishing.id });
   h.script(h.episode(2), known(stuck));
   const scheduler = h.scheduler({ maxAttempts: 1, maxLostLeases: 0 });
@@ -396,4 +430,88 @@ test("propagates cutover failures other than incomplete coverage", async () => {
   await expect(h.scheduler().turn()).rejects.toMatchObject({ code: "selector_conflict" });
   h.cutover = () => { throw new Error("transport"); };
   await expect(h.scheduler().turn()).rejects.toThrow("transport");
+});
+
+test("balances ten same-session Episodes into two windows without mixing sessions", async () => {
+  const h = new Harness();
+  h.catchingUp = [generation("catching_up")];
+  for (let seq = 1; seq <= 12; seq++) {
+    const episode = h.episode(seq), claim = task(uuid(2000 + seq), "queued");
+    episode.session = seq <= 10 ? "first" : "second";
+    h.script(episode, known(claim), done(claim));
+  }
+  const scheduler = h.scheduler();
+  await scheduler.turn();
+  await driven(scheduler);
+  expect([...h.windows].sort((a, b) => String(a[0]).localeCompare(String(b[0])))).toEqual([
+    Array.from({ length: 5 }, (_, i) => uuid(2001 + i)),
+    Array.from({ length: 5 }, (_, i) => uuid(2006 + i)),
+    [uuid(2011), uuid(2012)],
+  ]);
+  expect(h.calls.filter(call => call.startsWith("run:"))).toEqual([]);
+  expect(scheduler.status()).toMatchObject({ completed_total: 12, failed_total: 0 });
+});
+
+test("a low gate verdict cancels every target with its score without counting provider failures", async () => {
+  const h = new Harness();
+  h.catchingUp = [generation("catching_up")];
+  for (let seq = 1; seq <= 2; seq++) {
+    const episode = h.episode(seq), claim = task(uuid(2100 + seq), "queued");
+    episode.session = "same";
+    h.script(episode, known(claim), known({ ...claim, state: "cancelled", attempt_id: uuid(800) }));
+  }
+  const calls: string[][] = [];
+  const scheduler = h.scheduler({ gate: { model: "gate-fixture", async score(episodes) {
+    calls.push(episodes.map(episode => episode.id));
+    return [0.05, 0.1];
+  } } });
+  await scheduler.turn();
+  await driven(scheduler);
+  expect(calls).toEqual([[uuid(101), uuid(102)]]);
+  expect(h.windows).toEqual([]);
+  expect(h.cancellations).toEqual([0.05, 0.1].map((score, index) => ({
+    task_id: uuid(2101 + index), expected_version: 3, reason: "gate_skipped",
+    gate: { model: "gate-fixture", score, window_score: 0.1, threshold: 0.2, decided_at: h.now },
+  })));
+  expect(scheduler.status()).toMatchObject({ gated_total: 2, failed_total: 0 });
+  await scheduler.turn();
+  expect(scheduler.status()).toMatchObject({ covered_ingest_seq: 2 });
+});
+
+test("a failing gate leaves extraction enabled and records its failure", async () => {
+  const h = new Harness();
+  h.catchingUp = [generation("catching_up")];
+  const claim = task(uuid(2201), "queued");
+  h.script(h.episode(1), known(claim), done(claim));
+  const scheduler = h.scheduler({ gate: { model: "gate-fixture", async score() { throw new Error("gate down"); } } });
+  await scheduler.turn();
+  await driven(scheduler);
+  expect(h.windows).toEqual([[claim.id]]);
+  expect(h.cancellations).toEqual([]);
+  expect(scheduler.status()).toMatchObject({ gated_total: 0, completed_total: 1, last_error: "Error: gate down" });
+});
+
+test("maxInFlight counts windows and registers every member across scans", async () => {
+  const h = new Harness();
+  h.catchingUp = [generation("catching_up")];
+  for (let seq = 1; seq <= 16; seq++) {
+    const episode = h.episode(seq), claim = task(uuid(2300 + seq), "queued");
+    episode.session = "same";
+    h.script(episode, known(claim), done(claim));
+  }
+  const release = h.hold(uuid(2301));
+  const scheduler = h.scheduler({ maxInFlight: 1 });
+  await scheduler.turn();
+  await h.called("window:", 1);
+  expect(scheduler.inFlightCount).toBe(1);
+  expect(scheduler["inFlight"].size).toBe(8);
+  await scheduler.turn();
+  expect(h.windows).toHaveLength(1);
+  release();
+  await driven(scheduler);
+  await scheduler.turn();
+  await driven(scheduler);
+  expect(h.windows.map(window => window.length)).toEqual([8, 8]);
+  expect(new Set(h.windows.flat()).size).toBe(16);
+  expect(scheduler.status()).toMatchObject({ completed_total: 16, in_flight: 0 });
 });

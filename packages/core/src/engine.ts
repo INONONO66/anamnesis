@@ -29,8 +29,8 @@ import {
 } from "./store.ts";
 
 import { EmbeddingConfig, HttpEmbeddingProvider } from "./embedding.ts";
-import { ExtractionProviderConfig, HttpExtractionProvider, ExtractionProviderError, validateModelOutput, validateSourceSpans, type ExtractionProvider } from "./extraction.ts";
-import { ExtractionModelOutput, type CreateModelTask, type LeaseModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage, type Generation, type ExtractionCoverageRead } from "@anamnesis/protocol";
+import { ExtractionProviderConfig, HttpExtractionProvider, ExtractionProviderError, extractionInputBytes, splitExtractionWindow, validateModelOutput, validateSourceSpans, type ExtractionProvider, type ExtractionProviderInput } from "./extraction.ts";
+import { ExtractionModelOutput, LeaseModelTask, ModelTaskCAS, type CreateModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage, type Generation, type ExtractionCoverageRead } from "@anamnesis/protocol";
 import { bindGenerationProfile, type GenerationProfileInput, type GenerationIdentityReceipt } from "@anamnesis/protocol";
 import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from "@anamnesis/protocol";
 import { MaterializeRetainedClaim, ProposeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, type SemanticReviewProvider } from "@anamnesis/protocol";
@@ -58,6 +58,11 @@ export type RememberInput = z.input<typeof RememberInput>;
 export interface EngineOptions extends Partial<StoreOptions> { extractionProvider?: ExtractionProvider; semanticReviewProvider?: SemanticReviewProvider;
   /** Trusted runtime injection: a driver whose connect/acquisition deadlines are bounded, so a background turn that meets a dead Bolt endpoint fails fast instead of holding the daemon's dispatch slot. */
   driver?: Driver }
+
+const ExtractionWindowRequest = LeaseModelTask.pick({ worker_id: true, lease_ms: true }).extend({
+  targets: z.array(ModelTaskCAS).min(1).max(8).refine(targets => new Set(targets.map(target => target.task_id)).size === targets.length),
+  context_ids: z.array(z.uuidv7()).max(3),
+});
 
 /** A default password would silently ship an unauthenticated install. */
 function requiredPassword(): string {
@@ -227,19 +232,61 @@ export class Engine {
     if (!provider) throw new ExtractionAuditError('extraction_not_configured');
     const task = await this.store.leaseModelTask({ ...input, provider: { model: provider.model, model_incarnation: provider.modelIncarnation } }, context);
     const { text, claim_context } = await this.store.extractionTaskInput(task.id, task.lease!.epoch, context);
-    let outcome: Pick<CompleteExtractionAttempt, "state" | "reason" | "output" | "spans" | "disposition" | "detail" | "reported_model">;
+    const call = { text, task: task.kind, ...(claim_context ? { claim_context } : {}) };
+    const outcome = await this.extractionOutcome(call, () => provider.extract(call));
+    return this.store.recordExtractionAttempt({ ...outcome, id: task.attempt_id!, task_id: task.id, expected_version: task.version, lease_epoch: task.lease!.epoch }, context);
+  }
+
+  /** One provider call, but one lease, claim attempt and source-span check per Episode. */
+  async runExtractionWindow(input: z.infer<typeof ExtractionWindowRequest>, context: InstallationContext) {
+    const request = ExtractionWindowRequest.parse(input), provider = this.extractionProvider;
+    if (!provider) throw new ExtractionAuditError("extraction_not_configured");
+    const targets = [];
+    for (const target of request.targets) {
+      const task = await this.store.leaseModelTask({ ...target, worker_id: request.worker_id, lease_ms: request.lease_ms,
+        provider: { model: provider.model, model_incarnation: provider.modelIncarnation } }, context);
+      if (task.kind !== "claim" || !task.lease || !task.attempt_id) throw new Error("invalid_window_target");
+      const { text } = await this.store.extractionTaskInput(task.id, task.lease.epoch, context);
+      targets.push({ task, text, lease_epoch: task.lease.epoch, attempt_id: task.attempt_id });
+    }
+    const episodes = targets.map(({ task, text }) => ({ id: task.source_id, text }));
+    const preceding = await this.store.extractionContextInput(request.context_ids.filter(id => !episodes.some(episode => episode.id === id)), context);
+    let outputs: unknown[];
     try {
-      if (Buffer.byteLength(text, "utf8") > 65536) throw new ExtractionProviderError("input_too_large");
-      const validated = validateModelOutput(await provider.extract({ text, task: task.kind, ...(claim_context ? {claim_context} : {}) }), task.kind);
-      try { validateSourceSpans(text, validated.spans); }
-      catch (error) { if (error instanceof Error && error.message === "span_mismatch") throw new ExtractionProviderError("provider_mismatch", "span"); throw error; }
-      // The attempt also names the model the upstream reported for this accepted answer, when the transport exposes one.
-      outcome = { ...validated, state: "succeeded", reason: null, ...(provider.reportedModelIncarnation === undefined ? {} : { reported_model: provider.reportedModelIncarnation }) };
+      const call = { task: "claim_window", episodes, context: preceding } as const;
+      if (extractionInputBytes(call) > 65536) throw new ExtractionProviderError("input_too_large");
+      outputs = splitExtractionWindow(await provider.extract(call), episodes.map(episode => episode.id));
     } catch (error) {
       if (!(error instanceof ExtractionProviderError)) throw error;
-      outcome = { state: "failed", reason: error.reason, output: null, spans: [], disposition: null, ...(error.detail === undefined ? {} : { detail: error.detail }) };
+      outputs = targets.map(() => error);
     }
-    return this.store.recordExtractionAttempt({ ...outcome, id: task.attempt_id!, task_id: task.id, expected_version: task.version, lease_epoch: task.lease!.epoch }, context);
+    const attempts = [];
+    for (const [index, target] of targets.entries()) {
+      const outcome = await this.extractionOutcome({ task: "claim", text: target.text }, async () => {
+        const output = outputs[index];
+        if (output instanceof ExtractionProviderError) throw output;
+        return output;
+      });
+      attempts.push(await this.store.recordExtractionAttempt({ ...outcome, id: target.attempt_id, task_id: target.task.id,
+        expected_version: target.task.version, lease_epoch: target.lease_epoch }, context));
+    }
+    return attempts;
+  }
+
+  private async extractionOutcome(input: Exclude<ExtractionProviderInput, { task: "claim_window" }>, call: () => Promise<unknown>):
+    Promise<Pick<CompleteExtractionAttempt, "state" | "reason" | "output" | "spans" | "disposition" | "detail" | "reported_model">> {
+    try {
+      if (Buffer.byteLength(input.text, "utf8") > 65536) throw new ExtractionProviderError("input_too_large");
+      const validated = validateModelOutput(await call(), input.task);
+      try { validateSourceSpans(input.text, validated.spans); }
+      catch (error) { if (error instanceof Error && error.message === "span_mismatch") throw new ExtractionProviderError("provider_mismatch", "span"); throw error; }
+      // The attempt also names the model the upstream reported for this accepted answer, when the transport exposes one.
+      const reported = this.extractionProvider?.reportedModelIncarnation;
+      return { ...validated, state: "succeeded", reason: null, ...(reported === undefined ? {} : { reported_model: reported }) };
+    } catch (error) {
+      if (!(error instanceof ExtractionProviderError)) throw error;
+      return { state: "failed", reason: error.reason, output: null, spans: [], disposition: null, ...(error.detail === undefined ? {} : { detail: error.detail }) };
+    }
   }
 
   async init(): Promise<void> {

@@ -11,7 +11,15 @@ containing a `bearer` string) to enable extraction. The default model is
 `claude-haiku-4-5`. `ANAMNESIS_LLM_DIALECT` is `anthropic_messages` for models
 starting with `claude`, otherwise `openai_chat`; either can be explicitly selected.
 `ANAMNESIS_EXTRACTION_PROMPT_FILE` overrides the bundled extraction prompt.
-See [extraction audit](extraction-audit.md) for the audit-only semantics.
+See [extraction audit](extraction-audit.md) for the provider and ABI semantics.
+
+`ANAMNESIS_EXTRACTION_GATE=jev` enables the pre-extraction gate (D56): the
+scheduler scores each claim window with `typesafe-ai/jev` through the Vercel AI
+Gateway and skips windows whose best score is below
+`ANAMNESIS_EXTRACTION_GATE_THRESHOLD` (default `0.2`). The gate reads its own
+private JSON key file from `ANAMNESIS_JEV_GATE_KEY_FILE` (default
+`~/.config/anamnesis/jev-vercel-gateway.key.json`); the model id is fixed and the
+bearer is never logged. The default is `off`.
 Task identity is a stable SHA-256 of dialect/endpoint/model/prompt configuration,
 not an attestation of upstream weights. The reported model identity is tracked
 separately; a change within a provider instance fails with `provider_mismatch`.
