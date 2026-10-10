@@ -255,7 +255,7 @@ describe.serial("Engine storage lifecycle", () => {
     const indexes = [
       "element_time",
       "element_schema",
-      "embedding_vector_episode_profile",
+      "embedding_vector_fact_profile",
       "invalidates_seek",
       "element_content",
     ];
@@ -348,7 +348,9 @@ describe.serial("Engine storage lifecycle", () => {
     );
     expect(await nextEpisodeProps(earlier.id, later.id)).toHaveProperty("id");
     expect(await nextEpisodeProps(later.id, earlier.id)).toEqual({});
-    expect((await engine.status()).pendingOutbox).toBe(2);
+    // D56: Episodes are provenance only; the embedding outbox counts Facts
+    // without a vector (embedding-lane.test.ts covers that path).
+    expect((await engine.status()).pendingOutbox).toBe(0);
 
     const hits = await recallEpisodes(engine, "dark mode", { at: AFTER_FIXTURES });
     expect(hits.length).toBeGreaterThanOrEqual(1);
