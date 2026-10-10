@@ -1,15 +1,12 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
 import type { RememberInput } from "./engine.ts";
 import { EpisodeJournal, journaledRemember } from "./journal.ts";
-import { legacyHashes, legacyLines } from "./legacy-journal.fixture.ts";
 import type { PutResult } from "./store.ts";
 
-const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const episode = (record: string): RememberInput => ({
   time: { value: "2026-09-02T10:00:00Z", precision: "second" },
   content: `Journal fixture ${record}`,
@@ -201,53 +198,5 @@ describe("replay abort", () => {
     expect(removed.mock.calls[0]?.[1]).toBe(added.mock.calls[0]?.[1]);
     expect(removed.mock.calls[1]?.[1]).toBe(added.mock.calls[1]?.[1]);
     expect(added.mock.calls[0]?.[1]).not.toBe(added.mock.calls[1]?.[1]);
-  });
-});
-
-describe("inspect", () => {
-  test("returns every historical line with its exact bytes, offset, sha256, decoded entry and eligibility, across months in order", async () => {
-    const dir = await directory();
-    await writeFile(join(dir, "journal-2026-09.jsonl"), legacyLines[0] + legacyLines[1]);
-    await writeFile(join(dir, "journal-2026-08.jsonl"), legacyLines[2]);
-    await writeFile(join(dir, "journal-2026-08.jsonl.bak"), "ignored\n");
-    const rows = await new EpisodeJournal(dir).inspect("post167-pre194");
-    expect(rows.map(r => [r.file, r.offset, r.sha256, r.eligibility])).toEqual([
-      ["journal-2026-08.jsonl", 0, legacyHashes[2], ["invalid-sub-kind"]],
-      ["journal-2026-09.jsonl", 0, legacyHashes[0], ["missing-time"]],
-      ["journal-2026-09.jsonl", Buffer.byteLength(legacyLines[0]), legacyHashes[1], ["missing-time"]],
-    ]);
-    expect(rows.map(r => r.raw)).toEqual([Buffer.from(legacyLines[2]), Buffer.from(legacyLines[0]), Buffer.from(legacyLines[1])]);
-    expect(rows.map(r => hash(r.raw))).toEqual([legacyHashes[2], legacyHashes[0], legacyHashes[1]]);
-    expect(rows.map(r => r.entry)).toEqual([JSON.parse(legacyLines[2]), JSON.parse(legacyLines[0]), JSON.parse(legacyLines[1])]);
-  });
-
-  test("an empty directory inspects to no rows", async () => {
-    expect(await new EpisodeJournal(await directory()).inspect("post167-pre194")).toEqual([]);
-  });
-
-  test("refuses any other legacy format by name", async () => {
-    await expect(new EpisodeJournal(await directory()).inspect("post194")).rejects.toThrow("unsupported-legacy-format: post194");
-  });
-
-  test("an unterminated final line is reported with its file and byte offset", async () => {
-    const journal = await journalWith(legacyLines[0] + legacyLines[1].slice(0, -1));
-    await expect(journal.inspect("post167-pre194")).rejects.toThrow(`incomplete-legacy-line: journal-2026-09.jsonl:${Buffer.byteLength(legacyLines[0])}`);
-  });
-
-  test("a line that is not valid UTF-8 fails in the fatal decoder, not in the schema", async () => {
-    const journal = await journalWith(Buffer.concat([Buffer.from('{"recordedAt":"2026-09-02T12:34:56.000Z","element":"'), Buffer.from([0xff]), Buffer.from('"}\n')]));
-    const inspect = journal.inspect("post167-pre194");
-    await expect(inspect).rejects.toBeInstanceOf(TypeError);
-    await expect(inspect).rejects.not.toBeInstanceOf(ZodError);
-  });
-
-  test("an element with empty content is a decoding error at element.content", async () => {
-    const journal = await journalWith('{"recordedAt":"2026-09-02T12:34:56.000Z","element":{"schema":"anamnesis.claim/1","content":"","origin":{"source":"s","session":"c","actor":"a","record":"r"},"mass":0.5,"properties":{}}}\n');
-    await expect(journal.inspect("post167-pre194")).rejects.toMatchObject({ issues: [{ code: "too_small", path: ["element", "content"] }] });
-  });
-
-  test("an element without mass is a decoding error; inspect never synthesizes historical defaults", async () => {
-    const journal = await journalWith('{"recordedAt":"2026-09-02T12:34:56.000Z","element":{"schema":"anamnesis.claim/1","content":"c","origin":{"source":"s","session":"c","actor":"a","record":"r"},"properties":{}}}\n');
-    await expect(journal.inspect("post167-pre194")).rejects.toMatchObject({ issues: [{ code: "invalid_type", path: ["element", "mass"] }] });
   });
 });

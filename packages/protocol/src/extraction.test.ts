@@ -1,12 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { CompleteExtractionAttempt, ExtractionAttempt, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
+import { CompleteExtractionAttempt, ExtractionAttempt, ExtractionOutput, Generation, LeaseModelTask, ModelTask, canonicalExtractionBody, extractionBodyDigest } from "./extraction.ts";
 
 describe("G004 extraction contract", () => {
+  test("rejects a mismatched digest even when the output body is canonical", () => {
+    const body = { task: "claim", claims: [], language: "en", modality: "text" };
+    const canonical_body = canonicalExtractionBody(body);
+    const output = { canonical_body, body_digest: "0".repeat(64), spans: [], language: "en", modality: "text" };
+    expect(ExtractionOutput.safeParse({ ...output, body_digest: extractionBodyDigest(body) }).success).toBe(true);
+    expect(ExtractionOutput.safeParse(output).success).toBe(false);
+    expect(ExtractionOutput.safeParse({ ...output, canonical_body: JSON.stringify(body), body_digest: extractionBodyDigest(body) }).success).toBe(false);
+  });
+
   test("canonicalizes JSON domain with UTF-16 ordering and rejects invalid values", () => {
     expect(canonicalExtractionBody({ "\uffff": 1, "𐀀": 2 })).toBe('{"𐀀":2,"￿":1}');
     expect(() => canonicalExtractionBody({ x: undefined })).toThrow();
     expect(() => canonicalExtractionBody(NaN)).toThrow();
-    expect(() => canonicalExtractionBody([,])).toThrow();
+    expect(() => canonicalExtractionBody(Array(1))).toThrow();
     expect(() => canonicalExtractionBody("\ud800")).toThrow();
   });
   test("parses a content-free terminal attempt record", () => {

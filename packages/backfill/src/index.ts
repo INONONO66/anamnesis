@@ -1,4 +1,3 @@
-// Package entry: the parsers and collectors the runtime's ingest lanes consume.
 export { streamAgentLogFile } from "./agentlog.ts";
 export { classifyClaudeTranscript, collectClaudeRaw, createClaudeRawParser } from "./clauderaw.ts";
 export { createCodexRawParser } from "./codexraw.ts";

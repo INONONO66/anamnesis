@@ -7,7 +7,7 @@ import neo4j, { EagerResult } from "neo4j-driver";
 import { EpisodeJournal } from "./journal.ts";
 import { Engine, RememberInput } from "./engine.ts";
 import { Store } from "./store.ts";
-import { legacyHashes as hashes, legacyLines as lines } from "./legacy-journal.fixture.ts";
+import { legacyLines as lines } from "./legacy-rows.fixture.ts";
 
 setDefaultTimeout(120000);
 
@@ -53,12 +53,6 @@ async function verifyReadOnly() {
   console.log(JSON.stringify({ verification: "read-only", summaries, issues }));
   return issues;
 }
-async function journalFor(bytes: Buffer) {
-  const directory = await mkdtemp(join(root, "journal-"));
-  const file = join(directory, "journal-2026-09.jsonl");
-  await writeFile(file, bytes);
-  return { journal: new EpisodeJournal(directory), file };
-}
 
 beforeAll(async () => {
   await engine.init();
@@ -84,28 +78,6 @@ afterAll(async () => {
   }
 });
 
-test("explicit historical inspection preserves exact buffers, offsets and eligibility without replay", async () => {
-  const bytes = Buffer.from(lines.join(""));
-  const { journal, file } = await journalFor(bytes);
-  const before = await snapshot();
-  const rows = await journal.inspect("post167-pre194");
-  expect(rows).toHaveLength(3);
-  let offset = 0;
-  for (const [i, row] of rows.entries()) {
-    expect(row.file).toBe("journal-2026-09.jsonl");
-    expect(row.offset).toBe(offset);
-    expect(row.raw).toEqual(Buffer.from(lines[i]!));
-    expect(row.sha256).toBe(hashes[i]!);
-    expect(hash(row.raw)).toBe(hashes[i]!);
-    expect(row.entry).toEqual(JSON.parse(lines[i]!));
-    expect(row.eligibility).toEqual([i === 2 ? "invalid-sub-kind" : "missing-time"]);
-    offset += row.raw.length;
-  }
-  expect(Buffer.concat(rows.map(row => row.raw))).toEqual(bytes);
-  expect(await readFile(file)).toEqual(bytes);
-  expect(await snapshot()).toEqual(before);
-});
-
 test("unmarked raw integrity is distinct from modern semantic eligibility and never writes", async () => {
   const issues = await verifyReadOnly();
   for (const [i, id] of ids.entries()) {
@@ -128,36 +100,6 @@ test("historical acceptance never weakens new append, remember or put", async ()
   }
   expect((await readdir(root)).includes("strict-not-created")).toBe(false);
   expect(await snapshot()).toEqual(before);
-});
-
-test("inspection rejects unsupported provenance and malformed bytes without changing them", async () => {
-  for (const format of ["", "pre167", "unknown", "rfc8785-v1"]) {
-    await expect(new EpisodeJournal(join(root, "absent")).inspect(format)).rejects.toThrow("unsupported-legacy-format");
-  }
-  const entry = JSON.parse(lines[0]!);
-  const { mass, ...noMass } = entry.element;
-  const { properties, ...noProperties } = entry.element;
-  const invalid = [
-    Buffer.from("{broken}\n"), Buffer.from(lines[0]!.trimEnd()), Buffer.from([0xff, 0x0a]),
-    ...[
-      { ...entry, unknown: true }, { ...entry, element: { ...entry.element, unknown: true } },
-      { ...entry, element: noMass }, { ...entry, element: noProperties },
-      ...[[-1], [256], [1.5], "AA=="].map(payload => ({ ...entry, element: { ...entry.element, payload } })),
-      { ...entry, element: { ...entry.element, expected_previous_revision_key: null } },
-    ].map(value => Buffer.from(JSON.stringify(value) + "\n")),
-  ];
-  for (const bytes of invalid) {
-    const { journal, file } = await journalFor(bytes);
-    await expect(journal.inspect("post167-pre194")).rejects.toThrow();
-    expect(await readFile(file)).toEqual(bytes);
-  }
-  const bytes = Buffer.from(JSON.stringify({ ...entry, element: { ...entry.element, payload: [0, 127, 255], properties: { z: 1, a: 2 } } }) + "\n");
-  const { journal, file } = await journalFor(bytes);
-  const rows = await journal.inspect("post167-pre194");
-  expect(rows[0]?.entry.element.payload).toEqual([0, 127, 255]);
-  expect(Object.keys(rows[0]!.entry.element.properties)).toEqual(["z", "a"]);
-  expect(rows[0]?.raw).toEqual(bytes);
-  expect(await readFile(file)).toEqual(bytes);
 });
 
 test("changed raw content mismatches, malformed storage and unknown formats fail closed", async () => {

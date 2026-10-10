@@ -1,12 +1,12 @@
-import neo4j, { type ManagedTransaction } from "neo4j-driver";
+import { type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { LINK_LATTICE, MemoryElement, MemoryLink, type MemoryElementInput, type MemoryLinkInput, type LinkRole, type TimePoint } from "@anamnesis/protocol";
 import { EchoLineage, EpisodeLineageError, parseEpisodeLineage, type EpisodeLineageInput } from "@anamnesis/protocol";
 import { extractionBodyDigest } from "@anamnesis/protocol";
 import { type TopologyRow, TOPOLOGY_QUERY, topologyExpectations } from "./conducting.ts";
 import { CONDUCTING_ROLES, celestialOf, carriesTime, labelClause, toUtc } from "./schema.ts";
-import { sha256, END_OF_TIME, CANONICAL_DIGEST, StorageContractError, elementDigest, verifyLineageRetry, tupleHash, originKey, sessionKey, linkIdemKey } from "./digest.ts";
-import { luceneQuery, receiptTime } from "./receipts.ts";
+import { sha256, CANONICAL_DIGEST, StorageContractError, elementDigest, verifyLineageRetry, tupleHash, originKey, sessionKey, linkIdemKey } from "./digest.ts";
+import { receiptTime } from "./receipts.ts";
 import { requireInstallation } from "./policy.ts";
 import { type ElementNode, type LinkRelationship, type ElementWriteOptions, recordsToObjects, nodeProps, relProps, toElement } from "./records.ts";
 import type { StoreCore } from "./core.ts";
@@ -21,12 +21,6 @@ export interface PutResult {
   diverged?: boolean;
 
   invalidated?: string;
-}
-
-export interface SearchHit {
-  element: MemoryElement;
-
-  score: number;
 }
 
 interface ElementRevision {
@@ -463,39 +457,6 @@ export class ElementStore {
       { hash },
     );
     return rows.length && await this.core.objects.has(hash) ? this.core.objects.get(hash) : null;
-  }
-  async searchText(
-    query: string,
-    opts: { limit?: number; until?: string; validOnly?: boolean } = {},
-  ): Promise<SearchHit[]> {
-    const q = luceneQuery(query);
-    if (!q) return [];
-    const rows = await this.core.run<{ e: ElementNode; score: number }>(
-      `CALL db.index.fulltext.queryNodes('element_content', $q)
-       YIELD node, score
-       WHERE ($until IS NULL OR node.time_utc IS NULL
-              OR node.time_utc <= $until)
-         AND (NOT $validOnly OR NOT EXISTS {
-           MATCH ()-[inv:INVALIDATES]->()
-           WHERE inv.target_id = node.id
-             AND inv.effective_time_utc <= coalesce($until, $endOfTime)
-             AND inv.id IS NOT NULL
-         })
-       RETURN node AS e, score
-       ORDER BY score DESC
-       LIMIT $limit`,
-      {
-        q,
-        until: opts.until ? toUtc(opts.until) : null,
-        endOfTime: END_OF_TIME,
-        validOnly: opts.validOnly ?? false,
-        limit: neo4j.int(opts.limit ?? 20),
-      },
-    );
-    return rows.map((r) => ({
-      element: toElement(nodeProps(r["e"])),
-      score: r.score,
-    }));
   }
   async linksOf(id: string, role?: LinkRole): Promise<MemoryLink[]> {
     const rows = await this.core.run<{

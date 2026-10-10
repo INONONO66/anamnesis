@@ -26,7 +26,7 @@ import { RecallStore } from "./store/recall-store.ts";
 import { IntegrityStore } from "./store/integrity-store.ts";
 import { ActivationStore } from "./store/activation-store.ts";
 import type { AuthoritySnapshot } from "./store/conducting-store.ts";
-import type { PutResult, SearchHit } from "./store/element-store.ts";
+import type { PutResult } from "./store/element-store.ts";
 import type { IntegrityIssue } from "./store/integrity-store.ts";
 export { type ConductingArcProbe, type GraphEnvelope, type ConductingArcVerification } from "./store/conducting.ts";
 export { luceneQuery, IssueReceiptInput, RecallReceipt, RecallTransportInput, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit } from "./store/receipts.ts";
@@ -34,7 +34,7 @@ export { type InstallationContext } from "./store/policy.ts";
 export type { AuthoritySnapshot } from "./store/conducting-store.ts";
 export { GenerationReadinessError } from "./store/extraction-store.ts";
 export type { StoreOptions } from "./store/core.ts";
-export type { PutResult, SearchHit } from "./store/element-store.ts";
+export type { PutResult } from "./store/element-store.ts";
 export type { IntegrityIssue } from "./store/integrity-store.ts";
 
 export class Store {
@@ -281,10 +281,6 @@ export class Store {
 
   recall(input: z.input<typeof RpcRecallParams>, context: InstallationContext): Promise<RpcRecallResult> {
     return this.recalls.recall(input, context);
-  }
-
-  searchText(query: string, opts?: { limit?: number; until?: string; validOnly?: boolean }): Promise<SearchHit[]> {
-    return this.elements.searchText(query, opts);
   }
 
   linksOf(id: string, role?: LinkRole): Promise<MemoryLink[]> {

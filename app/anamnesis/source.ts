@@ -1,10 +1,10 @@
 import { logEvent } from "./log.ts";
-import { createHash } from "node:crypto";
 import { lstat, open, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { RPC_LIMITS, RpcHash, RpcIngestStatusParams, RpcRememberParams, type RpcIngestStatusResult } from "@anamnesis/protocol";
 import { acquireInstallation, atomicJson, hasCode, syncDirectory } from "./config.ts";
 import { RpcClient } from "./client.ts";
+import { sha } from "./source-files.ts";
 
 // This adapter consumes immutable JSONL snapshots, not live/tailing source logs.
 // A fixed allocation bounds the snapshot even if another process grows the file.
@@ -43,7 +43,6 @@ function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, member]) => `${JSON.stringify(key)}:${canonical(member)}`).join(",")}}`;
 }
-const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 export function sourceRevisionKey(params: RpcRememberParams): string {
   const o = params.episode.origin;
   return sha(JSON.stringify([sha(JSON.stringify([o.source, o.session, o.actor, o.record])), params.source_revision]));
@@ -91,7 +90,7 @@ export async function ingestSource(source: string, checkpointPath: string, clien
   if ([checkpointPath, checkpointPath + ".pending.json"].some(path => resolve(source) === resolve(path))) throw new Error("source_checkpoint_path_conflict");
   await ingestSnapshot(checkpointPath, client, async () => {
     const initial = await snapshot(source);
-    const sourceHash = createHash("sha256").update(initial.bytes).digest("hex");
+    const sourceHash = sha(initial.bytes);
     const lines = new TextDecoder("utf-8", { fatal: true }).decode(initial.bytes).split("\n");
     if (lines.at(-1) === "") lines.pop();
     return { sourceHash, records: (async function* () {
@@ -101,7 +100,7 @@ export async function ingestSource(source: string, checkpointPath: string, clien
       }
     })(), async assertUnchanged() {
       const current = await snapshot(source);
-      if (current.fingerprint !== initial.fingerprint || createHash("sha256").update(current.bytes).digest("hex") !== sourceHash) throw new Error("source_changed");
+      if (current.fingerprint !== initial.fingerprint || sha(current.bytes) !== sourceHash) throw new Error("source_changed");
     } };
   });
 }
@@ -109,7 +108,7 @@ export async function ingestSource(source: string, checkpointPath: string, clien
 async function uploadPayload(client: RpcClient, record: SourceRecord): Promise<void> {
   const payload = record.payload!;
   const bytes = Buffer.from(payload.bytes_b64, "base64");
-  const hash = createHash("sha256").update(bytes).digest("hex");
+  const hash = sha(bytes);
   if (hash !== record.params.payload_hash) throw pendingFailure("payload_mismatch");
   const begin = await client.request("object.begin", { sha256: hash, size: bytes.length, media_type: payload.media_type });
   let object;

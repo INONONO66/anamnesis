@@ -78,9 +78,6 @@ export const SCHEMA_STATEMENTS = [
    OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
 ];
 
-/** Model-stated claim time becomes an explicit resolved time. Coarse precisions
- * are truncated to the UTC interval start; second/minute stay instants. */
-
 export function celestialOf(schema: string): Celestial | null {
   return SCHEMA_LABELS[schema as KnownSchema] ?? null;
 }

@@ -51,7 +51,6 @@ export async function* lines(root: string, name: string, expected: string, hash?
     if (total !== Number(info.size) || fingerprint(await file.stat({ bigint: true })) !== expected) throw new Error("source_changed");
   } finally { await file.close(); }
 }
-/** The same reader for lanes that parse decoded text per line. */
 export async function* textLines(root: string, name: string, expected: string, hash?: Hash, options: LineOptions = {}): AsyncGenerator<{ text: string; line: number }> {
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: options.ignoreBOM ?? false });
   for await (const { bytes, line } of lines(root, name, expected, hash, options)) yield { text: decoder.decode(bytes), line };

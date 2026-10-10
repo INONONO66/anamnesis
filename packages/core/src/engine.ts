@@ -15,7 +15,6 @@ import {
   Store,
   type IntegrityIssue,
   type PutResult,
-  type SearchHit,
   type StoreOptions,
   type IssueReceiptInput,
   type RecallReceipt,
@@ -349,17 +348,6 @@ export class Engine {
       ...(expectedPreviousRevisionKey !== undefined ? { expectedPreviousRevisionKey } : {}),
       ...(previous ? { previous } : {}),
       ...(admission ? { admission } : {}),
-    });
-  }
-
-  async recall(
-    query: string,
-    opts: { limit?: number; at?: string } = {},
-  ): Promise<SearchHit[]> {
-    return this.store.searchText(query, {
-      limit: opts.limit ?? 10,
-      until: opts.at ?? new Date().toISOString(),
-      validOnly: true,
     });
   }
 

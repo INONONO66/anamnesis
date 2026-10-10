@@ -1,4 +1,5 @@
-// Reconstructed post167/pre194 append bytes, NOT an operator corpus.
+// Reconstructed post167/pre194 raw rows, NOT an operator corpus: the historical (digest_format = null) Element shape that
+// Store.verify still has to audit and that the crash harness preserves byte-for-byte on disk.
 // Source: c8a075f^ schema + #194 regression inputs and #163 fixed clock.
 export const legacyLines: readonly [string, string, string] = [
   '{"recordedAt":"2026-09-02T12:34:56.000Z","element":{"schema":"anamnesis.original-message/1","content":"Ino prefers dark mode.","origin":{"source":"slack","session":"C0123/2026-08-21","actor":"U098765","record":"1724221402.000300"},"mass":0.5,"properties":{}}}\n',

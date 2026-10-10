@@ -43,7 +43,6 @@ const anthropicEnvelope = z.looseObject({
 });
 const errorEnvelope = z.looseObject({ error: z.looseObject({ code: z.string() }) });
 
-/** Chat extraction with shared validation/error mapping for OpenAI and Anthropic. */
 export class OpenAiChatExtractionProvider implements ExtractionProvider {
   readonly model: string;
   readonly modelIncarnation: string;
@@ -102,10 +101,8 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     let parsedBody: unknown;
     try { parsedBody = JSON.parse(raw); }
     catch { throw new OpenAiChatExtractionError("provider_mismatch", "envelope"); }
-    if (errorEnvelope.safeParse(parsedBody).success) {
-      const error = errorEnvelope.parse(parsedBody);
-      if (error.error.code === "upstream_quota_exhausted") throw new OpenAiChatExtractionError("provider_unavailable");
-    }
+    const error = errorEnvelope.safeParse(parsedBody);
+    if (error.success && error.data.error.code === "upstream_quota_exhausted") throw new OpenAiChatExtractionError("provider_unavailable");
     return parsedBody;
   }
   private anthropicReply(parsedBody: unknown): { content: string; incarnation: string } {

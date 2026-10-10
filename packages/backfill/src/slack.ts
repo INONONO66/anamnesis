@@ -5,7 +5,6 @@ import { basename, join } from "node:path";
 import type { RememberInput } from "@anamnesis/core";
 import { maskSecrets } from "./secrets.ts";
 
-/** Only the fields the originals contract consumes are modelled. */
 export interface SlackMessage {
   ts: string;
   text: string;
@@ -18,8 +17,6 @@ export interface SlackMessage {
 function text(value: unknown, fallback: string): string {
   return typeof value === "string" && value !== "" ? value : fallback;
 }
-
-
 export function parseSlackMessage(line: string): SlackMessage {
   const raw: Record<string, unknown> = JSON.parse(line);
   const ts = optionalText(raw["ts"]);

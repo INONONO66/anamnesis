@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { celestialOf, labelClause, toUtc } from "./schema.ts";
+import { carriesTime, celestialOf, labelClause, toUtc } from "./schema.ts";
 
 describe("store schema helpers", () => {
   test("labelClause narrows to the celestial label only for known schemas", () => {
@@ -13,5 +13,12 @@ describe("store schema helpers", () => {
   test("toUtc rewrites an offset timestamp as the same UTC instant", () => {
     expect(toUtc("2026-03-01T09:30:00+09:00")).toBe("2026-03-01T00:30:00.000Z");
     expect(toUtc("2026-03-01T00:30:00Z")).toBe("2026-03-01T00:30:00.000Z");
+  });
+
+  test("only event-bearing celestial schemas carry time", () => {
+    expect(carriesTime("anamnesis.original-message/1")).toBe(true);
+    expect(carriesTime("anamnesis.claim/1")).toBe(true);
+    expect(carriesTime("anamnesis.entity/1")).toBe(false);
+    expect(carriesTime("unknown.schema/9")).toBe(false);
   });
 });

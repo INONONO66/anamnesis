@@ -120,7 +120,6 @@ function readSessionsFrom(path: string): SessionEvent[] {
   }
 }
 
-/** The two file classes this adapter reads out of the snapshot. */
 interface Sources {
   transcripts: string[];
   databases: string[];

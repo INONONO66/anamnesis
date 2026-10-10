@@ -30,6 +30,7 @@ packages/protocol/src/generation-identity.test.ts
 app/anamnesis/backup-operation.test.mjs
 app/anamnesis/wire.test.ts
 app/anamnesis/tokenizer.test.mjs
+app/anamnesis/tokenizer.test.ts
 app/anamnesis/agentlog.test.ts
 app/anamnesis/miscraw.test.ts
 app/anamnesis/gjcraw.test.ts

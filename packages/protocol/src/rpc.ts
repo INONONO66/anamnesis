@@ -163,7 +163,6 @@ const ConductingArcProbeResult = z.strictObject({
   source_id: z.uuidv7(), count: z.number().int().min(0).max(256),
   saturated: z.boolean(), coverage: z.literal("complete"),
 });
-type ConductingArcProbeResult = z.infer<typeof ConductingArcProbeResult>;
 
 // The last sextet's unused bits must be zero, not merely decodable by Buffer.
 const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$/;

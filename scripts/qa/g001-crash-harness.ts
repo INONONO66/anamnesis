@@ -10,9 +10,8 @@ import { join, resolve } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import neo4j, { EagerResult } from "neo4j-driver";
 import { Store } from "../../packages/core/src/store.ts";
-import { EpisodeJournal } from "../../packages/core/src/journal.ts";
 import { DurableSpool } from "../../packages/core/src/spool.ts";
-import { legacyHashes, legacyLines } from "../../packages/core/src/legacy-journal.fixture.ts";
+import { legacyHashes, legacyLines } from "../../packages/core/src/legacy-rows.fixture.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
 import type { RpcRememberParams, RpcRememberResult } from "../../packages/protocol/src/rpc.ts";
 
@@ -368,15 +367,6 @@ test("real crash recovery: exact identity/topology, legacy preservation and UDS 
     assert.ok(legacyFailure instanceof assert.AssertionError);
     record("legacy-mutation-red.json", { mutation: "append bytes to copied F1 raw file", actual: legacyFailure.actual, expected: legacyFailure.expected, error: String(legacyFailure) });
     preservationOracle(await legacySnapshot());
-    const inspectDirectory = join(legacyRoot, "inspection"); await mkdir(inspectDirectory);
-    writeFileSync(join(inspectDirectory, "journal-2026-09.jsonl"), legacyLines.join(""));
-    const inspected = await new EpisodeJournal(inspectDirectory).inspect("post167-pre194");
-    assert.equal(inspected.length, 3); let offset = 0;
-    for (const [i, item] of inspected.entries()) {
-      assert.deepEqual(item.raw, Buffer.from(legacyLines[i]!)); assert.equal(item.sha256, legacyHashes[i]); assert.equal(item.offset, offset);
-      assert.deepEqual(item.eligibility, [i === 2 ? "invalid-sub-kind" : "missing-time"]); offset += item.raw.length;
-    }
-    record("legacy-inspection.json", inspected);
     async function verifyLegacyReadOnly() {
       const beforeVerify = await legacySnapshot(); summaries.length = 0;
       const issues = await legacyStore!.verify();

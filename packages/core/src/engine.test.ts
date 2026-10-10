@@ -10,6 +10,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Engine, envConfig, RememberInput } from "./engine.ts";
+import { recallEpisodes } from "./engine-recall.helper.ts";
 import { EpisodeJournal } from "./journal.ts";
 import { luceneQuery, Store } from "./store.ts";
 
@@ -349,7 +350,7 @@ describe.serial("Engine storage lifecycle", () => {
     expect(await nextEpisodeProps(later.id, earlier.id)).toEqual({});
     expect((await engine.status()).pendingOutbox).toBe(2);
 
-    const hits = await engine.recall("dark mode", { at: AFTER_FIXTURES });
+    const hits = await recallEpisodes(engine, "dark mode", { at: AFTER_FIXTURES });
     expect(hits.length).toBeGreaterThanOrEqual(1);
     expect(hits[0]!.element.content).toContain("dark mode");
   });
@@ -823,7 +824,7 @@ describe.serial("Engine storage lifecycle", () => {
     await engine.remember(
       msg("cjk-1", "점심으로 김치찌개를 먹었다", "2026-08-22T12:30:00+09:00"),
     );
-    const hits = await engine.recall("김치찌개", { at: AFTER_FIXTURES });
+    const hits = await recallEpisodes(engine, "김치찌개", { at: AFTER_FIXTURES });
     expect(hits.some((hit) => hit.element.content.includes("김치찌개"))).toBe(
       true,
     );
@@ -1050,7 +1051,7 @@ describe.serial("Engine graph contracts", () => {
 });
 
 describe.serial("Engine time-axis filtering", () => {
-  test.serial("snapshot time filters event time and retains timeless elements", async () => {
+  test.serial("snapshot recall excludes future Episodes and timeless non-Episodes", async () => {
     const timeless = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.entity/1",
@@ -1071,16 +1072,16 @@ describe.serial("Engine time-axis filtering", () => {
       source_revision: "future-1",
     });
 
-    const hits = await engine.recall("Snapshot contract sentinel", {
+    const hits = await recallEpisodes(engine, "Snapshot contract sentinel", {
       at: "2027-01-01T00:00:00Z",
     });
-    expect(hits.some((hit) => hit.element.id === timeless.id)).toBe(true);
+    expect(hits.some((hit) => hit.element.id === timeless.id)).toBe(false);
     expect(hits.some((hit) => hit.element.id === future.id)).toBe(false);
     expect((await engine.store.getElement(timeless.id))!.time).toBeUndefined();
   });
 
-  test.serial("empty search is exact and unfiltered search includes invalidated data", async () => {
-    expect(await engine.store.searchText(" \\ / * ")).toEqual([]);
+  test.serial("empty search is exact and recall excludes invalidated data", async () => {
+    expect(await recallEpisodes(engine, " \\ / * ")).toEqual([]);
     const original = await engine.put({
       id: uuidv7(),
       schema: "anamnesis.claim/1",
@@ -1113,10 +1114,10 @@ describe.serial("Engine time-axis filtering", () => {
       content: "Replacement invalidates original",
     });
     expect(
-      (await engine.store.searchText("Unfiltered invalidated sentinel")).some(
+      (await recallEpisodes(engine, "Unfiltered invalidated sentinel")).some(
         (hit) => hit.element.id === original.id,
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test.serial("snapshot recall excludes memories after the cutoff", async () => {
@@ -1127,7 +1128,7 @@ describe.serial("Engine time-axis filtering", () => {
       msg("t2", "A recent archival memory", "2026-08-01T10:00:00+09:00"),
     );
 
-    const then = await engine.recall("archival memory", {
+    const then = await recallEpisodes(engine, "archival memory", {
       at: "2026-03-01T00:00:00Z",
     });
     expect(
@@ -1137,7 +1138,7 @@ describe.serial("Engine time-axis filtering", () => {
       then.some((hit) => hit.element.content === "A recent archival memory"),
     ).toBe(false);
 
-    const later = await engine.recall("archival memory", {
+    const later = await recallEpisodes(engine, "archival memory", {
       at: AFTER_FIXTURES,
     });
     expect(
@@ -1169,12 +1170,12 @@ describe.serial("Engine time-axis filtering", () => {
       content: "Resuming coffee invalidates the earlier statement",
     });
 
-    const after = await engine.recall("stopped drinking coffee", {
+    const after = await recallEpisodes(engine, "stopped drinking coffee", {
       at: AFTER_FIXTURES,
     });
     expect(after.some((hit) => hit.element.id === fact.id)).toBe(false);
 
-    const before = await engine.recall("stopped drinking coffee", {
+    const before = await recallEpisodes(engine, "stopped drinking coffee", {
       at: "2026-05-01T00:00:00Z",
     });
     expect(before.some((hit) => hit.element.id === fact.id)).toBe(true);
@@ -1209,14 +1210,14 @@ describe.serial("Engine time-axis filtering", () => {
       await engine.store.isValidAt(backdated.id, "2020-01-01T00:00:00Z"),
     ).toBe(true);
 
-    const before = await engine.recall("Fact event time sentinel", {
+    const before = await recallEpisodes(engine, "Fact event time sentinel", {
       at: "2018-01-01T00:00:00Z",
     });
     expect(before.some((hit) => hit.element.id === backdated.id)).toBe(false);
-    const at = await engine.recall("Fact event time sentinel", {
+    const at = await recallEpisodes(engine, "Fact event time sentinel", {
       at: AFTER_FIXTURES,
     });
-    expect(at.some((hit) => hit.element.id === backdated.id)).toBe(true);
+    expect(at.some((hit) => hit.element.id === backdated.id)).toBe(false);
     expect(await engine.verify()).not.toContainEqual(
       expect.objectContaining({ elementId: backdated.id }),
     );
@@ -1277,7 +1278,7 @@ describe.serial("Engine time-axis filtering", () => {
       await engine.store.isValidAt(fact.id, "2026-04-01T00:00:00Z"),
     ).toBe(false);
     expect(await engine.store.isValidAt(fact.id, AFTER_FIXTURES)).toBe(false);
-    const hits = await engine.recall("Retroactive correction sentinel claim", {
+    const hits = await recallEpisodes(engine, "Retroactive correction sentinel claim", {
       at: AFTER_FIXTURES,
     });
     expect(hits.some((hit) => hit.element.id === fact.id)).toBe(false);
@@ -1331,18 +1332,9 @@ describe.serial("Engine time-axis filtering", () => {
   test.serial("recall applies validity filtering before its exact limit", async () => {
     const candidates: string[] = [];
     for (let index = 0; index < 8; index += 1) {
-      const result = await engine.put({
-        id: uuidv7(),
-        schema: "anamnesis.claim/1",
-        time: { value: "2026-06-01T00:00:00Z", precision: "second" },
-        content: `Exact pagination target ${index}`,
-        origin: {
-          source: "pagination-test",
-          session: "exact-limit",
-          actor: "fixture",
-          record: `target-${index}`,
-        },
-      });
+      const result = await engine.remember(
+        msg(`target-${index}`, `Exact pagination target ${index}`, "2026-06-01T00:00:00Z"),
+      );
       candidates.push(result.id);
     }
     for (let index = 0; index < 4; index += 1) {
@@ -1367,7 +1359,7 @@ describe.serial("Engine time-axis filtering", () => {
       });
     }
 
-    const hits = await engine.recall("Exact pagination target", {
+    const hits = await recallEpisodes(engine, "Exact pagination target", {
       limit: 2,
       at: AFTER_FIXTURES,
     });

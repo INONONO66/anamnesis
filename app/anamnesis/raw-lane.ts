@@ -26,7 +26,6 @@ export interface RawLane {
   parser(name: string): LaneParser;
 }
 export type LaneParser = (record: Uint8Array) => ReadonlyArray<{ input: RememberInput }>;
-/** Adapts a line-oriented text parser to the byte records the lane reads. */
 export const textParser = (parse: (line: string) => ReadonlyArray<{ input: RememberInput }>): LaneParser => record => parse(new TextDecoder("utf-8", { fatal: true }).decode(record));
 /** Selects .jsonl files whose path has no segment starting with `prefix`. */
 export const jsonlOutside = (prefix: string) => (local: string): boolean => local.endsWith(".jsonl") && !local.split(sep).some(part => part.startsWith(prefix));

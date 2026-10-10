@@ -8,11 +8,11 @@ import { RpcRememberParams } from "@anamnesis/protocol";
 import { RpcClient } from "./client.ts";
 import { Revisions } from "./raw-lane.ts";
 import { ingestSnapshot, type SourceRecord } from "./source.ts";
+import { sha } from "./source-files.ts";
 
 // Finite source metadata, not an episode collection. Larger exports must be
 // partitioned intentionally; no eviction can invent a missing predecessor.
 const MAX_FILES = 1024;
-const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 async function files(root: string): Promise<string[]> {
   const entries = await readdir(root);
   const names = entries.filter(name => name.endsWith(".jsonl") && !name.startsWith("._")).sort();

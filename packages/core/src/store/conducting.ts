@@ -14,7 +14,6 @@ export class GraphAccessError extends Error {
   constructor(readonly reason: "degree_probe_unavailable" | "ordered_probe_unavailable") { super(reason); this.code = reason; this.name = "GraphAccessError"; }
 }
 
-
 export type ConductingPartition = { stream: string; generation: number | string; state?: string };
 export type PhysicalConductor = ConductingArcRow & { from: string; to: string; registry_source: number | null };
 export type ConductingArcVerification = {
@@ -29,8 +28,6 @@ export function arcIdentity(row: ConductingArcRow): string { return JSON.stringi
 export function arcTuple(row: ConductingArcRow): string {
   return JSON.stringify([row.source_id, row.link_id, row.peer_id, row.role, row.generation, row.source_extraction_generation]);
 }
-
-/** Transient embedding failures keep an outbox entry queued this many times before it is quarantined as exhausted (#219). */
 
 export interface TopologyRow {
   id: string;

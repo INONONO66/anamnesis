@@ -2,7 +2,6 @@ import { classifyClaudeTranscript, createClaudeRawParser } from "@anamnesis/back
 import { RpcClient } from "./client.ts";
 import { ingestRawLane } from "./raw-lane.ts";
 
-/** Claude transcript export lane; the shared pipeline in raw-lane.ts owns admission. */
 export function ingestClaudeRaw(root: string, checkpoint: string, client: RpcClient): Promise<void> {
   return ingestRawLane(root, checkpoint, client, {
     source: "claude-raw", format: "claude-raw-snapshot/1", lineage: true,

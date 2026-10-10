@@ -40,7 +40,6 @@ export function timingLog(path: string, maxBytes = 8 * 1024 * 1024): TimingSink 
   };
 }
 
-// Enabled only by the continuous runner for its owned Node daemon.
 export const daemonTiming = process.env["ANAMNESIS_G006_TIMING_PATH"] ? timingLog(process.env["ANAMNESIS_G006_TIMING_PATH"]!) : undefined;
 export const timingContext = new AsyncLocalStorage<{ method: RpcMethod; id: number | string; connection: number }>();
 export async function runtimeTimed<T>(operation: string, action: () => PromiseLike<T>, hash?: string): Promise<T> {

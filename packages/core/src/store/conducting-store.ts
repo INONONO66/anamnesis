@@ -22,7 +22,6 @@ export type AuthoritySnapshot = {
 class AuthoritySnapshotError extends Error {
   constructor(readonly code: "authority_snapshot_unavailable", detail: string = code) { super(`${code}: ${detail}`); }
 }
-/** Each physical link yields one endpoint row per endpoint; malformed links, duplicate ids and self-links are reported alongside. */
 function physicalLinkRows(links: PhysicalConductor[]): { expected: Map<string, ConductingArcRow>; dataIssues: string[]; violations: string[] } {
   const expected = new Map<string,ConductingArcRow>(), dataIssues: string[] = [], violations: string[] = [], ids = new Set<string>();
   for (const link of links) {

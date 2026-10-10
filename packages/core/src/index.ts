@@ -8,7 +8,6 @@ export { admittedBudget, packRecall, renderContext } from "./recall.ts";
 export type {
   StoreOptions,
   PutResult,
-  SearchHit,
   IntegrityIssue,
 } from "./store.ts";
 
