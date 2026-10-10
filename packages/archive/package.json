@@ -1,0 +1,12 @@
+{
+  "name": "@anamnesis/archive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "zod": "^4.1.5"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
