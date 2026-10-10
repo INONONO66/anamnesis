@@ -20,7 +20,7 @@ export const adopt = (state: State, at: number, kappa: number): State => {
 export const replay = (m0: number, ingestedAt: number, hits: Hit[]): State => {
   let state: State = { stability: initialStability(m0), lastHit: ingestedAt, hitCount: 0 };
   for (const hit of [...hits].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))) {
-    state = hit.kind === "recall_hit" ? adopt(state, hit.at, hit.kappa) : state;
+    if (hit.kind === "recall_hit") state = adopt(state, hit.at, hit.kappa);
     state = { ...state, hitCount: state.hitCount + 1 };
   }
   return state;

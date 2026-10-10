@@ -81,7 +81,8 @@ export class RpcClient {
       }, 120_000);
       this.pending.set(id, { method, resolve, reject, timer, started });
       this.timing?.({ layer: "client", event: "request", id, method, deadlineMs: 120_000, bytes: bytes.length });
-      if (this.timing) this.socket.write(bytes, error => this.timing!({ layer: "client", event: error ? "write_failed" : "write_complete", id, method, elapsedMs: performance.now() - started }));
+      const timing = this.timing;
+      if (timing) this.socket.write(bytes, error => timing({ layer: "client", event: error ? "write_failed" : "write_complete", id, method, elapsedMs: performance.now() - started }));
       else this.socket.write(bytes);
     }) as Promise<Result<M>>;
   }

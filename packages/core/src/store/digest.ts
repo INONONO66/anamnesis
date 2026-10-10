@@ -29,9 +29,6 @@ export function sha256(data: Uint8Array | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-/** Used when no snapshot cutoff is given, so every invalidator applies. */
-export const END_OF_TIME = "9999-12-31T23:59:59.999Z";
-
 export const CANONICAL_DIGEST = "rfc8785-v1";
 
 

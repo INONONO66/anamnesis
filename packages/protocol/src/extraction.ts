@@ -52,7 +52,8 @@ export type ExtractionModelOutput = z.infer<typeof ExtractionModelOutput>;
 export const ExtractionOutput = z.strictObject({ canonical_body: bounded(65536), body_digest: hash, spans, language: bounded(64), modality }).superRefine((v, ctx) => {
   try {
     const body: unknown = JSON.parse(v.canonical_body);
-    if (canonicalExtractionBody(body) !== v.canonical_body || extractionBodyDigest(body) !== v.body_digest) throw new Error("digest");
+    if (canonicalExtractionBody(body) !== v.canonical_body
+      || createHash("sha256").update(v.canonical_body).digest("hex") !== v.body_digest) throw new Error("digest");
     const parsed = ExtractionModelOutput.parse(body);
     const evidence = parsed.task === "claim" ? parsed.claims.map(c => c.evidence) : parsed.task === "judge_claims" ? parsed.decisions.map(d => d.evidence) : parsed.task === "judge_relations" ? [] : parsed.spans;
     if (canonicalExtractionBody(evidence) !== canonicalExtractionBody(v.spans) || parsed.language !== v.language || parsed.modality !== v.modality) throw new Error("metadata");

@@ -4,40 +4,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { Database } from "bun:sqlite";
 
-/**
- * The raw snapshot keeps one directory per agent product under `raw/`, and
- * most of those directories hold no conversation at all: an editor's crash
- * log, a password vault, a calendar cache and a not-yet-used event bus all
- * sit beside the four stores that actually carry recallable turns. Each
- * verdict below was taken against the snapshot's own bytes, and the ones that
- * carry nothing are named here rather than silently skipped, so a store that
- * starts carrying conversation later shows up as an unrecognized directory
- * instead of disappearing into a wildcard:
- *
- *   aside               ingest  `sessions/<n>/messages.jsonl` conversation turns
- *   gemini-antigravity  ingest  `brain/<id>/.../transcript.jsonl` steps
- *   opencode            ingest  `prompt-history.jsonl` submitted prompts
- *   openomni            skip    every conversation table is empty
- *   claude-project      skip    a calendar dataset, not a transcript
- *   cursor              skip    editor and extension diagnostics
- *   codex-desktop       skip    Electron IPC and updater diagnostics
- *   zed                 skip    memory and worktree diagnostics
- *   ouro                skip    structured runtime logs
- *   anamnesis           skip    this project's own sync log
- */
-const SKIPPED_STORES: readonly string[] = [
-  "anamnesis",
-  "claude-project",
-  "codex-desktop",
-  "cursor",
-  "openomni",
-  "ouro",
-  "zed",
-];
-
 export type MiscRawEpisode = RawSessionEpisode;
 
-/** One accepted turn, resolved against the store that produced it. */
 interface MiscTurn {
   source: string;
   session: string;
@@ -47,9 +15,6 @@ interface MiscTurn {
   text: string;
   properties: Record<string, string>;
 }
-
-
-
 /**
  * A transcript line the runtime wrote mid-crash is the one line that must not
  * abort the backfill, so an unreadable record is skipped rather than thrown.
@@ -396,6 +361,11 @@ export function createMiscRawParser(context: MiscRawContext, strict = false): (l
   };
 }
 
+/**
+ * Only these three stores carry recallable turns in the snapshot. Other
+ * directories contain diagnostics, caches or empty conversation tables;
+ * admitting an unknown layout would silently ingest non-conversation data.
+ */
 const COLLECTORS: Readonly<
   Record<string, (storeRoot: string) => Promise<MiscRawEpisode[]>>
 > = {
@@ -416,7 +386,6 @@ const COLLECTORS: Readonly<
 export async function collectMiscRaw(root: string): Promise<MiscRawEpisode[]> {
   const turns: MiscRawEpisode[] = [];
   for (const name of await entries(root)) {
-    if (SKIPPED_STORES.includes(name)) continue;
     const collect = COLLECTORS[name];
     if (collect === undefined) continue;
     const storeRoot = join(root, name);

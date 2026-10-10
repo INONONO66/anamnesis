@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Socket } from 'node:net';
@@ -16,6 +16,7 @@ const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNES
 assert.ok(uri && password, 'owned graph credentials required');
 const red = process.env.TOKENIZER_PHASE === 'red';
 const evidence = resolve(process.env.TOKENIZER_EVIDENCE ?? '.omo/evidence/g003-tokenizer-runtime');
+await mkdir(evidence, { recursive: true });
 const collisions = process.env.TOKENIZER_COLLISIONS === '1';
 const root = await mkdtemp('/tmp/g003-token-'), token = randomUUID();
 const code = await readFile('app/anamnesis/tokenizer.fixture.cjs');

@@ -110,10 +110,6 @@ async function supersedesTx(tx: ManagedTransaction, primary: RpcRecallItem, deni
 export class RecallStore {
   constructor(private readonly core: StoreCore, private readonly extraction: ExtractionStore, private readonly receipts: ReceiptStore) {}
 
-  /** Originals-only increment. All candidate reads, policy revalidation, source
-   * resolution, packing and receipt issuance share the Meta write barrier.
-   * The daemon serial owner writes the response before acknowledging any policy
-   * command. No derived authority, profile-cache anchors or PPR are invented. */
   /** Derived Facts as ranked items: each is rechecked against policy through its source Episode, its contrast peers
    * become companions, and every served Fact joins `ranked`. */
   private async factItemsTx(tx: ManagedTransaction, policy: PolicyState, generation: string, T: string, derivedNodes: Map<string, ElementNode>,
@@ -147,6 +143,9 @@ export class RecallStore {
     }
     return factItems;
   }
+  /** Candidate reads, policy revalidation, source resolution, packing and receipt
+   * issuance share the Meta write barrier; policy commands acknowledge after
+   * the daemon writes the response. */
   async recall(input: z.input<typeof RpcRecallParams>, context: InstallationContext): Promise<RpcRecallResult> {
     requireInstallation(context);
     const request = RpcRecallParams.parse(input), budget = admittedBudget(request.budget, this.core.tokenizers, this.core.recallDefaultBytes);

@@ -352,7 +352,6 @@ export class DurableSpool {
       boundary > info.size || !proofBytes || !/^[a-f0-9]{64}$/.test(proofBytes.toString())) throw new CorruptSpool("invalid admission");
     return { marker, boundary, proof: proofBytes.toString() };
   }
-  /** One length-prefixed, checksummed, canonical-JSON frame at offset; every violation is a CorruptSpool. */
   private async readFrame(handle: Awaited<ReturnType<typeof open>>, offset: number, boundary: number): Promise<Frame> {
     if (boundary - offset < 4) throw new CorruptSpool("short frame header");
     const header = await this.readAt(handle, offset, 4); const length = header.readUInt32BE(0);

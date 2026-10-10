@@ -42,7 +42,7 @@ export function loadTokenizers(raw = process.env["ANAMNESIS_TOKENIZER_CONFIG"]):
   const assets = Object.create(null) as Record<string, Uint8Array>;
   const manifest: [string, string][] = [];
   let remaining = 256 * 1024 * 1024;
-  for (const asset of [...config.assets].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+  for (const asset of config.assets.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
     if (Object.hasOwn(assets, asset.name)) throw new Error("duplicate tokenizer asset");
     const bytes = snapshot(asset.path, remaining); remaining -= bytes.length;
     assets[asset.name] = new Uint8Array(bytes);

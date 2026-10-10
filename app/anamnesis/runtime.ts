@@ -35,8 +35,7 @@ const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const originKey = (params: RpcRememberParams) => { const o = params.episode.origin; return sha(JSON.stringify([o.source, o.session, o.actor, o.record])); };
 // Origin field order is explicit, not object-insertion dependent.
 function revisionKey(params: RpcRememberParams): string {
-  const o = params.episode.origin;
-  return sha(JSON.stringify([sha(JSON.stringify([o.source, o.session, o.actor, o.record])), params.source_revision]));
+  return sha(JSON.stringify([originKey(params), params.source_revision]));
 }
 interface Binding { digest_version: 1; params: RpcRememberParams; body_digest: string; incarnation: string; fs_epoch: string; }
 const Binding = { parse(value: unknown): Binding {
@@ -509,7 +508,7 @@ export class Runtime {
     while (progress) {
       progress = false;
       yield* this.eachPendingPage(cohort, async function* (entry) {
-                let binding: Binding;
+        let binding: Binding;
         try { binding = runtime.validated(entry); }
         catch (error) {
           const reason = fault(error).code;

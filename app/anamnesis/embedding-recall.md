@@ -234,6 +234,5 @@ coverage-prefix ledger, hidden-source inference, or latency/semantic efficacy
 claim is made. Ordering is deterministic for captured inputs within the pinned
 numeric runtime; ANN/index state and elapsed server time are not replay tokens.
 The authority-bearing core path is `Store.recall` / `Engine.recallHybrid`
-behind the `recall` RPC. `Engine.recall(string)` is a privileged
-fulltext-only helper used by tests, not a serving surface, and is slated
-for removal.
+behind the `recall` RPC; there is no privileged fulltext-only recall path,
+and the engine tests exercise the serving route through `Engine.recallHybrid`.

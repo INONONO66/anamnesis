@@ -5,7 +5,7 @@ import { mkdir, open, rename, rm, lstat, readdir, readFile, writeFile } from "no
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { dirname, join, resolve } from "node:path";
-import { ARCHIVE_LIMITS, preflightArchive, verifyAuthoritySnapshot, type ArchiveCompatibility, type ArchiveManifest, type AuthoritySnapshot } from "./archive-manifest.ts";
+import { ARCHIVE_LIMITS, canonical, preflightArchive, sha256 as hash, verifyAuthoritySnapshot, type ArchiveCompatibility, type ArchiveManifest, type AuthoritySnapshot } from "./archive-manifest.ts";
 
 /** The only boundary at which process, Neo4j, spool, or source identity effects may occur. */
 export interface TrustedAuthorityAdapter {
@@ -28,8 +28,6 @@ export interface TrustedAuthorityAdapter {
 export interface BackupInput { root: string; destination: string; operationId: string; compatibility: ArchiveCompatibility; manifest: ArchiveManifest; objectRoot?: string; }
 export interface RestoreInput { archive: string; liveRoot: string; stagingRoot: string; rollbackRoot: string; operationId: string; compatibility: ArchiveCompatibility; expectedSourceId: string; }
 class AuthorityOrchestrationError extends Error { constructor(public readonly code: string, message: string) { super(`${code}: ${message}`); } }
-const hash = (b: Uint8Array | string) => createHash("sha256").update(b).digest("hex");
-const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v !== null && typeof v === "object" ? `{${Object.keys(v as object).sort().map(k => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}` : JSON.stringify(v);
 const ownedPrivate = (s: BigIntStats) => s.uid === BigInt(process.getuid!()) && (s.mode & 0o022n) === 0n;
 const ownedDir = async (p: string) => { const s = await lstat(p, { bigint: true }); if (!s.isDirectory() || !ownedPrivate(s)) throw new AuthorityOrchestrationError("unsafe_path", "owned private directory required"); return s; };
 const fsync = async (p: string) => { const f = await open(p, constants.O_RDONLY); try { await f.sync(); } finally { await f.close(); } };

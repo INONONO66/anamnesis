@@ -48,7 +48,6 @@ export async function foreground(): Promise<void> {
       if (fault(error).code === "ownership_lost") lostOwnership();
     }
   };
-  /** One embedding turn over Episodes lacking a vector. */
   const embeddingTurn = async () => {
     embeddingReady = false;
     try {
@@ -289,7 +288,6 @@ export async function foreground(): Promise<void> {
   const server = createServer(accept("uds"));
   const tcpServer = listen ? createServer(accept("tcp")) : undefined;
   const listeners = tcpServer ? [server, tcpServer] : [server];
-  /** Object uploads, audit pipelines, embedding recovery, backup/restore and hit-cache maintenance. */
   function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" }>): unknown {
     switch (request.method) {
       case "object.begin": return runtime.uploads.begin(connection, { hash: request.params.sha256, size: request.params.size, media_type: request.params.media_type });

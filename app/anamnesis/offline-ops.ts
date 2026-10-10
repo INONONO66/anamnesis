@@ -1,10 +1,10 @@
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, writeFile, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { Engine } from "@anamnesis/core";
 import { acquireInstallation } from "./config.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
-import { preflightArchive, type ArchiveCompatibility, type ArchiveManifest } from "./archive-manifest.ts";
+import { preflightArchive, sha256 as hash, type ArchiveCompatibility, type ArchiveManifest } from "./archive-manifest.ts";
 import { createRuntimeAuthority, fencedAdapter, manifestTemplate, objectInventory, readRestoredAuthority, removeContainer, startRestoredDatabase, type RestoredDatabase } from "./runtime-authority.ts";
 import { OwnedNeo4jAdapter, NEO4J_IMAGE, NEO4J_VERSION } from "./owned-neo4j-adapter.ts";
 import type { InstallationContext } from "@anamnesis/core";
@@ -13,7 +13,6 @@ const IMAGE_DIGEST = NEO4J_IMAGE.slice("neo4j@".length);
 const compatibility: ArchiveCompatibility = { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [NEO4J_VERSION], neo4j_image_digests: [IMAGE_DIGEST], episode_digest_version_ceiling: 2 };
 const context = (): InstallationContext => ({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() });
 const configBytes = () => Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
-const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 async function uniqueOperation(): Promise<string> { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; }
 
@@ -52,7 +51,7 @@ export async function offlineBackup(root: string, destination: string): Promise<
 export async function offlineRestore(root: string, archive: string): Promise<{ operation_id: string; manifest: ArchiveManifest; container: string; uri: string }> {
   const admitted = await preflightArchive(archive, compatibility);
   const operationId = admitted.manifest.operation_id;
-  const token = (() => { try { return process.env["ANAMNESIS_RUNTIME_TOKEN"] ?? randomUUID(); } catch { return randomUUID(); } })();
+  const token = process.env["ANAMNESIS_RUNTIME_TOKEN"] ?? randomUUID();
   const incarnation = randomUUID();
   const staging = `${root}.restore-staging.${operationId}`, rollback = `${root}.restore-rollback.${operationId}`;
   const owner = process.env["ANAMNESIS_QA_OWNER"];

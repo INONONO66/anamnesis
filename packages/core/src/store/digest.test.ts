@@ -1,11 +1,16 @@
 import { expect, test } from "bun:test";
 import { EpisodeLineageError, extractionBodyDigest, type EchoLineage } from "@anamnesis/protocol";
-import { StorageContractError, verifyLineageRetry, verifyEpisodeLineage } from "./digest.ts";
+import { StorageContractError, canonicalJson, verifyLineageRetry, verifyEpisodeLineage } from "./digest.ts";
 
 const uuid = (n: number) => `018f5b5e-7b1e-7abc-8def-${String(n).padStart(12, "0")}`;
 const lineage: EchoLineage = { episode_id: uuid(1), lineage_mode: "receipts", parent_recall_ids: [uuid(2), uuid(3)],
   context_digests: ["a".repeat(64), "b".repeat(64)], root_episode_ids: [uuid(4)], echo_depth: 1, complete: true };
 const retry = { origin_role: "assistant", lineage_mode: "receipts", parent_recall_ids: [uuid(3), uuid(2)] };
+
+test("canonical JSON sorts integer-like property names and rejects lone surrogates", () => {
+  expect(canonicalJson({ "2": "later", "10": "first" })).toBe('{"10":"first","2":"later"}');
+  expect(() => canonicalJson({ nested: ["\ud800"] })).toThrow(StorageContractError);
+});
 
 test("Episode lineage properties verify the complete retained body and reject corruption", () => {
   const { episode_id, complete, ...body } = lineage;

@@ -53,9 +53,8 @@ Not in code: Fact, Entity and relationship vectors (no `vec_fact_*` or
 channel, the Entity identity channel, hub damping, the top-128 seed cap,
 the 2,000-node / 20,000-link bounded envelope and its timeout degradation,
 D46 occurrence grouping, the same-session ±N window around source Episodes,
-dreaming, and the version-2 digest. `Engine.recall(string)` is a
-fulltext-only test helper, not a serving surface, and is slated for
-removal.
+dreaming, and the version-2 digest. The former `Engine.recall(string)`
+fulltext-only test helper is gone; tests go through `Engine.recallHybrid`.
 
 Everything below is the normative target, not a description of the code.
 Wherever the code at HEAD disagrees with these documents, v0.1 brings it in

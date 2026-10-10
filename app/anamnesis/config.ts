@@ -17,7 +17,11 @@ export const DEFAULT_RELATION_PROMPT_FILE = fileURLToPath(new URL("./prompts/jud
 export interface ExtractionPacingConfig { readonly maxInFlight: number; readonly minIntervalMs: number; readonly jitterFraction: number }
 export const EXTRACTION_PACING_DEFAULTS: ExtractionPacingConfig = Object.freeze({ maxInFlight: 4, minIntervalMs: 0, jitterFraction: 0.5 });
 /** Environment numbers arrive as strings; blank is a configuration error, not zero. */
-const numeric = (value: string | undefined) => value === undefined ? undefined : value.trim() === "" ? NaN : Number(value);
+const numeric = (value: string | undefined) => {
+  if (value === undefined) return undefined;
+  if (value.trim() === "") return NaN;
+  return Number(value);
+};
 const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_EMBEDDING_BASE_URL: providerUrl.optional(),
   ANAMNESIS_EMBEDDING_MODEL: providerName.default("Qwen3-Embedding-0.6B"),

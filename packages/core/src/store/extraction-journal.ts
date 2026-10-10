@@ -57,7 +57,6 @@ const FileSchema = z.strictObject({
 });
 type JournalFile = z.infer<typeof FileSchema>;
 
-/** Serial write-through operational state for extraction pipelines. */
 export class ExtractionJournal {
   private readonly file: StateFile<ExtractionJournalEntry>;
 

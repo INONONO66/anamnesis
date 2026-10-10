@@ -20,9 +20,7 @@ interface CodexRecord {
   payload: Record<string, unknown>;
 }
 
-/** A rollout record reduced to the fields the originals contract consumes. */
 interface CodexTurn {
-  index: number;
   occurredAt: number;
   text: string;
   canonicalKind: string;
@@ -32,8 +30,6 @@ interface CodexTurn {
 }
 
 export type CodexRawEpisode = RawSessionEpisode;
-
-
 
 /**
  * Rollout files are appended live, so a session killed mid-write leaves a
@@ -140,7 +136,6 @@ function toTurn(
 
   if (payloadType === "context_compacted") {
     return {
-      index,
       occurredAt,
       text: COMPACTION_TEXT,
       canonicalKind: "compaction",
@@ -162,7 +157,6 @@ function toTurn(
   const resolved =
     role ?? (payloadType === "user_message" ? "user" : "assistant");
   return {
-    index,
     occurredAt,
     text,
     canonicalKind: "agent_message",
@@ -172,7 +166,6 @@ function toTurn(
   };
 }
 
-/** Session-level context the export attached to every turn it emitted. */
 interface SessionContext {
   id: string;
   cwd?: string;

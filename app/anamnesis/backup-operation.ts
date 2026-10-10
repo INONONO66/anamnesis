@@ -199,8 +199,12 @@ async function exists(path: string): Promise<boolean> { try { await fs.lstat(pat
 function recovery(state: BackupState): BackupRecovery {
   const failed = state.phase === "FAILED", phase = failed ? state.history.at(-1)!.expected_phase : state.phase;
   const previousIntent = failed ? state.history.at(-2)?.intent ?? "prepare_destination_and_cutoff" : state.intent;
-  return { action: phase === "COMPLETE" ? "none" : phase === "COPYING" && previousIntent === "publish_complete" ? "inspect_publication" : phase === "DB_STARTED" || phase === "COPYING" ? "inspect_archive_before_resume" : "inspect_database_before_gate_release",
-    failed_from: failed ? phase : null, preserve_dump: state.history.some(c => c.phase === "DUMPED"), may_release_gate: false };
+  let action: BackupRecovery["action"];
+  if (phase === "COMPLETE") action = "none";
+  else if (phase === "COPYING" && previousIntent === "publish_complete") action = "inspect_publication";
+  else if (phase === "DB_STARTED" || phase === "COPYING") action = "inspect_archive_before_resume";
+  else action = "inspect_database_before_gate_release";
+  return { action, failed_from: failed ? phase : null, preserve_dump: state.history.some(c => c.phase === "DUMPED"), may_release_gate: false };
 }
 function result(state: BackupState): BackupStatus { return { status: state.phase === "COMPLETE" || state.phase === "FAILED" ? "terminal" : "pending", operation_id: state.body.operation_id, state, recovery: recovery(state) }; }
 

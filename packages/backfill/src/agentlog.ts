@@ -2,7 +2,6 @@ import { byEpisodeTime, optionalText, rawEpisode, type RawSessionEpisode } from 
 import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** Only the fields the originals contract consumes are modelled. */
 interface AgentEvent {
   provider: string;
   partition_id: string;
@@ -15,7 +14,6 @@ interface AgentEvent {
 }
 
 export type AgentLogEpisode = RawSessionEpisode;
-
 
 function requiredText(value: unknown, field: string, line: string): string {
   const text = optionalText(value);
@@ -54,7 +52,6 @@ function parseEvent(line: string): AgentEvent {
   };
 }
 
-/** Every field the originals contract requires is present and usable. */
 interface RecallableEvent extends AgentEvent {
   occurred_at: number;
   text: string;

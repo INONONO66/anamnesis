@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { mkdir, open, stat } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
@@ -11,7 +11,6 @@ export const NEO4J_IMAGE = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f
 export const NEO4J_VERSION = "5.26.30";
 const OWNER_LABEL = "anamnesis.qa.owner";
 
-/** Runs one docker sub-command; `args` never include the `docker` executable itself. */
 type Exec = (args: string[]) => Promise<{ stdout: string }>;
 export interface OwnedNeo4jAdapterOptions {
   container: string;
@@ -40,7 +39,7 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
 
   private async assertOwned(): Promise<void> {
     const result = await this.run(["inspect", "--format", "{{json .}}", this.options.container]);
-    const value = JSON.parse(result.stdout) as { Config?: { Labels?: Record<string, string> }; State?: { Running?: boolean } };
+    const value = JSON.parse(result.stdout) as { Config?: { Labels?: Record<string, string> } };
     if (value.Config?.Labels?.[OWNER_LABEL] !== this.options.owner) throw new Error("owned_container_required");
   }
 
@@ -62,7 +61,7 @@ export class OwnedNeo4jAdapter implements TrustedAuthorityAdapter {
     if (!child.stdout) throw new Error("dump_stdout_unavailable");
     let stderr = ""; child.stderr?.on("data", b => { stderr += b.toString(); });
     const completion = new Promise<number>((resolve, reject) => { child.once("error", reject); child.once("close", c => resolve(c ?? 1)); });
-    await pipeline(child.stdout, (await import("node:fs")).createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+    await pipeline(child.stdout, createWriteStream(destination, { flags: "wx", mode: 0o600 }));
     if (await completion !== 0) throw new Error(`neo4j_dump_failed: ${stderr.slice(-1000)}`);
     await fsync(destination);
     const bytes = (await stat(destination)).size;

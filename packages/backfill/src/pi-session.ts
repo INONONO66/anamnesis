@@ -61,7 +61,6 @@ function parseEvent(line: string): RawEvent | undefined {
   const type = optionalText(raw["type"]);
   const id = optionalText(raw["id"]);
   const timestamp = optionalTime(raw["timestamp"]);
-  // A missing type falls through the two type checks below.
   if (id === undefined || timestamp === undefined) return undefined;
   if (type === "compaction") {
     const summary = optionalText(raw["summary"]);

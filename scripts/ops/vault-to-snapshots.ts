@@ -41,7 +41,6 @@ type Json = Record<string, unknown>;
 const obj = (value: unknown): Json | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : null;
 const str = (value: unknown): string | null => typeof value === "string" ? value : null;
 
-/** A string passes through; an array yields its `{ type, text }` blocks whose type is admitted. */
 function textBlocks(value: unknown, types: readonly string[]): string | null {
   if (typeof value === "string") return value;
   if (!Array.isArray(value)) return null;

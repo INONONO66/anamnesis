@@ -29,7 +29,6 @@ import { bytesToHex } from "@noble/hashes/utils.js";
  * export ever produced is derived differently because of it.
  */
 
-/** Only the fields the originals contract consumes are modelled. */
 interface ClaudeRecord {
   type?: string;
   subtype?: string;
@@ -58,7 +57,6 @@ interface ClaudeMessage {
 
 export type ClaudeRawEpisode = RawSessionEpisode;
 
-/** A record the transcript accepted, carrying everything an episode needs. */
 interface AcceptedRecord {
   record: string;
   text: string;
@@ -66,8 +64,6 @@ interface AcceptedRecord {
   kind: string;
   occurredAt: number;
 }
-
-
 function optionalFlag(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
@@ -497,31 +493,22 @@ export function createClaudeRawParser(transcript: Transcript, strict = false): (
       if (strict) throw new Error("source_invalid_record");
       return [];
     }
+    const cwd = value.cwd ?? context.cwd;
+    const gitBranch = value.gitBranch ?? context.gitBranch;
+    const parentSession = value.sessionId ?? context.sidechain?.parentSession;
     context = {
       session:
         sidechain === undefined
           ? (value.sessionId ?? context.session)
           : context.session,
-      ...(value.cwd === undefined
-        ? context.cwd === undefined
-          ? {}
-          : { cwd: context.cwd }
-        : { cwd: value.cwd }),
-      ...(value.gitBranch === undefined
-        ? context.gitBranch === undefined
-          ? {}
-          : { gitBranch: context.gitBranch }
-        : { gitBranch: value.gitBranch }),
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(gitBranch === undefined ? {} : { gitBranch }),
       ...(sidechain === undefined
         ? {}
         : {
             sidechain: {
               ...sidechain,
-              ...(value.sessionId === undefined
-                ? context.sidechain?.parentSession === undefined
-                  ? {}
-                  : { parentSession: context.sidechain.parentSession }
-                : { parentSession: value.sessionId }),
+              ...(parentSession === undefined ? {} : { parentSession }),
             },
           }),
     };

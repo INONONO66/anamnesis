@@ -98,10 +98,6 @@ export class ActivationStore {
     }
     return null;
   }
-  /** Each explicit advance seals at most 256 terminal outcomes, including
-   * content-free omissions. Retry is then forbidden for that sealed work.
-   * The shared generation cursor is the minimum of the two partition cursors;
-   * these are audit coverage partitions, not embedding/recall readiness gates. */
   /** A covered source's contribution to the omission digest: a pipeline's omission or its sealed decisions, a plain
    * attempt's terminal failure or refusal; a retained successful attempt leaves the digest as it was. */
   private async coverageOmissionTx(tx: ManagedTransaction, task: ModelTask, attempt: ExtractionAttempt, prior: string): Promise<string> {

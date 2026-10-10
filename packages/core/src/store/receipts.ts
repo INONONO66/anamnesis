@@ -1,7 +1,6 @@
-import { RecallLineageSelection } from "@anamnesis/protocol";
+import { RecallLineageSelection, RpcRecallResult } from "@anamnesis/protocol";
 import { z } from "zod";
 import { ADOPTION_NUMERIC_VERSION } from "../dynamics/adoption-numeric.ts";
-import { RpcRecallResult } from "@anamnesis/protocol";
 
 export function luceneQuery(raw: string): string {
   return raw
@@ -93,5 +92,3 @@ export class ReceiptError extends Error {
     super(`${code}: ${detail}`);
   }
 }
-/** Internal transport context, never parsed from request params. The daemon sets
- * this only after validating the installation token; client labels confer nothing. */
