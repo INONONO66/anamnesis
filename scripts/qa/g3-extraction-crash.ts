@@ -75,17 +75,20 @@ export async function runG3ExtractionCrash(uri: string, password: string, eviden
     const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     assert.ok(body && typeof body === "object" && "messages" in body && Array.isArray(body.messages));
     const user = body.messages.find((message: { role?: string }) => message.role === "user");
-    const input: { task: string; text: string; claim_context?: { body_digest: string; claims: { evidence: { text: string } }[] };
+    const input: { task: string; text: string; episodes?: { id: string; text: string }[];
+      claim_context?: { body_digest: string; claims: { evidence: { text: string } }[] };
       relation_context?: { body_digest: string; candidates: { id: string }[] } } = JSON.parse(user.content);
-    if (input.task === "claim" && input.text === interruptedText && gateClaim) {
+    // D56 claims arrive as one window per provider call; the window holding the interrupted Episode is the one held open.
+    if (input.task === "claim_window" && gateClaim && input.episodes?.some(episode => episode.text === interruptedText)) {
       gateClaim = false;
       held = response;
       received();
       return;
     }
-    const output = input.task === "claim"
-      ? { task: "claim", claims: [{ text: input.text, evidence: input.text, confidence: 0.9,
-        entities: [{ mention: "grounded", normalized_name: "grounded", entity_kind: "concept" }] }], language: "en", modality: "text" }
+    const claims = (text: string) => [{ text, evidence: text, confidence: 0.9,
+      entities: [{ mention: "grounded", normalized_name: "grounded", entity_kind: "concept" }] }];
+    const output = input.task === "claim_window"
+      ? { task: "claim_window", episodes: input.episodes?.map(({ id, text }) => ({ id, claims: claims(text), language: "en", modality: "text" })) }
       : input.task === "judge_claims"
         ? { task: "judge_claims", claim_body_digest: input.claim_context?.body_digest,
           decisions: input.claim_context?.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence.text, confidence: 0.9 })),
