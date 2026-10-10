@@ -12,19 +12,58 @@ layer and the Hit ledger are fixed in v0.1 and never change afterwards.
 
 ## Where the code is today
 
-The repository at the time of this finalization (baseline bc372ca) holds
-`packages/protocol`, `packages/core` and `packages/backfill`. What runs:
-an originals write path into Neo4j, a Lucene fulltext index over Element
-content (`element_content`, cjk analyzer), a `remember` that stores Episodes
-and a `recall` that is fulltext search over them, plus source adapters for
-backfill. Nothing else in this document set exists in code yet: no vector
-channel, no Hit ledger or forgetting, no RecallReceipt, no utility, no
-policy RPCs, no budget, no derived layer, no PPR.
+The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
+`packages/protocol`, `packages/core` and `packages/backfill` plus the
+`app/anamnesis` daemon. What runs:
+
+- An originals write path into Neo4j with the version-1 Episode digest and
+  D49 lineage properties written in the Episode's own transaction, and a
+  Lucene fulltext index over Element content (`element_content`, cjk
+  analyzer).
+- The `recall` RPC, served as `Engine.recallHybrid` → `Store.recall`
+  (`packages/core/src/store/recall-store.ts`). Its candidate channels are
+  Episode exact-ID, Episode BM25, Episode session (recent Episodes of the
+  request session), Episode vector over `vec_episode_<profileId>` (LIMIT
+  64) and Fact BM25 for the selected extraction generation. On top of the
+  candidates: the T/now pin, the policy-revision barrier (D43), the exact
+  byte budget with a durable RecallReceipt (D44, D45), hit-cache retention
+  and utility in originals ranking, a real PPR solver
+  (`packages/core/src/dynamics/ppr.ts`) seeded uniformly from the
+  candidates over seed-adjacent ConductingArc (LIMIT 1024), the first
+  DERIVED_FROM row as Fact companion, and CONTRASTS peers (LIMIT 4) under a
+  current-policy check.
+- The Episode embedding lane: vectors on separate `Embedding_<profileId>`
+  nodes linked to the Episode, one `vec_episode_<profileId>` index per
+  profile, the `embedding-state.json` ledger and the `embedding.recover` /
+  `embedding.requeue` / `embedding.status` RPCs (D54).
+- The extraction scheduler (`packages/core/src/extraction-scheduler.ts`),
+  running continuously in the daemon one Episode per provider call through
+  the OpenAI-compatible chat provider: claim → judge → materialize Facts,
+  Entities, evidence and ConductingArc for the generation, with the
+  relation judge (D53) gating Fact→Fact relations. State lives in
+  `extraction-state.json` (D55); `extraction.audit.create` / `run` /
+  `status` run the same pipeline on demand. This is the production
+  extraction path, not an audit-only one.
+- Policy RPCs (D43), budget (D44), the Hit ledger with receipts (D45),
+  conflict bundles (D46), `backup` / `restore`, the authority snapshot and
+  the hit cache.
+
+Not in code: Fact, Entity and relationship vectors (no `vec_fact_*` or
+`vec_rel_*` index, no `embedding_m_<modelhex>` property), the Fact session
+channel, the Entity identity channel, hub damping, the top-128 seed cap,
+the 2,000-node / 20,000-link bounded envelope and its timeout degradation,
+D46 occurrence grouping, the same-session ±N window around source Episodes,
+dreaming, and the version-2 digest. `Engine.recall(string)` is a
+fulltext-only test helper, not a serving surface, and is slated for
+removal.
 
 Everything below is the normative target, not a description of the code.
-Wherever the code at the baseline disagrees with these documents, v0.1
-brings it in line: the docs lead. The gap is established by reading the
-baseline against docs/01 and docs/02, not by the list in this paragraph.
+Wherever the code at HEAD disagrees with these documents, v0.1 brings it in
+line: the docs lead. The gap is established by reading HEAD against docs/01
+and docs/02, not by the list above. The direction decided on 2026-10-11
+(a raw archive outside the graph as the collection SSOT, Fact-first recall
+with Episodes as provenance only, windowed extraction behind a cheap
+pre-gate) is recorded in D56.
 
 One boundary is deliberately narrower than "bring it in line". The Episode
 digest that ships today is D49's version 1, and v0.1 keeps it that way for

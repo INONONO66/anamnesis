@@ -1327,3 +1327,68 @@ The file is bounded. An entry is deleted once coverage sealed its source for its
 **Reason**: Neo4j holds memory, not pipeline bookkeeping; the labels were about 400k nodes of operational state that made backups, verify and the docs/01 layer model describe scheduling as if it were semantic. D54 already did the same move for the embedding lane and the pattern held: an atomic JSON file beside the runtime root, work rediscovered from the graph, failure history as the only thing that is lost with the file. (b) buys nothing, since the roughly 130 unsealed sources at cutover are redone idempotently. (c) would grow the file with the corpus (about one pipeline per Episode); pruning sealed entries keeps it proportional to in-flight work, and the audit log already records every terminal transition.
 
 **Trade-off accepted**: `extraction.audit.status {pipeline_id}` answers `unknown` for a pipeline whose entry has been pruned, where it used to return the sealed tasks and decisions from the graph, and every `ExtractionStore` transition on one of its tasks (`retryModelTask`, `cancelModelTask`, `settleModelTask`, `leaseModelTask`) throws `unknown_ModelTask` where a sealed task used to reach the `coverage_frozen` fence; both answers refuse the retry, and the scheduler only ever transitions tasks of a pipeline it has just read. Operators who need the history of a sealed pipeline read the audit log for its `pipeline_id`. The journal keeps an entry per pipeline in flight: a sealed omission keeps its entry only until both coverage partitions pass its source (the single tombstone-free rule), so the file size follows in-flight work, not the failure history. The migration refuses to run while a generation's two coverage cursors disagree (`check_coverage`): with no seeding, the lagging partition could neither read the deleted ledgers nor recreate the task behind the leading partition's fence; the previous daemon build reconciles the cursors from the ledgers first.
+
+## D56 — Raw archive as collection SSOT, Episodes as provenance only, Fact-first recall, windowed extraction (#G1)
+
+**Date**: 2026-10-11
+
+**Decision**: Collection has a source of truth outside Neo4j: a raw archive
+that keeps every original file byte-for-byte under a content address and
+turns every source message into one normalized record with its verbatim
+text, its origin (source, session, actor, record), its sequence, its role
+and its occurrence time with precision and kind. The archive reduces the
+input in exactly two ways: tool-call and tool-result parts are dropped, and
+byte-identical duplicate sessions collapse into one record set that keeps
+both origin paths. Nothing else changes on the way in. There is no masking,
+no truncation, no dedup of merely similar messages and no distinction
+between machines; a session is keyed by agent kind plus session id.
+
+The engine admits every archive record as its own Episode, unfiltered and
+unembedded. One source message is one Episode, Episodes are never merged,
+and the pre-admission filtering adapters retire. Episodes are provenance
+and context only and are never a vector target. The Episode embedding lane,
+the `vec_episode_<profileId>` index and the `originals-hybrid-v1` increment
+retire once Fact vectors ship, and the activation coverage gate of an
+extraction generation (`selected_model_embedding_coverage`) then counts the
+Fact vectors of that generation instead of source-Episode vectors.
+
+Recall is Fact-first. Vectors live on Facts in `vec_fact_<profileId>`; the
+vector channel searches Facts and resolves their source Episodes through
+`DERIVED_FROM`. The response carries a bounded same-session window around
+each source Episode, by default two Episodes before and two after under the
+same session key, inside the D44 budget, so the caller reads the memory in
+its original context.
+
+Extraction submits windows instead of single Episodes: six to eight
+same-session Episodes plus two or three context Episodes per provider call,
+while every Episode in the window keeps its own `DERIVED_FROM` attribution.
+A cheap pre-gate scores Episodes from 0 to 1 and skips windows below a
+threshold. The gate is `JevGate`, typesafe-ai/jev through the Vercel AI
+Gateway, with the model id fixed at construction and any other id refused;
+its key is read from a file under `~/.config/anamnesis` and never logged.
+The custody and restart semantics of `extraction-state.json` (D46, D49, D50,
+D55) don't change.
+
+D43 through D47, D49 and D50 stay normative. D56 supersedes the parts of
+docs/05 §2 and of docs/01 "The embedding stream" that name Episode vectors,
+and the per-Episode extraction call shape in docs/02.
+
+**Alternative**: (a) keep Episode vectors beside Fact vectors, paying the
+embedding cost twice and running two coverage gates; (b) filter at
+collection time, which loses provenance and makes later re-extraction
+impossible; (c) merge turns into one Episode, which breaks per-message
+provenance and the D49 lineage; (d) send every window to Haiku without a
+gate, so cost scales with chatter.
+
+**Reason**: the archive already exists outside the engine, and provenance
+has to survive any future re-extraction, which only an unreduced record set
+guarantees. Recall quality comes from Facts read with their source context,
+not from similarity over raw messages. Batching cuts the per-call overhead
+of extraction, and the gate drops the windows that would produce no Facts.
+
+**Trade-off accepted**: a cold archive is re-admitted in full; no pre-filter
+saves ingest cost. Recall can't find a message that produced no Fact except
+through the BM25, session and exact channels. A wrong gate threshold skips
+material silently, so the gate score is stored per window in
+`extraction-state.json` for audit. Fact vectors are generation-scoped, so a
+generation cutover re-embeds.
