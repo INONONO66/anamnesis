@@ -105,18 +105,20 @@ export type RpcOutputBudget = z.infer<typeof RpcOutputBudget>;
 
 export const RpcRecallParams = z.strictObject({
   query: boundedString(8192, 0), limit: counter.max(64).default(10),
+  window: counter.max(8).default(2),
   budget: RpcOutputBudget.optional(), T: counter.max(8640000000000000).optional(),
   session: z.strictObject({ source: identifier, session: identifier }).optional(),
 });
-export type RpcRecallParams = z.infer<typeof RpcRecallParams>;
-export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), episode_id: z.uuidv7() });
+/** Callers may omit defaulted fields; parsing supplies limit and window. */
+export type RpcRecallParams = z.input<typeof RpcRecallParams>;
+export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), fact_id: z.uuidv7() });
 export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams>;
 export const RpcEmbeddingStatusParams = z.strictObject({ operation_id: z.uuidv7() });
-/** provider_unavailable is transient: the ledger defers the Episode until its retry
+/** provider_unavailable is transient: the ledger defers the Fact until its retry
  * budget is spent, then quarantines it as provider_unavailable_exhausted. Every other reason quarantines at once. */
 const RpcEmbeddingAttemptReason = z.enum(["provider_unavailable", "provider_unavailable_exhausted", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "stale_input"]);
 export const RpcEmbeddingAttempt = z.strictObject({
-  operation_id: z.uuidv7(), episode_id: z.uuidv7(), profile_id: RpcHash,
+  operation_id: z.uuidv7(), fact_id: z.uuidv7(), profile_id: RpcHash,
   model: identifier, model_incarnation: RpcHash, dimensions: positiveCounter.max(4096),
   input_revision: RpcHash, input_digest: RpcHash, created_at: counter, completed_at: counter.nullable(),
   state: z.enum(["pending", "succeeded", "quarantined", "deferred"]),
@@ -135,7 +137,9 @@ export type RpcEmbeddingRequeueResult = z.infer<typeof RpcEmbeddingRequeueResult
 export const RpcRecallChannel = z.enum(["identity", "bm25", "vector", "session"]);
 export const RpcRecallItem = z.discriminatedUnion("kind", [
   z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), schema: z.enum(EPISODE_SCHEMAS), epistemic: z.literal("observed"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1), provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.enum(["Episode", "Fact"]), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
-  z.strictObject({ id: z.uuidv7(), kind: z.literal("Fact"), schema: z.literal(SCHEMA_ID.CLAIM), epistemic: z.literal("derived"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1), provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
+  z.strictObject({ id: z.uuidv7(), kind: z.literal("Fact"), schema: z.literal(SCHEMA_ID.CLAIM), epistemic: z.literal("derived"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1),
+    window: z.strictObject({ source: z.uuidv7(), before: z.array(z.uuidv7()).max(8), after: z.array(z.uuidv7()).max(8) }),
+    provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
 ]);
 export type RpcRecallItem = z.infer<typeof RpcRecallItem>;
 export const RpcRecallResult = z.strictObject({
@@ -144,7 +148,7 @@ export const RpcRecallResult = z.strictObject({
   context_text: unicodeString, used_budget: counter, budget: RpcOutputBudget,
   renderer: z.literal("canonical-jsonl-v1"),
   diagnostics: z.strictObject({
-    pipeline: z.enum(["originals-hybrid-v1", "derived-hybrid-v1"]), now: counter, T: counter, policy_revision: counter,
+    pipeline: z.literal("derived-hybrid-v1"), now: counter, T: counter, policy_revision: counter,
     channels_used: z.array(RpcRecallChannel).max(4),
     vector_reason: z.enum(["not_configured", "not_requested", "provider_unavailable", "provider_rejected", "profile_mismatch", "invalid_vector", "input_too_large", "available"]),
     embedding_profile_id: RpcHash.nullable(), candidate_count: counter.max(177), skipped_bundles: counter.max(177),

@@ -62,12 +62,13 @@ async function entityWitnessesBadTx(tx: ManagedTransaction, generation: string, 
   return entities.records.length > maxDerived || entities.records.some(row => row.get("witnesses") !== 1);
 }
 
-/** The selected embedding profile must be the only configured one and must carry a vector for every covered source. */
-async function embeddingCoverageBadTx(tx: ManagedTransaction, profileId: string, sources: CoveredSource[]): Promise<boolean> {
+/** The selected embedding profile must be the only configured one and must cover every Fact of the generation. */
+async function embeddingCoverageBadTx(tx: ManagedTransaction, profileId: string, generation: string): Promise<boolean> {
   const configured = await tx.run(`MATCH (p:EmbeddingProfile) RETURN p.id AS id`);
-  const vectors = await tx.run(`MATCH (v:EmbeddingVector {profile_id:$profile}) RETURN v.episode_id AS episode`, { profile: profileId });
-  const vectorEpisodes = new Set(vectors.records.map(record => record.get("episode")));
-  return configured.records.length !== 1 || configured.records[0]?.get("id") !== profileId || sources.some(source => !vectorEpisodes.has(source.get("id")));
+  const missing = await tx.run(`MATCH (f:Fact {generation:$generation})
+    WHERE NOT EXISTS { MATCH (:EmbeddingVector {fact_id:f.id,profile_id:$profile}) }
+    RETURN f.id AS id LIMIT 1`, { generation, profile: profileId });
+  return configured.records.length !== 1 || configured.records[0]?.get("id") !== profileId || missing.records.length > 0;
 }
 
 export class ActivationStore {
@@ -226,7 +227,7 @@ export class ActivationStore {
     const custodyBad = await this.derivedCustodyBadTx(tx, target, sources.records, maxDerived);
     const linkBad = await derivedLinksBadTx(tx, target.id, maxDerived);
     const witnessBad = await entityWitnessesBadTx(tx, target.id, policy.policy_revision, maxDerived);
-    const embeddingCoverageBad = this.core.embeddingProvider ? await embeddingCoverageBadTx(tx, embeddingProfileId(this.core.embeddingProvider.profile), sources.records) : false;
+    const embeddingCoverageBad = this.core.embeddingProvider ? await embeddingCoverageBadTx(tx, embeddingProfileId(this.core.embeddingProvider.profile), target.id) : false;
     return [
       ...(embeddingCoverageBad ? ["selected_model_embedding_coverage"] : []),
       ...(custodyBad ? ["derived_authority_and_links"] : []),

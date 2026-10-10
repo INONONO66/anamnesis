@@ -5,7 +5,7 @@ export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_
 
 export const SCHEMA_STATEMENTS = [
   `CREATE CONSTRAINT embedding_vector_key IF NOT EXISTS FOR (v:EmbeddingVector) REQUIRE v.key IS UNIQUE`,
-  `CREATE INDEX embedding_vector_episode_profile IF NOT EXISTS FOR (v:EmbeddingVector) ON (v.episode_id, v.profile_id)`,
+  `CREATE INDEX embedding_vector_fact_profile IF NOT EXISTS FOR (v:EmbeddingVector) ON (v.fact_id, v.profile_id)`,
   `CREATE CONSTRAINT embedding_profile_id IF NOT EXISTS FOR (p:EmbeddingProfile) REQUIRE p.id IS UNIQUE`,
   `CREATE CONSTRAINT policy_authority_key IF NOT EXISTS FOR (p:PolicyAuthority) REQUIRE p.key IS UNIQUE`,
   `CREATE CONSTRAINT policy_event_revision IF NOT EXISTS FOR (p:PolicyEvent) REQUIRE p.revision IS UNIQUE`,

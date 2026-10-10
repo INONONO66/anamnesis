@@ -156,8 +156,8 @@ export class StoreCore {
     if (receipt.principal !== context.principal) throw new ReceiptError("unauthenticated");
     // Null identifies an old, unauthorised bootstrap receipt, not revision zero.
     if (receipt.policy_revision === null || receipt.policy_revision > policy.policy_revision) throw new ReceiptError("policy_unavailable");
-    await this.authorizeEpisodesTx(tx, [...new Set([...receipt.primary_ids,
-      ...receipt.primaries.flatMap(item => [item.id, ...item.sources]),
+    // A primary may be a Fact (D56); its receipt row already names the DERIVED_FROM source Episodes, which carry the authority.
+    await this.authorizeEpisodesTx(tx, [...new Set([...receipt.primaries.flatMap(item => item.sources),
       ...(receipt.serving?.response.results.flatMap(item => item.provenance.supersedes.map(prior => prior.id)) ?? [])])], policy);
   }
   async withReadTx<Result>(

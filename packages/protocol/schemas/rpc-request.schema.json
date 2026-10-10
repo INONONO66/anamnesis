@@ -803,6 +803,12 @@
               "minimum": 0,
               "maximum": 64
             },
+            "window": {
+              "default": 2,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
             "budget": {
               "oneOf": [
                 {
@@ -1018,7 +1024,7 @@
               "format": "uuid",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
             },
-            "episode_id": {
+            "fact_id": {
               "type": "string",
               "format": "uuid",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
@@ -1026,7 +1032,7 @@
           },
           "required": [
             "operation_id",
-            "episode_id"
+            "fact_id"
           ],
           "additionalProperties": false
         }

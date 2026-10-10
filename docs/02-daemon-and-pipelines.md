@@ -185,7 +185,7 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `embedding.retry {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Move the exact BLOCKED head back to PENDING (docs/01 §4) |
 | `embedding.skip {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Resolve one BLOCKED head as `RESOLVED_NO_VECTOR`; permanent vector exclusion for that source |
 | `embedding.cancel {operation_id, embedding_profile_id, reason}` | resolution record | Cancel a non-active target build under the write-queue barrier |
-| `status` | — | Neo4j connection, revision, active selectors, spool length, embedding backlog (Episodes without a vector for the active profile, minus quarantined ledger entries), blocked embedding heads |
+| `status` | — | Neo4j connection, revision, active selectors, spool length, embedding backlog (Facts without a vector for the active profile, minus quarantined ledger entries), blocked embedding heads |
 | `verify {scope}` | — | Digests, Payloads, orphan Facts, ledger ↔ cache agreement |
 | `gen {stream, action: build\|status\|activate\|rollback\|retire\|qualify}` | selector, qualification record | Lifecycle operations; activate/rollback enforce the catch-up barrier, `qualify` appends an `EmbeddingQualification` and activates nothing by itself (docs/01 §4) |
 | `maintain` | caches | Run the maintenance job now (§6) |
@@ -497,17 +497,16 @@ The origin head is the newest Episode by indexed `ingest_seq` under the
 Meta writer fence, not a separate CAS cache.
 
 remember calls no LLM. It does not embed either — ingestion must succeed even
-when the embedding service is down. Extraction and embedding are driven by the
-Outbox.
-
-The v0.1 Episode embedding worker consumes the captured
-`{stage: embed_episode,target_generation:0,ingest_seq,embedding_model_id,model_key}`,
-sends only the Episode's normalized content to that model endpoint, SETs
-`embedding_m_<modelhex>` and advances its model-scoped terminal-prefix cursor
-in a bounded batch. A transient failure retries under the bounded schedule and
-a deterministic one blocks that head; either way BM25 and session recall stay
-available and the cursor never moves past the hole (docs/01 §4). This producer
-ships in the same milestone as Episode vector recall.
+when the embedding service is down. The extraction scheduler materializes Facts;
+the embedding worker scans all generations for Facts without a vector of the
+configured profile, one bounded provider call per turn. Its attempt and
+quarantine state is in `embedding-state.json` (version 2, keyed by Fact ID),
+not graph Outbox rows. It sends Fact content, checks its digest and revision,
+and authorizes its source Episodes through `DERIVED_FROM`. A transient failure
+defers with bounded backoff; a deterministic failure quarantines that Fact.
+BM25 and session recall remain available, and the Fact vector channel searches
+only the selected generation. Activation requires vector coverage of every
+materialized Fact of the target generation; zero Facts are covered.
 
 ### Revisions vs corrections
 
@@ -819,9 +818,9 @@ allowed only for no single locus; malformed-present is not treated as omitted.
 
 The `embed_derived` stage SETs the named model property and advances
 `EmbeddingCoverage(target_generation, embedding_model_id)` only through a
-contiguous terminal prefix. Global Episode embedding jobs use the same
-model-scoped cursor with `stream=episode,generation=0`. If either cursor
-affects the active profile's serving vector set, the same transaction
+contiguous terminal prefix in the proposed multi-stream work model.
+The shipped Fact lane instead scans missing vectors across all generations.
+If a future cursor affects the active profile's serving vector set, the same transaction
 increments `structure_revision`.
 
 Embedding work runs the per-entry state machine in docs/01 §4:
@@ -851,7 +850,7 @@ transient_failure | permanent_failure | worker_lost | cancelled`, and
 `client_error` is the exact name for a deterministic 4xx response and
 `malformed_response` for output that is not a valid embedding payload; neither
 is a transient class, and "4xx" is not itself a state. Every failed attempt
-leaves one terminal record in the Episode's `embedding-state.json` ledger
+leaves one terminal record in the Fact's `embedding-state.json` ledger
 entry (D54), with a bounded error code and digest and no source text; the
 graph holds only the resulting `EmbeddingVector`, and a successful attempt
 deletes the entry outright. A blocked head freezes that model's cursor and
@@ -1220,8 +1219,8 @@ beyond its schema content cap.
 | Operation | Data sent |
 |---|---|
 | query embedding | the caller's verbatim recall query text inside the active profile's pinned query template; no translation and no second generated query (D48) |
-| Episode embedding | bounded batch of Episode normalized content |
-| Fact / Entity / relationship embedding | bounded batch of Fact, Entity or RELATES_TO content |
+| Fact embedding (shipped) | one Fact's content per bounded worker turn |
+| Entity / relationship embedding (proposed) | bounded batch of Entity or RELATES_TO content |
 | claim extraction | one Episode's normalized content |
 | payload-section extraction | decoded text sections ≤ 64 KiB each; local by default, separately opted in for remote |
 | Entity / Fact judge | extracted claims plus at most 64 Entity and 128 Fact candidate snippets and their IDs/times, in their stored source language |
