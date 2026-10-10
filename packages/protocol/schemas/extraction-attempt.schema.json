@@ -57,6 +57,7 @@
             "input_too_large",
             "policy_denied",
             "cancelled",
+            "gate_skipped",
             "expired",
             "worker_lost",
             "premises_changed"
@@ -93,6 +94,7 @@
         "normalize",
         "span",
         "judge_shape",
+        "window_shape",
         "digest"
       ]
     },

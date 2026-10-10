@@ -15,10 +15,10 @@ const policy = z.strictObject({ revision: timestamp, authority: z.literal("insta
 const disposition = z.enum(["retain", "suppress", "correct", "unknown"]);
 const modality = z.enum(["text", "code", "mixed", "unknown"]);
 const terminal = z.enum(["succeeded", "failed", "cancelled", "expired", "worker_lost"]);
-export const ExtractionFailure = z.enum(["provider_unavailable", "provider_rejected", "provider_mismatch", "output_too_large", "input_too_large", "policy_denied", "cancelled", "expired", "worker_lost", "premises_changed"]);
+export const ExtractionFailure = z.enum(["provider_unavailable", "provider_rejected", "provider_mismatch", "output_too_large", "input_too_large", "policy_denied", "cancelled", "gate_skipped", "expired", "worker_lost", "premises_changed"]);
 /** Which check a `provider_mismatch` failed (#218): the response envelope, its JSON content, the model/incarnation the
  * upstream reported, output normalization, evidence span verification, the judge's decision shape or a premise digest. */
-export const ExtractionFailureDetail = z.enum(["model", "incarnation", "envelope", "json", "normalize", "span", "judge_shape", "digest"]);
+export const ExtractionFailureDetail = z.enum(["model", "incarnation", "envelope", "json", "normalize", "span", "judge_shape", "window_shape", "digest"]);
 export type ExtractionFailureDetail = z.infer<typeof ExtractionFailureDetail>;
 
 /** Legacy text/evidence claims remain auditable; confidence is required for
@@ -47,6 +47,9 @@ export const ExtractionModelOutput = z.discriminatedUnion("task", [
     decisions: z.array(z.strictObject({ claim_index: timestamp.max(63), disposition, evidence: ExtractionSpan, confidence: z.number().min(0).max(1).optional() })).max(64),
     language: bounded(64), modality }),
   z.strictObject({ task: z.literal("judge_relations"), relation_context_digest: hash, judgements: z.array(FactRelationJudgement).max(16), language: bounded(64), modality }),
+  z.strictObject({ task: z.literal("claim_window"), episodes: z.array(z.strictObject({
+    id, claims: z.array(ExtractionClaim).max(64), language: bounded(64), modality,
+  })).max(8) }),
 ]);
 export type ExtractionModelOutput = z.infer<typeof ExtractionModelOutput>;
 export const ExtractionOutput = z.strictObject({ canonical_body: bounded(65536), body_digest: hash, spans, language: bounded(64), modality }).superRefine((v, ctx) => {
@@ -55,6 +58,7 @@ export const ExtractionOutput = z.strictObject({ canonical_body: bounded(65536),
     if (canonicalExtractionBody(body) !== v.canonical_body
       || createHash("sha256").update(v.canonical_body).digest("hex") !== v.body_digest) throw new Error("digest");
     const parsed = ExtractionModelOutput.parse(body);
+    if (parsed.task === "claim_window") throw new Error("window output must be split");
     const evidence = parsed.task === "claim" ? parsed.claims.map(c => c.evidence) : parsed.task === "judge_claims" ? parsed.decisions.map(d => d.evidence) : parsed.task === "judge_relations" ? [] : parsed.spans;
     if (canonicalExtractionBody(evidence) !== canonicalExtractionBody(v.spans) || parsed.language !== v.language || parsed.modality !== v.modality) throw new Error("metadata");
   } catch { ctx.addIssue({ code: "custom", message: "output ABI/canonical body/digest mismatch" }); }
@@ -83,7 +87,7 @@ export const ExtractionAttempt = z.strictObject({
   if (v.state === "succeeded") {
     if (!v.output || v.reason !== null || v.disposition === null || !v.lease || v.detail !== undefined || canonicalExtractionBody(v.spans) !== canonicalExtractionBody(v.output.spans)) ctx.addIssue({ code: "custom", message: "invalid success" });
   } else if (v.output !== null || v.spans.length || v.disposition !== null || v.reason === null || v.reported_model !== undefined) ctx.addIssue({ code: "custom", message: "non-success must be content-free" });
-  if (["cancelled", "expired", "worker_lost"].includes(v.state) && v.reason !== v.state && !(v.state === "cancelled" && v.reason === "policy_denied")) ctx.addIssue({ code: "custom", message: "outcome/reason mismatch" });
+  if (["cancelled", "expired", "worker_lost"].includes(v.state) && v.reason !== v.state && !(v.state === "cancelled" && (v.reason === "policy_denied" || v.reason === "gate_skipped"))) ctx.addIssue({ code: "custom", message: "outcome/reason mismatch" });
 });
 export type ExtractionAttempt = z.infer<typeof ExtractionAttempt>;
 

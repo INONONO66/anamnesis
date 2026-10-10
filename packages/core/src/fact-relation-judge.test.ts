@@ -37,6 +37,7 @@ async function setup() {
   const relationInputs: FactRelationContext[] = [];
   const faults: ("throw" | "digest")[] = [];
   const provider = { model, modelIncarnation: incarnation, async extract(input: ExtractionProviderInput) {
+    if (input.task === "claim_window") throw new Error("standalone relation fixture does not use windows");
     if (input.task === "claim") {
       const text = input.text.replace(/\.$/, ""), evidence = { start: 0, end: Buffer.byteLength(input.text), text: input.text };
       const day = /\[(\d{4}-\d{2}-\d{2})\]/.exec(input.text)?.[1];

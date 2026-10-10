@@ -586,6 +586,11 @@
                               "minimum": 0,
                               "maximum": 9007199254740991
                             },
+                            "gated_total": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
                             "last_error": {
                               "anyOf": [
                                 {
@@ -644,6 +649,7 @@
                             "in_flight",
                             "completed_total",
                             "failed_total",
+                            "gated_total",
                             "last_error",
                             "pacing"
                           ],
@@ -3946,6 +3952,7 @@
                                     "input_too_large",
                                     "policy_denied",
                                     "cancelled",
+                                    "gate_skipped",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -3982,6 +3989,7 @@
                                 "normalize",
                                 "span",
                                 "judge_shape",
+                                "window_shape",
                                 "digest"
                               ]
                             },
@@ -4434,6 +4442,7 @@
                                     "input_too_large",
                                     "policy_denied",
                                     "cancelled",
+                                    "gate_skipped",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -4470,6 +4479,7 @@
                                 "normalize",
                                 "span",
                                 "judge_shape",
+                                "window_shape",
                                 "digest"
                               ]
                             },
@@ -5124,6 +5134,7 @@
                                     "input_too_large",
                                     "policy_denied",
                                     "cancelled",
+                                    "gate_skipped",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -5160,6 +5171,7 @@
                                 "normalize",
                                 "span",
                                 "judge_shape",
+                                "window_shape",
                                 "digest"
                               ]
                             },
@@ -5612,6 +5624,7 @@
                                     "input_too_large",
                                     "policy_denied",
                                     "cancelled",
+                                    "gate_skipped",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -5648,6 +5661,7 @@
                                 "normalize",
                                 "span",
                                 "judge_shape",
+                                "window_shape",
                                 "digest"
                               ]
                             },

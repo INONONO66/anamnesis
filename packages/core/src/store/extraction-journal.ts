@@ -35,6 +35,13 @@ const Entry = z.strictObject({
   decisions: z.array(ExtractionDisposition).max(64),
   attempts: z.array(ExtractionAttempt).max(32),
   relations: Relations.optional(),
+  gate: z.strictObject({
+    model: z.string().min(1).max(256),
+    score: z.number().min(0).max(1),
+    window_score: z.number().min(0).max(1),
+    threshold: z.number().min(0).max(1),
+    decided_at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  }).optional(),
   // Original requests cannot be reconstructed after provider adoption or a
   // server-rewritten outcome (policy denial, changed premises, judge mismatch).
   creation_digest: z.string().regex(/^[0-9a-f]{64}$/).optional(),

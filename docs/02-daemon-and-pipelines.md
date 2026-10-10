@@ -616,6 +616,24 @@ leaves a `leased` task in the file; the next scan finds the still-uncovered
 Episode, settles the task as `worker_lost` or `expired`, retries within the
 lost-lease budget and re-runs it.
 
+### 5.4 Windowed extraction and the Jev gate (D56)
+
+Queued claim work is grouped by `origin_session` and split in ingest order
+into near-equal windows, with `ceil(n / 8)` windows for a group of `n`
+Episodes. A window reads at most three preceding Episodes from the same
+session as context; context is read-only and is never a claim source. One
+`claim_window` call produces per-Episode claims, while each Episode retains
+its own custody entry, extraction attempt, pipeline and `DERIVED_FROM` edges.
+The judge and relation stages remain per Episode.
+
+When configured, the Jev pre-gate scores one window. If its maximum score is
+below the threshold, each member is cancelled with `gate_skipped` and the
+journal entry records the model, score, window score, threshold and decision
+time. These omissions increase `gated_total`, not `failed_total`. A gate
+failure never blocks extraction: the window proceeds without skipping.
+Restart and lease recovery semantics are unchanged; a lost claim-window
+lease is settled and retried through the normal scheduler.
+
 The rest of this section is the normative sequencer design that the lane
 grows into. Where it says "Outbox entry", read the coverage-driven scan
 above; the sequencing, policy and write rules are unchanged.
@@ -1221,7 +1239,7 @@ beyond its schema content cap.
 | query embedding | the caller's verbatim recall query text inside the active profile's pinned query template; no translation and no second generated query (D48) |
 | Fact embedding (shipped) | one Fact's content per bounded worker turn |
 | Entity / relationship embedding (proposed) | bounded batch of Entity or RELATES_TO content |
-| claim extraction | one Episode's normalized content |
+| claim extraction | one window of same-session Episode content plus at most three preceding context Episodes |
 | payload-section extraction | decoded text sections ≤ 64 KiB each; local by default, separately opted in for remote |
 | Entity / Fact judge | extracted claims plus at most 64 Entity and 128 Fact candidate snippets and their IDs/times, in their stored source language |
 | dreaming summary / synthesis | one Community's bounded member names or Fact snippets, capped at 256 items / 256 KiB |
@@ -1242,7 +1260,7 @@ fallback; recall itself remains LLM-free.
 | Operation | Transactions | revision |
 |---|---|---|
 | remember | 1 (Episode, Payload, revision INVALIDATES, session topology, cache init) | +1 |
-| extract (one Episode) | read tx + write tx (re-validated) | +1 only when ACTIVE structural output is created |
+| extract (one window) | read tx + write tx (re-validated), with per-Episode custody and attempts | +1 only when ACTIVE structural output is created |
 | embed backfill | 1 per bounded batch, terminal-prefix coverage cursor; the committed prefix stops at the first failure | +1 only for ACTIVE coverage |
 | adjudication.review / adjudication.correct | 1 bounded append-only control tx (review or correction, operator Episode, replacement Fact) | +1 only when a correction creates ACTIVE structural output |
 | embedding.retry / skip / cancel / qualify | 1 bounded control tx per operation; cancel takes the write-queue barrier | +1 only when a skip releases ACTIVE coverage |

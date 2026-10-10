@@ -3,7 +3,7 @@ import { ExtractionModelOutput, ExtractionSpan } from "@anamnesis/protocol";
 import { countBudget } from "./dynamics/budget.ts";
 import { validateModelOutput, validateSourceSpans, type ExtractionProviderInput } from "./extraction.ts";
 
-const [claim, judge, judgeClaims, judgeRelations] = ExtractionModelOutput.options;
+const [claim, judge, judgeClaims, judgeRelations, claimWindow] = ExtractionModelOutput.options;
 const quote = ExtractionSpan.shape.text.min(1);
 function withEvidence<T extends z.ZodType>(evidence: T) {
   return z.discriminatedUnion("task", [
@@ -12,6 +12,9 @@ function withEvidence<T extends z.ZodType>(evidence: T) {
     judgeClaims.extend({ decisions: judgeClaims.shape.decisions.element.extend({ evidence }).array().max(64) }),
     // Relation verdicts quote nothing: candidates are identified by ID only.
     judgeRelations,
+    claimWindow.extend({ episodes: claimWindow.shape.episodes.element.extend({
+      claims: claim.shape.claims.element.extend({ evidence }).array().max(64),
+    }).array().max(8) }),
   ]);
 }
 // Models copy quotes; only trusted local code calculates byte offsets.
@@ -40,11 +43,10 @@ function dropUnknownLabels(value: unknown): unknown {
   return { ...(value as object), claims };
 }
 
-export function normalizeChatExtraction(value: unknown, input: ExtractionProviderInput): ExtractionModelOutput {
-  const output = receivedOutput.parse(dropUnknownLabels(value));
+function sourceSpans(input: Exclude<ExtractionProviderInput, { task: "claim_window" }>) {
   countBudget(input.text, "utf8_bytes"); // Reject invalid Unicode before Buffer replacement encoding.
   const source = Buffer.from(input.text, "utf8");
-  const span = (evidence: string | { text: string; start?: number | undefined }, claimIndex?: number) => {
+  return (evidence: string | { text: string; start?: number | undefined }, claimIndex?: number) => {
     const text = typeof evidence === "string" ? evidence : evidence.text;
     const quote = Buffer.from(text, "utf8"), claimed = typeof evidence === "string" ? 0 : evidence.start ?? 0;
     let start = source.indexOf(quote);
@@ -60,6 +62,38 @@ export function normalizeChatExtraction(value: unknown, input: ExtractionProvide
     validateSourceSpans(input.text, [result]);
     return result;
   };
+}
+
+const windowEnvelope = z.strictObject({ task: z.literal("claim_window"), episodes: z.array(z.unknown()).max(8) });
+const windowIdentity = z.object({ id: z.string() }).passthrough();
+
+/** Preserve malformed identities for the engine's per-target window_shape outcomes rather than failing unrelated targets. */
+function normalizeWindow(value: unknown, input: Extract<ExtractionProviderInput, { task: "claim_window" }>): unknown {
+  const envelope = windowEnvelope.safeParse(value);
+  if (!envelope.success) return value;
+  const episodes = envelope.data.episodes.map(entry => {
+    const identity = windowIdentity.safeParse(entry);
+    if (!identity.success) return entry;
+    const { id, ...body } = identity.data;
+    const source = input.episodes.find(episode => episode.id === id);
+    if (!source) return entry;
+    const parsed = receivedOutput.options[0].safeParse(dropUnknownLabels({ task: "claim", ...body }));
+    if (!parsed.success) return entry;
+    const { task: _task, ...output } = parsed.data;
+    const span = sourceSpans({ task: "claim", text: source.text });
+    return { id, ...output, claims: output.claims.flatMap(claim => {
+      const evidence = span(claim.evidence);
+      return evidence ? [{ ...claim, evidence }] : [];
+    }) };
+  });
+  return { task: "claim_window", episodes };
+}
+
+export function normalizeChatExtraction(value: unknown, input: ExtractionProviderInput): unknown {
+  if (input.task === "claim_window") return normalizeWindow(value, input);
+  const output = receivedOutput.parse(dropUnknownLabels(value));
+  if (output.task === "claim_window") throw new Error("unexpected window output");
+  const span = sourceSpans(input);
   const standaloneSpans = output.task === "judge" ? output.spans.flatMap(evidence => { const anchored = span(evidence); return anchored ? [anchored] : []; }) : [];
   if (output.task === "judge_relations") {
     // Every verdict must name a supplied candidate exactly once; nothing is coerced or dropped.

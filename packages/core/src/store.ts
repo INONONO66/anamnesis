@@ -382,13 +382,17 @@ export class Store {
     return this.extraction.extractionTaskInput(taskId, leaseEpoch, context);
   }
 
+  extractionContextInput(ids: string[], context: InstallationContext): Promise<{ id: string; text: string }[]> {
+    return this.extraction.extractionContextInput(ids, context);
+  }
+
   /** Exact completion replay returns the stored immutable outcome. Neither the
    * submitted output nor caller-selected policy context is ever an authority. */
   recordExtractionAttempt(input: CompleteExtractionAttempt, context: InstallationContext): Promise<ExtractionAttempt> {
     return this.extraction.recordExtractionAttempt(input, context);
   }
 
-  cancelModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
+  cancelModelTask(input: Parameters<ExtractionStore["cancelModelTask"]>[0], context: InstallationContext): Promise<ModelTask> {
     return this.extraction.cancelModelTask(input, context);
   }
 

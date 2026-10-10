@@ -170,6 +170,20 @@ test("set isolates the journal from caller and reader mutations", async () => {
   expect((await journal.get(pipeline))?.claim.model).toBe("fixture");
 });
 
+test("gate cancellation and its verdict survive a version-one journal reload together", async () => {
+  await withFile(async path => {
+    const attempt = ExtractionAttempt.parse({ ...failedAttempt(), state: "cancelled", reason: "gate_skipped" });
+    const record: ExtractionJournalEntry = { ...entry(), claim: ModelTask.parse({
+      ...task(claimId), state: "cancelled", attempt_id: attempt.id, attempts: 1,
+    }), claim_attempt: attempt, attempts: [attempt],
+    gate: { model: "gate-fixture", score: 0.05, window_score: 0.1, threshold: 0.2, decided_at: 1 } };
+    await new ExtractionJournal(path).set(pipeline, record);
+    expect(await new ExtractionJournal(path).get(pipeline)).toEqual(record);
+    expect(JSON.parse(await readFile(path, "utf8")).version).toBe(1);
+    await expect(new ExtractionJournal(path).set(pipeline, { ...record, gate: { ...record.gate!, score: 2 } })).rejects.toThrow();
+  });
+});
+
 test("journalAttempt resolves the pinned claim and judge attempts after the bounded history evicted them", () => {
   // Given 32 later outcomes that pushed the pinned claim attempt out of attempts[].
   const pinned = failedAttempt();

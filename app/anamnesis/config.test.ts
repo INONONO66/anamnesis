@@ -15,6 +15,15 @@ test("provider defaults leave endpoints opt-in and load the bundled prompts", as
   assert.equal(config.relationPromptFile, DEFAULT_RELATION_PROMPT_FILE);
   assert.equal(config.relationPrompt, await fs.readFile(DEFAULT_RELATION_PROMPT_FILE, "utf8"));
   assert.match(config.relationPrompt, /judge_relations/);
+  assert.deepEqual(config.gate, { kind: "off" });
+});
+
+test("extraction gate configuration defaults off and validates Jev settings", async () => {
+  const keyFile = "/tmp/fixture-jev-key.json";
+  assert.deepEqual((await loadProviderConfig({ ANAMNESIS_EXTRACTION_GATE: "jev", ANAMNESIS_JEV_GATE_KEY_FILE: keyFile, ANAMNESIS_EXTRACTION_GATE_THRESHOLD: "0.65" })).gate,
+    { kind: "jev", keyFile, threshold: 0.65 });
+  for (const value of ["", "other", "JEv"]) await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_GATE: value }), /ANAMNESIS_EXTRACTION_GATE/);
+  for (const value of ["-0.1", "1.1", "NaN", ""]) await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_GATE_THRESHOLD: value }), /ANAMNESIS_EXTRACTION_GATE_THRESHOLD/);
 });
 
 test("relation prompt override is validated like the extraction prompt", async () => {

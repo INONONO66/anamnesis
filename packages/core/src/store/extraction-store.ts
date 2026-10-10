@@ -236,6 +236,24 @@ export class ExtractionStore {
       return leased;
     });
   }
+  /** Context and gate reads share extraction's policy fence; missing or denied Episodes contribute no text. */
+  async extractionContextInput(ids: string[], context: InstallationContext): Promise<{ id: string; text: string }[]> {
+    const requested = z.array(z.uuidv7()).max(8).parse(ids);
+    return this.core.extractionTx(context, async (tx, policy) => {
+      const episodes = [];
+      for (const id of requested) {
+        try { await this.core.authorizeEpisodesTx(tx, [id], policy); }
+        catch (error) {
+          if (error instanceof ReceiptError && (error.code === "policy_denied" || error.code === "invalid_selection")) continue;
+          throw error;
+        }
+        const source = await this.extractionSourceTx(tx, id);
+        episodes.push({ id, text: source.content });
+      }
+      return episodes;
+    });
+  }
+
   /** Source text leaves the database only after lease and current policy checks. */
   async extractionTaskInput(taskId: string, leaseEpoch: string, context: InstallationContext): Promise<{ task: ModelTask; text: string; claim_context?: ExtractionClaimContext }> {
     return this.core.extractionTx(context, async (tx, policy) => {
@@ -252,7 +270,8 @@ export class ExtractionStore {
     });
   }
   private async finishExtractionTx(_tx: ManagedTransaction, task: ModelTask, policy: PolicyState,
-    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail" | "reported_model">, requestDigest: string): Promise<ExtractionAttempt> {
+    outcome: Pick<ExtractionAttempt, "state" | "reason" | "disposition" | "output" | "spans" | "detail" | "reported_model">,
+    requestDigest: string, gate?: ExtractionJournalEntry["gate"]): Promise<ExtractionAttempt> {
     const now = Math.max(task.updated_at, receiptTime.parse(this.core.clock()));
     const attempt = ExtractionAttempt.parse({ state: outcome.state, reason: outcome.reason, disposition: outcome.disposition, output: outcome.output, spans: outcome.spans,
       ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
@@ -277,7 +296,7 @@ export class ExtractionStore {
     // attempts (and their replay digests) outlive the history: a judge retried past 32 outcomes still reads its claim.
     const stages = entry.claim.id === task.id ? { claim: terminal, claim_attempt: attempt } : { judge: terminal, judge_attempt: attempt, decisions };
     const retained = { ...entry, ...stages, attempts };
-    const next: ExtractionJournalEntry = { ...retained,
+    const next: ExtractionJournalEntry = { ...retained, ...(gate === undefined ? {} : { gate }),
       request_digests: Object.fromEntries([retained.claim_attempt, retained.judge_attempt, ...attempts].flatMap((value): [string, string][] => {
         const digest = value ? requestDigests[value.id] : undefined;
         return value && digest !== undefined ? [[value.id, digest]] : [];
@@ -356,13 +375,15 @@ export class ExtractionStore {
       return body(tx, policy, task, request);
     });
   }
-  async cancelModelTask(input: ModelTaskCAS, context: InstallationContext): Promise<ModelTask> {
-    return this.modelTaskTransition(input, context, ["queued", "leased", "expired", "worker_lost"], async (tx, policy, task, request) => {
+  async cancelModelTask(input: ModelTaskCAS & { reason?: "cancelled" | "policy_denied" | "gate_skipped"; gate?: ExtractionJournalEntry["gate"] }, context: InstallationContext): Promise<ModelTask> {
+    const { reason = "cancelled", gate, ...cas } = input;
+    return this.modelTaskTransition(cas, context, ["queued", "leased", "expired", "worker_lost"], async (tx, policy, task, request) => {
       // Open work is cancelled in place. An expired or lost lease is unresolved work, not an outcome (extractionPipelineOmission);
       // cancelling it is how a caller whose retry budget is spent turns it into a durable, coverable omission. The cancel is a
       // fresh content-free attempt record, so the settled lease attempt stays immutable and the attempt count is unchanged.
       const open = task.state === "queued" || task.state === "leased" ? task : { ...task, attempt_id: null, lease: null, attempts: task.attempts - 1 };
-      await this.finishExtractionTx(tx, open, policy, { state: "cancelled", reason: "cancelled", output: null, disposition: null, spans: [] }, extractionBodyDigest({ action: "cancel", ...request }));
+      await this.finishExtractionTx(tx, open, policy, { state: "cancelled", reason, output: null, disposition: null, spans: [] },
+        extractionBodyDigest({ action: "cancel", ...request, reason, ...(gate === undefined ? {} : { gate }) }), gate);
       return this.core.extractionTask(task.id);
     });
   }

@@ -21,6 +21,9 @@ type Behaviour = (input: ExtractionProviderInput, calls: number, clock: { advanc
 
 /** A valid answer for any task: one claim per Episode mentioning Alice, every claim retained, relations "unrelated". */
 const answer: Behaviour = (input) => {
+  if (input.task === "claim_window") return { task: "claim_window", episodes: input.episodes.map(({ id, text }) => ({
+    id, language: "en", modality: "text", claims: [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text }, confidence: 0.9, entities: [alice] }],
+  })) };
   const evidence = { start: 0, end: Buffer.byteLength(input.text), text: input.text };
   if (input.task === "claim") return { task: "claim", language: "en", modality: "text", claims: [{ text: input.text, evidence, confidence: 0.9, entities: [alice] }] };
   if (input.task === "judge_claims") return { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context!.body_digest,
@@ -32,7 +35,7 @@ const answer: Behaviour = (input) => {
 
 /** Owned harness Neo4j, an Engine and a scheduler that share one injected clock, and a scripted provider. The
  * scheduler creates its own catching_up generation, so every test exercises initial catch-up and cutover. No timers. */
-async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxLostLeases?: number } = {}) {
+async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxLostLeases?: number; windowMax?: number } = {}) {
   const parent = join(homedir(), ".cache/anamnesis-qa");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "scheduler-"));
@@ -60,6 +63,7 @@ async function setup(behaviour: Behaviour, options: { maxAttempts?: number; maxL
   await engine.init(); await engine.claimWriterEpoch();
   const wakes: number[] = [];
   const scheduler = new ExtractionScheduler(engine, { provider, context, clock, maxAttempts: options.maxAttempts ?? 2, maxInFlight: 1,
+    ...(options.windowMax === undefined ? {} : { windowMax: options.windowMax }),
     ...(options.maxLostLeases === undefined ? {} : { maxLostLeases: options.maxLostLeases }),
     read: async (cypher, params) => (await driver.executeQuery(cypher, params)).records.map(row => row.toObject()) as never,
     wake: () => { wakes.push(clock()); } });
@@ -174,19 +178,20 @@ test("relation judge exhausted on initial catch-up seals the source as a durable
 test("a pipeline that succeeds on the last attempt of every stage completes instead of being reported as an exhausted failure", async () => {
   // Second Episode: claim, judge_claims and judge_relations each fail three times and succeed on the fourth attempt
   // (maxAttempts 4). The old fixed step budget ran out after the final success and returned "failed" without looking.
-  const failuresLeft: Record<string, number> = { claim: 3, judge_claims: 3, judge_relations: 3 };
+  const failuresLeft: Record<string, number> = { claim_window: 3, judge_claims: 3, judge_relations: 3 };
   const f = await setup((input, calls, clock) => {
-    if (input.text === "Alice likes light mode" || input.task === "judge_relations") {
+    const text = input.task === "claim_window" ? input.episodes[0]?.text : input.text;
+    if (text === "Alice likes light mode" || input.task === "judge_relations") {
       if (failuresLeft[input.task]! > 0) { failuresLeft[input.task]!--; throw new ExtractionProviderError("provider_unavailable"); }
     }
     return answer(input, calls, clock);
-  }, { maxAttempts: 4 });
+  }, { maxAttempts: 4, windowMax: 1 });
   try {
     await f.remember("Alice likes dark mode");
     await f.remember("Alice likes light mode");
     const status = await f.settle(2, 40);
     expect(status).toMatchObject({ state: "active", covered_ingest_seq: 2, live_ingest_seq: 2, in_flight: 0, completed_total: 2, failed_total: 0, last_error: null });
-    expect(failuresLeft).toEqual({ claim: 0, judge_claims: 0, judge_relations: 0 });
+    expect(failuresLeft).toEqual({ claim_window: 0, judge_claims: 0, judge_relations: 0 });
     expect((await f.query("MATCH (f:Fact) RETURN f.content AS content ORDER BY content")).map(row => row.content)).toEqual(["Alice likes dark mode", "Alice likes light mode"]);
     const attempts = [...f.snapshots.values()].flatMap(entry => entry.attempts);
     expect(attempts.filter(attempt => attempt.state === "failed")).toHaveLength(6);

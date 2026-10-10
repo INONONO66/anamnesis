@@ -1,6 +1,6 @@
 import { ModelTask } from "../../protocol/src/extraction.ts";
 import { describe, expect, test } from "bun:test";
-import { ExtractionProviderError, type ExtractionProvider } from "./extraction.ts";
+import { ExtractionProviderError, splitExtractionWindow, validateModelOutput, type ExtractionProvider } from "./extraction.ts";
 import { OpenAiChatExtractionProvider } from "./openai-extraction-provider.ts";
 
 const output = {
@@ -24,6 +24,51 @@ async function expectFailure(instance: OpenAiChatExtractionProvider, code: strin
 }
 
 describe("OpenAiChatExtractionProvider", () => {
+  test("forwards window targets and context unchanged and anchors quotes within each target", async () => {
+    const input = { task: "claim_window" as const, episodes: [
+      { id: "01900000-0000-7000-8000-000000000001", text: "Note: Alice owns a notebook." },
+      { id: "01900000-0000-7000-8000-000000000002", text: "Alice owns a calendar." },
+    ], context: [{ id: "01900000-0000-7000-8000-000000000003", text: "Earlier conversation." }] };
+    const window = { task: input.task, episodes: input.episodes.map(({ id, text }) => ({
+      id, claims: [{ text: text.replace("Note: ", ""), evidence: text.replace("Note: ", "") }], language: "en", modality: "text",
+    })) };
+    const requests: unknown[] = [];
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      requests.push(JSON.parse(request.messages[1].content));
+      return response(JSON.stringify(window));
+    } });
+    const result = await instance.extract(input);
+    expect(requests).toEqual([input]);
+    expect(result).toEqual({ task: input.task, episodes: window.episodes.map((episode, index) => ({
+      ...episode, claims: episode.claims.map(claim => ({ ...claim,
+        evidence: { start: index === 0 ? 6 : 0, end: Buffer.byteLength(input.episodes[index]!.text), text: claim.evidence },
+      })),
+    })) });
+  });
+
+  test("window identity mismatches remain attributable by the engine after quote normalization", async () => {
+    const ids = ["01900000-0000-7000-8000-000000000001", "01900000-0000-7000-8000-000000000002"];
+    const entry = { id: ids[0], claims: [{ text: "Fact.", evidence: "Fact." }], language: "en", modality: "text" };
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({
+      task: "claim_window", episodes: [entry],
+    })) });
+    const value = await instance.extract({ task: "claim_window", episodes: ids.map(id => ({ id, text: "Fact." })), context: [] });
+    const split = splitExtractionWindow(value, ids);
+    expect(validateModelOutput(split[0], "claim").spans).toEqual([{ start: 0, end: 5, text: "Fact." }]);
+    expect(split[1]).toMatchObject({ reason: "provider_mismatch", detail: "window_shape" });
+  });
+
+  test("window evidence found only in context is never anchored to the target", async () => {
+    const id = "01900000-0000-7000-8000-000000000001";
+    const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify({
+      task: "claim_window", episodes: [{ id, claims: [{ text: "Earlier fact.", evidence: "Earlier fact." }], language: "en", modality: "text" }],
+    })) });
+    const value = await instance.extract({ task: "claim_window", episodes: [{ id, text: "Hello." }],
+      context: [{ id: "01900000-0000-7000-8000-000000000002", text: "Earlier fact." }] });
+    expect(value).toEqual({ task: "claim_window", episodes: [{ id, claims: [], language: "en", modality: "text" }] });
+  });
+
   test("task identity is protocol-valid and stable across claim and judge requests", async () => {
     const instance = new OpenAiChatExtractionProvider({ ...options, fetch: async () => response(JSON.stringify(output)) });
     const identity = instance.modelIncarnation;

@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
 import { Engine, envConfig, type EngineOptions } from "@anamnesis/core";
-import { OpenAiChatExtractionProvider } from "@anamnesis/core";
+import { JevGate, OpenAiChatExtractionProvider } from "@anamnesis/core";
 import { ExtractionScheduler, type ExtractionTurn } from "@anamnesis/core";
 import { PacedExtractionProvider } from "@anamnesis/core";
 import { OpenAiEmbeddingProvider } from "@anamnesis/core";
@@ -76,16 +76,21 @@ export class Runtime {
   /** Load asynchronous provider assets once, before accepting RPC traffic. */
   static async create(installation: Installation, scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
     const providers: EngineOptions = {};
+    let gate: JevGate | undefined;
+    let gateThreshold = 0.2;
     let pacing = EXTRACTION_PACING_DEFAULTS;
-    if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined) {
+    if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined ||
+      process.env["ANAMNESIS_EXTRACTION_GATE"] === "jev") {
       const config = await loadProviderConfig();
       pacing = config.extractionPacing;
+      gateThreshold = config.gate.kind === "jev" ? config.gate.threshold : 0.2;
       if (config.llm.baseUrl !== undefined) {
         if (!config.llm.apiKey) throw new Error("ANAMNESIS_LLM_API_KEY_FILE required");
         providers.extractionProvider = new OpenAiChatExtractionProvider({
           ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, relationPrompt: config.relationPrompt, timeoutMs: 30000,
         });
       }
+      if (config.gate.kind === "jev" && providers.extractionProvider) gate = await JevGate.create({ keyFile: config.gate.keyFile });
       if (config.embedding) {
         const { model, dimensions, baseUrl } = config.embedding;
         // Configuration identity only; an alias does not attest immutable server weights.
@@ -94,7 +99,7 @@ export class Runtime {
         providers.embeddingProvider = new OpenAiEmbeddingProvider({ ...config.embedding, profile, timeoutMs: 30000 });
       }
     }
-    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers, pacing);
+    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers, pacing, gate, gateThreshold);
   }
   readonly uploads: Uploads;
   private readonly engine: Engine;
@@ -122,7 +127,7 @@ export class Runtime {
   private extractionRequested = false;
   /** While storage is unavailable, ticks re-enter the spool lane so drainTurn retries refresh() on the daemon's serial queue. */
   private readonly recovery = new RecoveryProbe(() => { if (!this.drainStopped) this.scheduleDrain("spool"); }, RECOVERY_PROBE_MS, nodeTimers);
-  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS) {
+  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS, private readonly gate?: JevGate, private readonly gateThreshold = 0.2) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const unpaced = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
     this.pacer = unpaced.extractionProvider && new PacedExtractionProvider(unpaced.extractionProvider, { minIntervalMs: pacing.minIntervalMs, jitterFraction: pacing.jitterFraction });
@@ -137,7 +142,8 @@ export class Runtime {
     this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json"),
       extractionJournalPath: join(installation.root, "extraction-state.json"),
       materializationStatePath: join(installation.root, "materialization-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
-    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
+    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, gate: this.gate,
+      gateThreshold: this.gate ? this.gateThreshold : undefined, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       // A settled pipeline may have materialized Facts, and Facts are the embedding lane's input (D56): wake both lanes.
       read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } });
