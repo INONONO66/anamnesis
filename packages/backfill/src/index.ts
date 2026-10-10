@@ -7,3 +7,4 @@ export { collectNotion, notionEpisode } from "./notion.ts";
 export { createOmoRawParser } from "./omoraw.ts";
 export { maskSecrets } from "./secrets.ts";
 export { isSlackSlop, parseSlackMessage, slackEpisode } from "./slack.ts";
+export { messageText, optionalText, isRecord, asRecord, byEpisodeTime, readSessionFile, createSessionParser, toEpisode, rawEpisode, type RawOrigin, type SessionEvent, type RawSessionEpisode } from "./pi-session.ts";

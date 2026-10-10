@@ -69,3 +69,14 @@ packages/core/src/journal-pure.test.ts
 packages/backfill/src/codexraw-fs.test.ts
 packages/backfill/src/slack-fs.test.ts
 packages/core/src/store/extraction-journal.test.ts
+packages/archive/src/record.test.ts
+packages/archive/src/collect.test.ts
+packages/archive/src/sources/omo.test.ts
+packages/archive/src/sources/pi.test.ts
+packages/archive/src/sources/gjc.test.ts
+packages/archive/src/sources/misc.test.ts
+packages/archive/src/sources/slack.test.ts
+packages/archive/src/sources/notion.test.ts
+packages/archive/src/sources/agentlog.test.ts
+packages/archive/src/sources/claude.test.ts
+packages/archive/src/sources/codex.test.ts

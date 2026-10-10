@@ -6,6 +6,7 @@
     "app/anamnesis/**/*.fixture.mjs",
     "app/anamnesis/**/*.surface.mjs",
     "packages/*/src/index.ts",
+    "packages/archive/src/cli.ts",
     "packages/*/src/**/*.test.ts",
     "scripts/**/*.{ts,mjs}",
     "app/anamnesis/backup-operation.ts",
