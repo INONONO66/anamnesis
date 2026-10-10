@@ -93,6 +93,8 @@ async function verifyRows(source, receipts) {
   assert.equal(new Set(rows.map(row => row.id)).size, receipts.length); assert.equal(new Set(rows.map(row => row.sequence)).size, receipts.length);
   return rows;
 }
+// D56 turned the outbox into a Fact ledger, so committed Episodes are counted directly.
+const episodes = async () => Number((await driver.executeQuery('MATCH (e:Episode) RETURN count(e) AS episodes')).records[0].get('episodes'));
 try {
   await newRoot(); attempted = true;
   await docker(['create', '--name', name, '--label', `anamnesis.qa.owner=${owner}`, '-p', '127.0.0.1::7687', '-e', 'NEO4J_AUTH', '-e', 'NEO4J_server_memory_heap_max__size=512M', '-e', 'NEO4J_server_memory_pagecache_size=256M', 'neo4j:5.26-community']);
@@ -107,7 +109,7 @@ try {
   assert.equal(restarted.spool.pending, 50); assert.equal(restarted.data_incarnation, before.data_incarnation); assert.notEqual(restarted.fs_epoch, before.fs_epoch);
   for (const q of queued) assert.deepEqual(await client.request('remember', q.params), q.receipt);
   const recovery = await recover(client); client = recovery.client; const drained = recovery.status;
-  assert.equal(drained.spool.pending, 0); assert.equal(drained.outbox_pending, 50);
+  assert.equal(drained.spool.pending, 0); assert.equal(await episodes(), 50);
   const committed = [];
   for (const q of queued) {
     const result = await client.request('ingest.status', identity(q.receipt)); assert.equal(result.state, 'committed'); assert.deepEqual(identity(result), identity(q.receipt));
@@ -134,16 +136,16 @@ try {
   // Completion 3 is actually durable while the head and same-origin child wait.
   const heldDone = JSON.parse(JSON.parse(await readFile(root + '/spool/spool.done', 'utf8')).payload);
   assert.equal(heldDone.frontier, 0); assert.deepEqual(heldDone.completed, [3]);
-  const admitted = event(daemon, 'admitted'); const control = client.request('status', {}); await admitted;
-  daemon.child.send('release'); const interleaved = await control;
-  assert.equal(interleaved.outbox_pending, 52, 'control must run after one suffix completion, not the whole cohort');
+  const admitted = event(daemon, 'admitted'), served = event(daemon, 'status_served'); const control = client.request('status', {}); await admitted;
+  daemon.child.send('release'); const interleaved = { status: await control, served: await served };
+  assert.equal(interleaved.served.completions, 1, 'control must run after one suffix completion, not the whole cohort');
   // A queued shutdown cancels the rest, then ordinary unhooked Node restart
   // replays the exact admitted entries, including completed suffix sequence 3.
   const journal = await readFile(root + '/spool/spool.journal'); await stop(client);
   assert.deepEqual(await readFile(root + '/spool/spool.journal'), journal);
   offline(); client = await start(); assert.equal((await client.request('status', {})).spool.pending, 108);
   const pageRecovery = await recover(client); client = pageRecovery.client; const status = pageRecovery.status;
-  assert.equal(status.spool.pending, 108); assert.equal(status.spool.blocked, 8); assert.equal(status.outbox_pending, 151);
+  assert.equal(status.spool.pending, 108); assert.equal(status.spool.blocked, 8); assert.equal(await episodes(), 151);
   for (const [receipt, reason] of blocked) assert.equal((await client.request('ingest.status', identity(receipt))).reason, reason);
   const verified = [];
   for (const receipt of success) { const result = await client.request('ingest.status', identity(receipt)); assert.equal(result.state, 'committed'); assert.deepEqual(identity(result), identity(receipt)); verified.push(result); }
