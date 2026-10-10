@@ -19,9 +19,5 @@
   "ignore": [
     ".omo/**",
     "dist/**"
-  ],
-  "ignoreDependencies": [
-    "@stryker-mutator/command-runner",
-    "@stryker-mutator/core"
   ]
 }
