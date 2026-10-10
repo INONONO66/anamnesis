@@ -619,7 +619,7 @@ The derived layer is split into three streams.
                selector active[extraction] = integer generation
   community    Community · HAS_MEMBER
                selector active[community]  = integer generation
-  embedding    embedding_m_<modelhex> property + vector index
+  embedding    embedding_m_<modelhex> property + vector index   (not shipped; see §4 "Shipped today")
                selector active[embedding]  = embedding_profile_id. No generation — a property is present or absent
 ```
 
@@ -869,13 +869,31 @@ but builds a new index; it never mutates an active index in place. Technical
 tokens use the 64 lowercase hex characters with no `sha256:` prefix:
 
 ```text
-  node property         embedding_m_<modelhex>
+  node property         embedding_m_<modelhex>                    (not shipped)
   RELATES_TO property   embedding_g<N>_m_<modelhex>
   physical indexes      vec_episode_<indexhex>
                         vec_fact_g<N>_<indexhex>
                         vec_rel_g<N>_<indexhex>
   active[embedding] = <embedding_profile_id>
 ```
+
+**Shipped today** (HEAD `7fb4d19`). The scheme above is the normative
+target; the code is narrower. Vectors are not Episode properties but
+separate nodes labelled `Embedding_<profileId>` with the properties
+`vector`, `episode_id` and `profile_id`, linked to their Episode
+(`packages/core/src/store/embedding-store.ts:168`). The only index is
+`CREATE VECTOR INDEX vec_episode_<profileId> IF NOT EXISTS FOR
+(v:Embedding_<profileId>) ON (v.vector)` (`packages/core/src/store.ts:89`),
+where `profileId` is the SHA-256 of the canonical profile JSON
+(`packages/core/src/embedding.ts:23`), a single fingerprint rather than the
+three above. The runtime sets `model_incarnation` to
+`sha256([baseUrl, model, dimensions])` (`app/anamnesis/runtime.ts:93`), a
+configuration fingerprint, not a proof of frozen weights; the provider must
+echo `model` and `model_incarnation` or the call fails with
+`profile_mismatch`. There is no `embedding_m_<modelhex>` property and no
+`vec_fact_*` or `vec_rel_*` index. D56 moves vectors from Episodes to Facts
+(`vec_fact_<profileId>`) in a later PR; Episodes then stop being a vector
+target.
 
 The experimental baseline profile is the resolved Qwen Q8_0 artifact:
 
@@ -929,7 +947,8 @@ indexConfig: {
 ```
 
 Instantiate these DDL shapes with a validated integer `<N>` and lowercase hex
-IDs; those schema tokens are never request text:
+IDs; those schema tokens are never request text (normative, not shipped;
+the shipped DDL is the single `vec_episode_<profileId>` statement above):
 
 ```cypher
 CREATE VECTOR INDEX `vec_episode_<indexhex>` IF NOT EXISTS
@@ -1387,10 +1406,11 @@ range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Elemen
           composite Fact(generation, duplicate_group_key)
           RecallReceipt.expires_at
 fulltext  Episode.content (global) · Fact/Entity content (one index per generation)
-vector    Episode.embedding_m_<modelhex> (global, vec_episode_<indexhex>)
-           · :ExtractionG<N>.embedding_m_<modelhex> (vec_fact_g<N>_<indexhex>)
-           · RELATES_TO.embedding_g<N>_m_<modelhex> (vec_rel_g<N>_<indexhex>)
+vector    Episode.embedding_m_<modelhex> (global, vec_episode_<indexhex>)   (not shipped)
+           · :ExtractionG<N>.embedding_m_<modelhex> (vec_fact_g<N>_<indexhex>)   (not shipped)
+           · RELATES_TO.embedding_g<N>_m_<modelhex> (vec_rel_g<N>_<indexhex>)   (not shipped)
            (one node/relationship index per generation and vector_index_id)
+           shipped: vec_episode_<profileId> over (:Embedding_<profileId>).vector, see §4 "Shipped today"
 ```
 
 No extraction task, attempt, pipeline, judge-input or decision label exists in
@@ -1443,8 +1463,8 @@ SET allowed
   Entity.{witness_generation,
           witness_policy_revision}             current-generation/policy-revision witness marker, set with an allowed mention
   ConductingArcCoverage.state                  rebuild availability/publication barrier
-  Element.embedding_m_<modelhex>               backfill; write-once null → vector
-  RELATES_TO.embedding_g<N>_m_<modelhex>        generation-partitioned relationship vector
+  Element.embedding_m_<modelhex>               backfill; write-once null → vector (not shipped; vectors live on Embedding_<profileId> nodes today)
+  RELATES_TO.embedding_g<N>_m_<modelhex>        generation-partitioned relationship vector (not shipped)
   Outbox.{state, attempts, next_retry_at,
           error, processed_at}                 sequencer/blocked-head cursor
   Generation.{state, next_ingest_seq,

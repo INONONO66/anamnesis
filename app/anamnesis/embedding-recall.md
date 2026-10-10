@@ -1,9 +1,15 @@
 # Original-Episode embedding and hybrid recall increment
 
-This implements `originals-hybrid-v1`, not the complete future pipeline in
-`docs/05-recall.md`. `hello.capabilities.recall=true` names this operational
-original-Episode API. It is not a semantic-quality claim. `extraction` remains
-false; `embeddings` is true only with explicit provider configuration.
+This implements `originals-hybrid-v1`, the current increment named in
+diagnostics, not the complete future pipeline in `docs/05-recall.md`.
+`hello.capabilities.recall=true` names this operational original-Episode
+API. It is not a semantic-quality claim. `extraction` reports whether an
+extraction provider is configured; `embeddings` is true only with explicit
+provider configuration.
+
+D56 replaces Episode vectors by Fact vectors (`vec_fact_<profileId>`) in a
+later PR; once that lands the Episode embedding lane and the
+`originals-hybrid-v1` name retire. Nothing from D56 is in code yet.
 
 ## Provider configuration
 
@@ -15,11 +21,17 @@ Set `ANAMNESIS_EMBEDDING_CONFIG` to a JSON object with:
   (1..65536), `norm: "unit_l2"`, `norm_tolerance` (>0 and <=0.01).
 - `timeout_ms`: 1..30000, default 5000.
 
-The incarnation must identify frozen weights/runtime/pooling and associated
-configuration, not a mutable model alias. The profile digest also binds both
-prefixes, dimension, norm contract and input cap. The operator is responsible
-for the truth of the provider's incarnation assertion; a digest echo cannot
-attest to remote weights.
+The daemon runtime does not take `model_incarnation` from the operator. It
+computes `model_incarnation = sha256(JSON.stringify([baseUrl, model,
+dimensions]))` (`app/anamnesis/runtime.ts:93`): a configuration fingerprint
+of the endpoint, model name and dimension count, with empty prefixes, a
+65536-byte input cap and the `unit_l2` norm contract. The provider must echo
+that `model` and `model_incarnation` or the call fails with
+`profile_mismatch` (`packages/core/src/embedding.ts:93-97`). The echo proves
+the provider agrees on the configuration; it does not prove that weights,
+runtime or pooling are frozen. The operator remains responsible for pinning
+the served model behind that endpoint. `profileId`, which names the vector
+index, is the SHA-256 of the canonical profile JSON.
 
 The server sends one POST with `model`, `model_incarnation`, `dimensions`,
 `input` (the exact original/query with its pinned prefix), and `truncate:false`.
@@ -45,8 +57,12 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
   quarantines on the first attempt. The attempt's `detail` names the failing
   branch (`http 503`, `timeout 30000ms`, a socket code, `8193 bytes > 8192`).
 - Attempt and quarantine state lives in `embedding-state.json` under the
-  runtime root, not in Neo4j. Neo4j holds the Episode and, once it exists,
-  the `EmbeddingVector`. An Episode needs embedding when it has no vector for
+  runtime root, not in Neo4j (D54). Neo4j holds the Episode and, once it
+  exists, the vector on a separate `Embedding_<profileId>` node with
+  properties `vector`, `episode_id` and `profile_id`, linked to the Episode;
+  vectors are never Episode properties. The index is
+  `vec_episode_<profileId>` over `(v:Embedding_<profileId>) ON (v.vector)`.
+  An Episode needs embedding when it has no vector for
   the configured profile; that missing-vector scan is the only work queue.
   A ledger entry exists only while an Episode has no vector, and a success
   deletes it, including the Episode's earlier failed attempts: those operation
@@ -82,7 +98,7 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
   counted; a second call with nothing left returns `{requeued: 0}`.
   `anamnesis-ops embed-requeue [--limit N]` is the operator entry point.
 - `embedding.status {operation_id}` answers from the ledger when some entry
-  holds that attempt; otherwise it looks up the `EmbeddingVector` with that
+  holds that attempt; otherwise it looks up the embedding node with that
   `operation_id` and synthesizes a `succeeded` attempt (model, incarnation,
   dimensions and timestamps from the vector); otherwise `unknown`. Status and
   recovery revalidate current Episode/source policy. A denied Episode does not
@@ -217,6 +233,7 @@ No PPR, Fact generations, extraction, dreaming, occurrence/lineage analysis,
 coverage-prefix ledger, hidden-source inference, or latency/semantic efficacy
 claim is made. Ordering is deterministic for captured inputs within the pinned
 numeric runtime; ANN/index state and elapsed server time are not replay tokens.
-The legacy privileged `Engine.recall(string, options)` remains the existing
-fulltext helper; the new authority-bearing core path is `Store.recall` /
-`Engine.recallHybrid` and the `recall` RPC.
+The authority-bearing core path is `Store.recall` / `Engine.recallHybrid`
+behind the `recall` RPC. `Engine.recall(string)` is a privileged
+fulltext-only helper used by tests, not a serving surface, and is slated
+for removal.

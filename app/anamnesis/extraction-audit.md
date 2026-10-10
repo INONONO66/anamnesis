@@ -1,12 +1,38 @@
-# Claim/judge audit pipeline
+# Extraction pipeline (claim, judge, materialize)
 
-`capabilities.extraction` reports whether an extraction provider is configured;
-it does not certify semantic serving readiness. The installation-authenticated
-pipeline retains claim/judge audit work. Completed retained claims also materialize
-generation-scoped Facts, Entities, evidence links and conducting arcs. Generation
-coverage and cutover remain explicit Engine operations; policy-authorized derived
-recall serves only the selected generation. No semantic quality is certified.
-A `correct` or `suppress` decision does not modify the original Episode.
+This is the production extraction pipeline. The daemon's extraction scheduler
+(`packages/core/src/extraction-scheduler.ts`) runs it continuously: it scans
+committed Episodes above the generation's covered `ingest_seq`, drives each
+one through the configured chat provider, seals the terminal outcome as
+coverage, and cuts a caught-up generation over. Today one provider call
+handles one Episode. Each pipeline is a claim task followed by its unique
+child judge task; retained claims materialize generation-scoped Facts,
+Entities, evidence links and conducting arcs, and the relation judge (D53)
+gates every Fact to Fact relation. Pipeline state lives in
+`extraction-state.json` with sealed-entry pruning (D55).
+
+`capabilities.extraction` reports whether an extraction provider is
+configured; it does not certify semantic serving readiness. Generation
+coverage and cutover remain explicit Engine operations; policy-authorized
+derived recall serves only the selected generation. No semantic quality is
+certified. A `correct` or `suppress` decision does not modify the original
+Episode.
+
+The `extraction.audit.create`, `extraction.audit.run` and
+`extraction.audit.status` RPCs are the on-demand entry into the same pipeline
+the scheduler drives. They keep their names; they are not a separate
+verification-only path.
+
+## Direction (D56)
+
+The next increment batches a same-session window of Episodes per provider
+call (several consecutive Episodes plus a few context Episodes), with every
+Episode still attributed individually through `DERIVED_FROM`, and places a
+cheap pre-gate in front of the model call to score Episodes before they are
+sent. None of that is shipped: the running scheduler calls the provider once
+per Episode and no pre-gate exists in code.
+
+## Provider and ABI
 
 Configure `ANAMNESIS_LLM_BASE_URL` and `ANAMNESIS_LLM_API_KEY_FILE` for the
 chat provider. The private JSON key file contains a `bearer` string. The model
@@ -16,7 +42,7 @@ The Anthropic transport uses `/v1/messages`; OpenAI uses `/v1/chat/completions`.
 `ANAMNESIS_EXTRACTION_PROMPT_FILE` overrides the bundled prompt.
 Chat models return exact evidence quote strings, not offsets. The adapter locates
 quotes in the source and computes UTF-8 byte spans locally, then validates the
-strict audit ABI. New claims use the first occurrence of a repeated quote, or
+strict extraction ABI. New claims use the first occurrence of a repeated quote, or
 the exact byte occurrence nearest a supplied legacy start offset. Model offsets
 never authorize bytes. Claim judges retain the parent's occurrence. Unsupported
 quotes and their claims/decisions are dropped; an empty claim result suppresses
@@ -31,8 +57,11 @@ A missing provider rejects creation/execution. A provider supporting only the
 old standalone judge ABI fails closed for the new `judge_claims` task.
 
 An existing writable extraction generation is required; generation admission
-and lifecycle operations remain internal Engine/Store APIs. No generation
-cutover or recall readiness follows from this audit pipeline.
+and lifecycle operations remain internal Engine/Store APIs. Running a single
+pipeline on demand does not by itself cut a generation over or make recall
+ready; the scheduler performs cutover once coverage catches up.
+
+## On-demand RPCs
 
 - `extraction.audit.create {id,generation_id,source_id}` creates an idempotent
   claim task using the configured model, exact stored Episode revision and
@@ -42,8 +71,9 @@ cutover or recall readiness follows from this audit pipeline.
   queued claim and then its unique child judge. HTTP calls are outside
   retryable transactions. Already terminal tasks do not call the provider
   again. Failed or abandoned leases require explicit internal
-  `retryModelTask`/`settleModelTask`; this subset has no automatic retry loop
-  or recovery RPC.
+  `retryModelTask`/`settleModelTask`; the RPC subset has no retry loop or
+  recovery RPC of its own. The scheduler resolves lost leases for the work
+  it drives (see below).
 - `extraction.audit.status {pipeline_id}` returns `unknown` when the journal
   holds no entry for that pipeline, otherwise the current tasks, their
   terminal attempts, and up to 64 decisions. Disconnect is not failure or
@@ -74,7 +104,7 @@ follows the same rule with a terminal attempt in place of custody. After an
 entry is pruned, `extraction.audit.status` answers `unknown` for it and a
 store transition on one of its tasks (retry, cancel, settle, lease) throws
 `unknown_ModelTask` instead of reaching the `coverage_frozen` fence; the
-audit log, not the file, is the durable record.
+daemon log, not the file, is the durable record.
 
 Each transition writes one structured line to the daemon log (journald on the
 LXC), carrying `pipeline_id`, `generation_id`, `source_id`, `task_id` and
@@ -106,7 +136,8 @@ immutable attempt ID, output digest and ordered claims. The response uses
 each decision has `{claim_index,disposition,evidence}`. All indexes 0..N-1
 must occur exactly once in order, with byte-identical parent evidence.
 Evidence validates exact UTF-8 slices, not entailment. The old audit
-`modality` means text/code/mixed/unknown, not Fact speech-act modality.
+`modality` field means text/code/mixed/unknown, not Fact speech-act
+modality.
 
 Each judge lease appends its own immutable input premise: current source
 head, policy revision, and parent attempt binding. Completion revalidates
@@ -122,7 +153,7 @@ terminal judge attempt are written to the journal entry in one step. Decisions
 are read from that entry (at most 64, index-ordered) with no adjacency or
 candidate fallback. Required missing decisions reject status/coverage.
 
-Audit coverage seals a successful pipeline only with complete judge authority.
+Coverage seals a successful pipeline only with complete judge authority.
 A terminal failed or cancelled claim/judge instead seals a content-free omission
 binding its stage, immutable attempt ID, state and reason into the coverage digest.
 It contributes no Fact, and retry is forbidden after sealing. Missing judges,
@@ -130,14 +161,15 @@ queued/leased work and expired/worker-lost leases remain incomplete, not omissio
 Cutover accepts these sealed omissions alongside independently verified successful
 materializations. Its bounded evidence/witness checks account for up to 64 claims
 per source rather than mistaking the 256-source bound for a 256-Fact bound.
-The audit never writes to the Episode itself; coverage is the only cursor.
+The pipeline never writes to the Episode itself; coverage is the only cursor.
 Materialization and cutover additionally check persisted generation custody,
 conducting arcs, policy, indexes and optional embedding coverage. Original bytes,
 source records, episode lineage and receipt/Hit authority are unchanged.
 
 The separate [Episode lineage admission](episode-lineage.md) now retains
 prospective authenticated ancestry and provides a checked semantic-source
-adapter. It does not change this legacy audit ABI or authorize its dispositions.
+adapter. It does not change this extraction ABI or authorize its
+dispositions.
 
 This pipeline does not certify semantic equivalence, contradiction, attribution
 quality, Community synthesis or full G004 acceptance. Existing graph and offline

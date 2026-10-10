@@ -4,8 +4,13 @@ Recall is semantically read-only and LLM-free: it never creates memory or
 reinforces accessibility merely by returning context. It does persist a durable
 RecallReceipt control record before delivery (§10). Determinism is conditional
 on the captured serving inputs and degradation state, not graph state alone
-(§11). This is the normative future pipeline; current code supports originals
-and fulltext only (docs/09). D43-D51 in [10-decision-log](10-decision-log.md)
+(§11). The pipeline below is the normative target; the shipped subset today
+is the Episode exact-ID, BM25, session and vector channels, Fact BM25 over
+the selected extraction generation, the T/now pin, the D43 policy barrier,
+the D44 budget, the D45 receipt and a bounded PPR solver, each marked under
+its section as shipped or not shipped. The decided direction is Fact-first
+recall, where Fact vectors replace Episode vectors and Episodes stay
+provenance and context only (docs/10 D56). D43-D51 in [10-decision-log](10-decision-log.md)
 supersede the affected D40/D42 contracts.
 
 ```text
@@ -33,6 +38,12 @@ supersede the affected D40/D42 contracts.
 
 ## 1. Pin
 
+Status — Shipped: `recall_id` (UUIDv7), T defaulting to now, `now`,
+`policy_revision`, `limit`, validated `budget`, session and one query
+embedding whose failure drops the vector channel. Not shipped: `R0`,
+`active[*]` stream selectors, `config_version`, and the pinned data versions
+row (prompt digest, `grouping_version`, `judge_profile_id`) on the receipt.
+
 The following are fixed within one request attempt; a consistency retry
 recaptures serving revisions/selectors but preserves the request's T and now.
 
@@ -59,6 +70,13 @@ versus 19/20 Hit@1 on a small development set and therefore settles nothing
 beyond "no mandatory translation".
 
 ## 2. Candidate channels
+
+Status — Shipped: Episode exact-ID, Episode BM25 (Lucene `element_content`,
+cjk analyzer, 64), Episode session (32), Episode vector over
+`vec_episode_<profileId>` (64) and Fact BM25 of the selected generation (64),
+all under visible(T) and current policy. Not shipped: Fact, Entity and
+relationship vectors, Fact session top-2, the Entity/profile identity channel,
+`k_fetch` over-fetch, per-channel 50 ms timeouts and the lineage gate.
 
 | Channel | Source | Size | Ranking |
 |---|---|---|---|
@@ -116,6 +134,10 @@ are never semantic candidates.
 
 ## 3. Seeds
 
+Status — Shipped: every candidate seeds PPR with uniform weight. Not shipped:
+channel-RRF seed mass, hub damping, DegreeProbe and its captured rows, the
+top-128 seed cap, normalization, and the bounded 50 ms seed transaction.
+
 Seed mass of candidate x (all channel RRF ranks start at **1**; a missing
 item contributes zero, and an absent/empty channel has its weight removed):
 
@@ -169,6 +191,12 @@ of neighbors and query specificity is lost.
 
 ## 4–5. Envelope and PPR
 
+Status — Shipped: a deterministic CSR PPR solver with a fixed iteration cap
+and iterate-delta stop, run over the seed-adjacent ConductingArc rows of the
+selected generation (LIMIT 1024). Not shipped: the 2,000-node/20,000-link
+bounded envelope, the 100 ms envelope timeout and the drop-PPR-entirely
+degradation on a partial envelope.
+
 [06-envelope-ppr](06-envelope-ppr.md). Only the contract needed here:
 
 - Input: at most 128 normalized policy-eligible seeds and their captured capped
@@ -184,7 +212,18 @@ of neighbors and query specificity is lost.
 
 ## 6. Fusion and assembly
 
+Status — Shipped: channel RRF relevance, retention-decayed mass, HitCache
+utility, the score formula, policy and valid(T) filtering, a first
+DERIVED_FROM companion, CONTRASTS peers (LIMIT 4) and the D44 packer. Not
+shipped: PPR inside the fused RRF list, Fact source-mean utility, D46
+occurrence grouping and the full conflict-bundle probe.
+
 ### relevance — RRF
+
+Status — Shipped: rank-only RRF over the present Episode and Fact channel
+lists with absent-channel weight redistribution. Not shipped: the `ppr` list
+as a fusion channel with weight .30 and the identity channel weight; PPR mass
+is computed but ranked outside this fusion.
 
 ```text
   relevance(x) = Σ_L  w_L / (60 + rank_L(x))
@@ -199,6 +238,12 @@ nonnegative weights, `0 < relevance <= 1/61 ≈ 0.016393442623` for a present
 item. All weights are assumptions to calibrate, not measured efficacy.
 
 ### Mass and score
+
+Status — Shipped: `m(now)` from the HitCache `(s, t_last_hit)` row with the
+retention curve, `U` from the cached utility, and `score = relevance ·
+max(m, ε)^γ · (1 + beta · U)` for Episodes. Not shipped: `A_Fact` as a
+source maximum with `sigma_fact`, `U_Fact` as a source mean, Entity anchor
+`m0`, and mass-gated envelope truncation.
 
 For the candidate union (all lists ∪ envelope top 256; ≤ 274 + 256 = **530**
 elements), first retain returnable Facts/Episodes and at most eight Entity
@@ -237,6 +282,12 @@ a memory excluded there has no PPR opportunity (docs/06).
 
 ### Filters and ordering
 
+Status — Shipped: Facts and Episodes as results, valid(T) through effective
+INVALIDATES, the current-policy recheck on primaries and peers, and `score
+DESC, relevance DESC, mass DESC, id ASC` with ranks assigned after packing.
+Not shipped: the `entities` anchor block (top 8) and `provenance.supersedes`
+attachment of invalidated Facts.
+
 1. **Kind**: results are Facts and Episodes. Entities and Communities are not
    results. Entity anchors alone are returned separately in `entities`
    (top 8); Communities do not appear in that block.
@@ -253,6 +304,12 @@ a memory excluded there has no PPR opportunity (docs/06).
    **after** packing as contiguous 0-based positions.
 
 ### Result item
+
+Status — Shipped: `id`, `kind`, `schema`, `epistemic`, `content`, `time`,
+`score`, `relevance`, `mass`, `utility`, `rank`, `sources`,
+`provenance.derived_from`, `supersedes`, `contrasts`, `warnings` and
+`channels`. Not shipped: `content_language`, `modality` on Facts, the
+conflict counters, the D49 echo lineage fields and `operator_corrected`.
 
 ```json
 {
@@ -296,6 +353,12 @@ sources or ranks are never trusted at commit; the durable receipt is
 authority.
 
 ### Occurrences and bounded conflict bundles (D46)
+
+Status — Shipped: CONTRASTS peers selected with LIMIT 4 under a
+current-policy check, delivered as companions. Not shipped: occurrence
+grouping and `occurrence_ids`, the raw-65 probe with the 64-peer inspection,
+`conflict_total`, `conflict_truncated`, `conflict_redacted`, the mandatory
+`warnings` codes, and the eight-target `supersedes` completion.
 
 Every original and each occurrence's extracted assertion/provenance is retained
 as a separate immutable Fact, even if semantically duplicate. DERIVED_FROM and
@@ -386,6 +449,12 @@ and an assistant echo of delivered text adds no independent root.
 
 ### Exact output budget (D44)
 
+Status — Shipped: `limit` validation, the exact byte budget, the admitted
+budget echo, canonical JSON-lines `context_text`, greedy whole-bundle packing
+and `used_budget` (packages/core/src/recall.ts). Not shipped: the `tokens`
+unit with a pinned tokenizer, the `unicode_scalars` unit and the 16 KiB
+diagnostics cap.
+
 `limit` is a nonnegative safe integer (default **10**, hard maximum **64**;
 configuration may lower but not raise that maximum). Reject out-of-range
 values; `k` is not an RPC alias. Optional request examples:
@@ -460,6 +529,10 @@ not before it.
 
 ### `epistemic` — producer and derivation distance
 
+Status — Shipped: `observed` for Episodes and `extracted` for Facts, derived
+from `schema` at assembly. Not shipped: `synthesized`, because no synthesis
+producer exists in code.
+
 Every result names the process that wrote it. The value is a closed enum,
 derived at assembly time from `schema` (docs/01 §1); nothing is stored.
 It describes provenance/derivation distance, not truth, reliability or a
@@ -483,6 +556,11 @@ a synthesis may be source-faithful. No reliability ordering follows solely
 from this enum. Callers may use it for phrasing or provenance filtering.
 
 ## 7. Consistency — structure_revision
+
+Status — Shipped: the D43 policy revision barrier, pinned at request start
+and rechecked before receipt persistence, with retry and `policy_changed`
+rejection. Not shipped: the `structure_revision` R0/R1 read, the structural
+retry and `torn` diagnostics.
 
 ```text
   read R0 → ②③④⑤⑥⑦ (including companion completion) → read R1
@@ -538,6 +616,13 @@ suppression; there is no `gc --erase` or GDPR erasure guarantee.
 
 ## 8. Degradation ladder
 
+Status — Shipped: vector channel absent on embedding failure or
+`profile_mismatch`, bm25 absent on an empty Lucene query, PPR absent with no
+seeds, policy and receipt failures rejecting without context. Not shipped:
+per-channel and seed-probe timeouts, envelope timeout and truncation rows,
+`torn`, `conflict_unavailable`, witness-proof rows and the Neo4j cold-start
+wait with empty success.
+
 Nothing degrades into a silent partial result. Retrieval failures drop whole
 channels; required bundle failures skip whole primary bundles; policy and
 receipt failures reject rather than expose unverified context.
@@ -577,6 +662,12 @@ policy authority and a durable receipt. `recall_id` is the receipt key; there
 is no separate public `receipt_id` field.
 
 ## 9. Diagnostics and budget
+
+Status — Shipped: `recall_id`, T, now, `policy_revision`, `channels_used`,
+`ppr_used` and the increment name `originals-hybrid-v1`. Not shipped:
+`structure_revision`, `config_version`, `torn`, the `embedding_coverages`
+array, `degree_probe`, `envelope` and `ppr` counters, the timing breakdown
+and the latency targets as measured numbers.
 
 ```json
 {"diagnostics": {
@@ -659,6 +750,13 @@ The bounded TypeScript PPR loop has no deadline.
 
 ## 10. Durable impressions and feedback (D45)
 
+Status — Shipped: the append-only RecallReceipt persisted before delivery,
+`receipt_ttl_ms` expiry, `commit {recall_id, adopted?, reward?}` with
+`empty_commit`, `unknown_recall` and `receipt_expired`, rank-weighted source
+attribution into HitCache retention and utility. Not shipped:
+`selection_digest` with echo lineage, auto-mode `exposure` Hits and the
+EmbeddingResolution identities on the receipt.
+
 Before context delivery, persist a separate append-only **RecallReceipt**
 control record, keyed by recall_id and bound to the authenticated client. It is
 not a semantic Episode, candidate, embedding input or source of ordinary
@@ -731,6 +829,12 @@ Only recall_hit uses the capped positive, dimensionless stability formula in
 docs/04, so monotonicity is weak at S_max.
 
 ## 11. Determinism
+
+Status — Shipped: a deterministic PPR solver with sorted CSR adjacency and
+ID ASC ties, and receipt-level capture of delivered items, budget and policy
+revision. Not shipped: capture of ordered candidate IDs and scores, embedding
+coverage rows, degree-probe rows, envelope state and timeout decisions, so
+receipt replay reconstructs delivery but not the online pipeline.
 
 The same **captured serving inputs** produce the same ordered context within
 the pinned numeric/runtime contract (D47, docs/06 §7). Capture query and exact
