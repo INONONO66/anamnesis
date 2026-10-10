@@ -871,29 +871,26 @@ tokens use the 64 lowercase hex characters with no `sha256:` prefix:
 ```text
   node property         embedding_m_<modelhex>                    (not shipped)
   RELATES_TO property   embedding_g<N>_m_<modelhex>
-  physical indexes      vec_episode_<indexhex>
-                        vec_fact_g<N>_<indexhex>
+  physical indexes      vec_fact_g<N>_<indexhex>
                         vec_rel_g<N>_<indexhex>
   active[embedding] = <embedding_profile_id>
 ```
 
-**Shipped today** (HEAD `7fb4d19`). The scheme above is the normative
-target; the code is narrower. Vectors are not Episode properties but
-separate nodes labelled `Embedding_<profileId>` with the properties
-`vector`, `episode_id` and `profile_id`, linked to their Episode
-(`packages/core/src/store/embedding-store.ts:168`). The only index is
-`CREATE VECTOR INDEX vec_episode_<profileId> IF NOT EXISTS FOR
-(v:Embedding_<profileId>) ON (v.vector)` (`packages/core/src/store.ts:89`),
+**Shipped today**. The scheme above is the normative
+target; the code is narrower. Vectors belong to Fact targets on
+separate nodes labelled `Embedding_<profileId>` with `fact_id`,
+`profile_id`, `input_revision`, `input_digest` and `vector` properties.
+The index is `CREATE VECTOR INDEX vec_fact_<profileId> IF NOT EXISTS FOR
+(v:Embedding_<profileId>) ON (v.vector)` (`packages/core/src/store.ts`),
 where `profileId` is the SHA-256 of the canonical profile JSON
 (`packages/core/src/embedding.ts:23`), a single fingerprint rather than the
 three above. The runtime sets `model_incarnation` to
 `sha256([baseUrl, model, dimensions])` (`app/anamnesis/runtime.ts:93`), a
 configuration fingerprint, not a proof of frozen weights; the provider must
 echo `model` and `model_incarnation` or the call fails with
-`profile_mismatch`. There is no `embedding_m_<modelhex>` property and no
-`vec_fact_*` or `vec_rel_*` index. D56 moves vectors from Episodes to Facts
-(`vec_fact_<profileId>`) in a later PR; Episodes then stop being a vector
-target.
+`profile_mismatch`. There is no `embedding_m_<modelhex>` property or
+relationship vector index. The missing-vector scan and activation gate count
+generation Facts, with zero Facts satisfying embedding coverage.
 
 The experimental baseline profile is the resolved Qwen Q8_0 artifact:
 
@@ -948,11 +945,9 @@ indexConfig: {
 
 Instantiate these DDL shapes with a validated integer `<N>` and lowercase hex
 IDs; those schema tokens are never request text (normative, not shipped;
-the shipped DDL is the single `vec_episode_<profileId>` statement above):
+the shipped DDL is the `vec_fact_<profileId>` statement above):
 
 ```cypher
-CREATE VECTOR INDEX `vec_episode_<indexhex>` IF NOT EXISTS
-FOR (n:Episode) ON (n.`embedding_m_<modelhex>`) OPTIONS <options-above>;
 CREATE VECTOR INDEX `vec_fact_g<N>_<indexhex>` IF NOT EXISTS
 FOR (n:ExtractionG<N>) ON (n.`embedding_m_<modelhex>`) OPTIONS <options-above>;
 CREATE VECTOR INDEX `vec_rel_g<N>_<indexhex>` IF NOT EXISTS
@@ -984,11 +979,11 @@ with `generation=0` only for `episode`. `EmbeddingWork` is unique by
 `source_id?`, `input_digest`, state, `attempts_in_cycle`, `attempts_total`,
 `retry_cycle` and `next_retry_at`. `input_digest` is SHA-256 of the exact
 UTF-8 string presented as that endpoint input before JSON escaping. Attempt
-records are not graph nodes. In the shipped v0.1 lane each failed attempt is
-an `RpcEmbeddingAttempt` (`operation_id`, `episode_id`, `profile_id`,
+records are not graph nodes. In the shipped lane each failed attempt is
+an `RpcEmbeddingAttempt` (`operation_id`, `fact_id`, `profile_id`,
 `input_revision`, `input_digest`, model identity, timestamps, `state`,
-`reason`, bounded `detail`) appended to the Episode's entry in the embedding
-ledger (`embedding-state.json`, D54), keyed by Episode and carrying no source
+`reason`, bounded `detail`) appended to the Fact's entry in the embedding
+ledger (`embedding-state.json`, D54), keyed by Fact and carrying no source
 text; the work-item shape below is the design for the generation-scoped lane.
 Each immutable attempt `{attempt_id, embedding_model_id, stream, generation,
 ingest_seq, item_ordinal, source_id?, input_digest, attempt_ordinal,
@@ -1395,7 +1390,7 @@ range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Elemen
           composite Entity(witness_generation, witness_policy_revision) (`entity_witness`)
           composite Fact(generation, primary_episode_id, time_utc, id)
           composite HubArc(hub_id, rank) · Outbox.processed_at
-          composite EmbeddingVector(episode_id, profile_id) (missing-vector discovery, §4)
+          composite EmbeddingVector(fact_id, profile_id) (missing-vector discovery, §4)
           composite ConductingArc(source_id, link_id)
           composite Fact-INVALIDATES(target_id, generation, effective_time_utc, id)
           composite Episode-INVALIDATES(target_id, effective_time_utc, id)
@@ -1406,11 +1401,10 @@ range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Elemen
           composite Fact(generation, duplicate_group_key)
           RecallReceipt.expires_at
 fulltext  Episode.content (global) · Fact/Entity content (one index per generation)
-vector    Episode.embedding_m_<modelhex> (global, vec_episode_<indexhex>)   (not shipped)
-           · :ExtractionG<N>.embedding_m_<modelhex> (vec_fact_g<N>_<indexhex>)   (not shipped)
+vector    :ExtractionG<N>.embedding_m_<modelhex> (vec_fact_g<N>_<indexhex>)   (not shipped)
            · RELATES_TO.embedding_g<N>_m_<modelhex> (vec_rel_g<N>_<indexhex>)   (not shipped)
            (one node/relationship index per generation and vector_index_id)
-           shipped: vec_episode_<profileId> over (:Embedding_<profileId>).vector, see §4 "Shipped today"
+           shipped: vec_fact_<profileId> over (:Embedding_<profileId>).vector, see §4 "Shipped today"
 ```
 
 No extraction task, attempt, pipeline, judge-input or decision label exists in

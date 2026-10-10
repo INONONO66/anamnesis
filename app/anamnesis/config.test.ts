@@ -71,7 +71,7 @@ test("provider configuration reads overrides and bearer at startup", async () =>
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
-test("provider dialect overrides model inference and disabled embeddings require no fields", async () => {
+test("provider dialect overrides model inference and disabled Fact embeddings require no fields", async () => {
   const config = await loadProviderConfig({ ANAMNESIS_LLM_DIALECT: "openai_chat", ANAMNESIS_EMBEDDING_MODEL: "", ANAMNESIS_EMBEDDING_DIMENSIONS: "invalid", ANAMNESIS_EMBEDDING_API_KEY: "" });
   assert.equal(config.embedding, undefined);
   assert.equal(config.llm.dialect, "openai_chat");

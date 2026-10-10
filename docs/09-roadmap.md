@@ -23,19 +23,21 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
 - The `recall` RPC, served as `Engine.recallHybrid` → `Store.recall`
   (`packages/core/src/store/recall-store.ts`). Its candidate channels are
   Episode exact-ID, Episode BM25, Episode session (recent Episodes of the
-  request session), Episode vector over `vec_episode_<profileId>` (LIMIT
-  64) and Fact BM25 for the selected extraction generation. On top of the
+  request session), Fact vector over `vec_fact_<profileId>` (LIMIT 64) and
+  Fact BM25, both for the selected extraction generation (D56). On top of the
   candidates: the T/now pin, the policy-revision barrier (D43), the exact
   byte budget with a durable RecallReceipt (D44, D45), hit-cache retention
   and utility in originals ranking, a real PPR solver
   (`packages/core/src/dynamics/ppr.ts`) seeded uniformly from the
   candidates over seed-adjacent ConductingArc (LIMIT 1024), the first
   DERIVED_FROM row as Fact companion, and CONTRASTS peers (LIMIT 4) under a
-  current-policy check.
-- The Episode embedding lane: vectors on separate `Embedding_<profileId>`
-  nodes linked to the Episode, one `vec_episode_<profileId>` index per
-  profile, the `embedding-state.json` ledger and the `embedding.recover` /
-  `embedding.requeue` / `embedding.status` RPCs (D54).
+  current-policy check, and a bounded same-session Episode window (default
+  two before / two after the Fact's DERIVED_FROM source Episode, D56).
+- The Fact embedding lane: vectors on separate `Embedding_<profileId>`
+  nodes keyed by `fact_id`, one `vec_fact_<profileId>` index per profile,
+  the `embedding-state.json` ledger (version 2, `facts`) and the
+  `embedding.recover` / `embedding.requeue` / `embedding.status` RPCs
+  (D54, D56). Episodes are never embedded.
 - The extraction scheduler (`packages/core/src/extraction-scheduler.ts`),
   running continuously in the daemon one Episode per provider call through
   the OpenAI-compatible chat provider: claim → judge → materialize Facts,

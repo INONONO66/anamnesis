@@ -2464,6 +2464,40 @@
                               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
                             }
                           },
+                          "window": {
+                            "type": "object",
+                            "properties": {
+                              "source": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                              },
+                              "before": {
+                                "maxItems": 8,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                                }
+                              },
+                              "after": {
+                                "maxItems": 8,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                                }
+                              }
+                            },
+                            "required": [
+                              "source",
+                              "before",
+                              "after"
+                            ],
+                            "additionalProperties": false
+                          },
                           "provenance": {
                             "type": "object",
                             "properties": {
@@ -2597,6 +2631,7 @@
                           "mass",
                           "utility",
                           "sources",
+                          "window",
                           "provenance",
                           "channels"
                         ],
@@ -2924,6 +2959,40 @@
                               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
                             }
                           },
+                          "window": {
+                            "type": "object",
+                            "properties": {
+                              "source": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                              },
+                              "before": {
+                                "maxItems": 8,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                                }
+                              },
+                              "after": {
+                                "maxItems": 8,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                                }
+                              }
+                            },
+                            "required": [
+                              "source",
+                              "before",
+                              "after"
+                            ],
+                            "additionalProperties": false
+                          },
                           "provenance": {
                             "type": "object",
                             "properties": {
@@ -3057,6 +3126,7 @@
                           "mass",
                           "utility",
                           "sources",
+                          "window",
                           "provenance",
                           "channels"
                         ],
@@ -3166,10 +3236,7 @@
                   "properties": {
                     "pipeline": {
                       "type": "string",
-                      "enum": [
-                        "originals-hybrid-v1",
-                        "derived-hybrid-v1"
-                      ]
+                      "const": "derived-hybrid-v1"
                     },
                     "now": {
                       "type": "integer",
@@ -5957,7 +6024,7 @@
                   "format": "uuid",
                   "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
                 },
-                "episode_id": {
+                "fact_id": {
                   "type": "string",
                   "format": "uuid",
                   "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
@@ -6053,7 +6120,7 @@
               },
               "required": [
                 "operation_id",
-                "episode_id",
+                "fact_id",
                 "profile_id",
                 "model",
                 "model_incarnation",
@@ -6146,7 +6213,7 @@
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
                     },
-                    "episode_id": {
+                    "fact_id": {
                       "type": "string",
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
@@ -6242,7 +6309,7 @@
                   },
                   "required": [
                     "operation_id",
-                    "episode_id",
+                    "fact_id",
                     "profile_id",
                     "model",
                     "model_incarnation",

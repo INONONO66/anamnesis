@@ -1,5 +1,5 @@
-// Real Node daemon over UDS: the embedding worker must embed committed
-// Episodes by itself, inside the single-writer turn loop. Every wait is an
+// Real Node daemon over UDS: the embedding worker must embed materialized
+// Facts by itself, inside the single-writer turn loop. Every wait is an
 // event (stdout line, socket reply, child exit) with a bounded deadline.
 // The drain scenario needs the isolated harness graph and is skipped without it:
 //   bun scripts/qa/runtime-scenarios.ts --case foundation --evidence-root .omo/evidence/foundation/daemon-workers --test-path app/anamnesis/daemon-workers.test.ts
@@ -125,6 +125,34 @@ const episode = (root: string, record: string) => ({ episode: { schema: "anamnes
 /** Lineage-admitted remember: the extraction pipeline only authorizes admitted Episodes. */
 const admitted = (root: string, record: string) => ({ ...episode(root, record), origin_role: "user" as const, lineage_mode: "direct" as const, parent_recall_ids: [] as string[] });
 
+/** The daemon's extraction worker materializes retained Facts before the embedding worker starts. */
+async function seedFacts(driver: ReturnType<typeof neo4j.driver>, records: string[]): Promise<string[]> {
+  await driver.executeQuery("MATCH (n) DETACH DELETE n");
+  const provider = await extractor();
+  try {
+    await fixture({ ANAMNESIS_NEO4J_URI: URI!, ANAMNESIS_NEO4J_PASSWORD: PASSWORD!,
+      ANAMNESIS_EXTRACTION_CONFIG: JSON.stringify({ endpoint: provider.endpoint, model: provider.model, model_incarnation: provider.model_incarnation, timeout_ms: 5000 }) }, async daemon => {
+      const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
+      try {
+        for (const record of records) expect((await client.request("remember", admitted(daemon.root, record))).state).toBe("committed");
+        for (;;) {
+          const state = (await client.request("status", {})).workers.extraction;
+          if (state.state === "active" && state.covered_ingest_seq === records.length && state.in_flight === 0) break;
+          await daemon.lines.until("workers_idle");
+        }
+        expect((await client.request("shutdown", {})).state).toBe("stopping");
+      } finally { await client.close(); }
+    });
+    const rows = await driver.executeQuery("MATCH (f:Element:Fact) RETURN f.id AS id ORDER BY id");
+    expect(rows.records).toHaveLength(records.length);
+    return rows.records.map(row => row.get("id") as string);
+  } finally {
+    const closed = once(provider.server, "close", { signal: deadline(5000) });
+    provider.server.close(); provider.server.closeAllConnections();
+    await closed;
+  }
+}
+
 test("status reports the worker counters even while storage is unavailable", async () => {
   await fixture({}, async daemon => {
     const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
@@ -139,23 +167,17 @@ test("status reports the worker counters even while storage is unavailable", asy
   });
 }, 60_000);
 
-test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, which embeds every Episode and reports idle", async () => {
+test.skipIf(!URI || !PASSWORD)("materialized Facts wake the embedding worker, which embeds every Fact and reports idle", async () => {
   const provider = await embedder();
   const driver = neo4j.driver(URI!, neo4j.auth.basic("neo4j", PASSWORD!), { disableLosslessIntegers: true });
   try {
+    const ids = await seedFacts(driver, ["one", "two", "three"]);
     await fixture({ ANAMNESIS_NEO4J_URI: URI!, ANAMNESIS_NEO4J_PASSWORD: PASSWORD!,
       ANAMNESIS_EMBEDDING_CONFIG: JSON.stringify({ endpoint: provider.endpoint, profile, timeout_ms: 5000 }) }, async daemon => {
       const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
       try {
         expect((await client.request("status", {})).capabilities.embeddings).toBe(true);
-        const ids: string[] = [];
-        for (const record of ["one", "two", "three"]) {
-          const result = await client.request("remember", episode(daemon.root, record));
-          expect(result.state).toBe("committed");
-          ids.push((result as { id: string }).id);
-        }
-        // The worker may report idle between commits as well; each idle line is a
-        // real transition, and the one after the third commit shows everything drained.
+        // The worker may report idle between Facts; the last transition shows everything drained.
         let status = await client.request("status", {});
         while (status.workers.embedding.drained_total < 3) {
           await daemon.lines.until("workers_idle");
@@ -164,8 +186,9 @@ test.skipIf(!URI || !PASSWORD)("committed remembers wake the embedding worker, w
         expect(status.workers).toEqual({ embedding: { pending: 0, drained_total: 3, quarantined_total: 0, last_error: null }, extraction: { state: "unconfigured" } });
         expect(status.outbox_pending).toBe(0);
         expect(provider.calls()).toBe(3);
-        const vectors = await driver.executeQuery("MATCH (v:EmbeddingVector) WHERE v.episode_id IN $ids RETURN count(v) AS n", { ids });
-        expect(vectors.records[0]!.get("n")).toBe(3);
+        const vectors = await driver.executeQuery("MATCH (v:EmbeddingVector) RETURN v.fact_id AS id ORDER BY id");
+        expect(vectors.records.map(row => row.get("id"))).toEqual(ids);
+        expect((await driver.executeQuery("MATCH (v:EmbeddingVector) WHERE v.episode_id IS NOT NULL RETURN count(v) AS n")).records[0]!.get("n")).toBe(0);
         const exited = once(daemon.child, "exit", { signal: deadline() });
         expect((await client.request("shutdown", {})).state).toBe("stopping");
         expect((await exited)[0]).toBe(0);
@@ -211,26 +234,16 @@ test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is ser
   // production daemon: status over TCP hit the client deadline and reported outcome_unknown while a requeue drained.
   // Every provider call here is held until the test releases it, so the RPC latency is measured in provider calls.
   const provider = await gatedEmbedder();
+  const driver = neo4j.driver(URI!, neo4j.auth.basic("neo4j", PASSWORD!), { disableLosslessIntegers: true });
   try {
+    const ids = await seedFacts(driver, ["one", "two", "three"]);
     await fixture({ ANAMNESIS_NEO4J_URI: URI!, ANAMNESIS_NEO4J_PASSWORD: PASSWORD!,
       ANAMNESIS_EMBEDDING_CONFIG: JSON.stringify({ endpoint: provider.endpoint, profile, timeout_ms: 20_000 }) }, async daemon => {
       const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
       try {
-        // Each committed remember wakes the lane, and the owner serves the next request only once the turn's held
-        // provider call is released: an RPC is never admitted mid-call, so a remember is answered after the call the
-        // previous remember started. Three remembers therefore seed three entries while releasing calls one by one.
-        const remembers = ["one", "two", "three"].map(record => client.request("remember", episode(daemon.root, record)));
-        for (const remembered of remembers) {
-          const call = provider.started();
-          const outcome = await Promise.race([remembered.then(() => "committed" as const), call.then(() => "held" as const)]);
-
-          if (outcome === "held") { provider.release(); expect((await remembered).state).toBe("committed"); }
-          else expect((await remembered).state).toBe("committed");
-
-        }
-        // The seed released at most three calls (one per turn between remembers); the remaining Episodes still lack a vector
-        // and every further call is held. A status queued now is answered after the call in flight, and at most one
-        // more if the owner started a second turn before the frame was admitted. A batch turn would embed every
+        await provider.started();
+        // All three Facts precede this daemon. A status queued now is answered after at most the call in flight.
+        // A batch turn would embed every
         // remaining entry before serving it.
         const before = provider.completed();
         let answered = false;
@@ -241,7 +254,7 @@ test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is ser
           await Promise.race([status, next]);
         }
         const observed = await status;
-        expect(provider.completed() - before).toBeLessThanOrEqual(2);
+        expect(provider.completed() - before).toBeLessThanOrEqual(1);
         expect(observed.workers.embedding.pending).toBe(3 - observed.workers.embedding.drained_total);
         expect(observed.workers.embedding.quarantined_total).toBe(0);
         // Let the remaining calls through one at a time: wait for a call to be held, answer it, wait for its completion.
@@ -253,12 +266,15 @@ test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is ser
         let settled = await client.request("status", {});
         while (settled.workers.embedding.drained_total < 3) { await daemon.lines.until("workers_idle"); settled = await client.request("status", {}); }
         expect(settled.workers.embedding).toEqual({ pending: 0, drained_total: 3, quarantined_total: 0, last_error: null });
+        const vectors = await driver.executeQuery("MATCH (v:EmbeddingVector) RETURN v.fact_id AS id ORDER BY id");
+        expect(vectors.records.map(row => row.get("id"))).toEqual(ids);
         const exited = once(daemon.child, "exit", { signal: deadline() });
         expect((await client.request("shutdown", {})).state).toBe("stopping");
         expect((await exited)[0]).toBe(0);
       } finally { await client.close(); }
     });
   } finally {
+    await driver.close();
     const closed = once(provider.server, "close", { signal: deadline(5000) });
     provider.server.close(); provider.server.closeAllConnections();
     await closed;

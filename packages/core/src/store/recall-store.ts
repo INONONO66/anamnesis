@@ -1,5 +1,5 @@
 import { EPISODE_SCHEMAS, SCHEMA_ID } from "@anamnesis/protocol";
-import { type ManagedTransaction } from "neo4j-driver";
+import neo4j, { type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import { solvePpr } from "../dynamics/ppr.ts";
@@ -24,8 +24,8 @@ const RECALL_ALLOWED = `e.schema IN $schemas AND e.time_utc <= $T
         AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
         AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL }`;
 
-/** The candidate channels of a recall: identity, BM25, session and vector, each a policy-scoped Episode list. */
-async function episodeChannelsTx(tx: ManagedTransaction, scope: RecallScope, request: RpcRecallParams, queryVector: number[] | null, profileId: string | null) {
+/** Original Episodes remain candidates through identity, BM25 and session. */
+async function episodeChannelsTx(tx: ManagedTransaction, scope: RecallScope, request: RpcRecallParams) {
   const lists: RecallLists = {}, nodes = new Map<string, ElementNode>();
   const channel = async (name: string, query: string, params: Record<string, unknown>) => {
     const rows = await tx.run<{ e: ElementNode }>(query, { ...scope, ...params });
@@ -37,9 +37,6 @@ async function episodeChannelsTx(tx: ManagedTransaction, scope: RecallScope, req
     WITH node AS e,score WHERE e:Episode AND ${RECALL_ALLOWED} RETURN e ORDER BY score DESC,e.id ASC LIMIT 64`, { q });
   if (request.session) await channel("session", `MATCH (e:Episode {session_key:$session}) WHERE ${RECALL_ALLOWED}
     RETURN e ORDER BY e.time_utc DESC,e.ingest_seq DESC,e.id ASC LIMIT 32`, { session: tupleHash([request.session.source, request.session.session]) });
-  if (queryVector && profileId) await channel("vector", `CALL db.index.vector.queryNodes($index,256,$vector) YIELD node,score
-    MATCH (e:Element:Episode {id:node.episode_id}) WHERE node.profile_id=$profile AND node.input_revision=e.revision_key AND node.input_digest=e.digest AND ${RECALL_ALLOWED}
-    RETURN e ORDER BY score DESC,e.id ASC LIMIT 64`, { index: `vec_episode_${profileId}`, vector: queryVector, profile: profileId });
   return { lists, nodes };
 }
 
@@ -63,18 +60,56 @@ async function rankedEpisodesTx(tx: ManagedTransaction, nodes: Map<string, Eleme
   return ranked;
 }
 
-/** Facts of the selected generation matching the query join the BM25 list as derived candidates. */
-async function derivedCandidatesTx(tx: ManagedTransaction, query: string, generation: string, T: string, lists: RecallLists): Promise<Map<string, ElementNode>> {
-  const derivedNodes = new Map<string, ElementNode>(), q = luceneQuery(query);
-  if (!q) return derivedNodes;
-  const derivedRows = await tx.run(`CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
-    WITH node AS f,score WHERE f:Fact AND f.generation=$generation AND f.time_utc <= $T
-    RETURN f,score ORDER BY score DESC,f.id ASC LIMIT 64`, { q, generation, T });
-  const bm25 = lists["bm25"] ?? (lists["bm25"] = []);
-  for (const row of derivedRows.records) {
-    const fact = row.get("f") as ElementNode, id = String(fact.properties["id"]);
-    derivedNodes.set(id, fact); bm25.push({ id });
+/** Same-session context is closest-first on the wire, farthest-first when the packer must drop it. */
+async function windowTx(tx: ManagedTransaction, primary: RpcRecallItem, scope: RecallScope, window: number, now: number): Promise<RpcRecallItem[]> {
+  if (primary.kind !== "Fact" || window === 0) return [];
+  const nodes = new Map<string, ElementNode>();
+  const side = async (comparison: "<" | ">", order: "DESC" | "ASC") => {
+    const rows = await tx.run<{ e: ElementNode }>(`MATCH (s:Element:Episode {id:$source})
+      MATCH (e:Element:Episode {session_key:s.session_key})
+      WHERE e.ingest_seq ${comparison} s.ingest_seq AND ${RECALL_ALLOWED}
+      RETURN e ORDER BY e.ingest_seq ${order},e.id ASC LIMIT $window`,
+      { ...scope, source: primary.window.source, window: neo4j.int(window) });
+    return rows.records.map(row => {
+      const node = row.get("e"), id = String(node.properties["id"]);
+      nodes.set(id, node); return id;
+    });
+  };
+  const before = await side("<", "DESC"), after = await side(">", "ASC");
+  primary.window = { source: primary.window.source, before, after };
+  const items = new Map((await rankedEpisodesTx(tx, nodes, {}, now)).map(item => [item.id, item]));
+  const optional: RpcRecallItem[] = [];
+  for (let distance = window - 1; distance >= 0; distance--) {
+    for (const id of [after[distance], before[distance]]) {
+      const item = id === undefined ? undefined : items.get(id);
+      if (item) optional.push(item);
+    }
   }
+  return optional;
+}
+
+/** BM25 and vector hits share source resolution and ranking in the selected generation. */
+async function derivedCandidatesTx(tx: ManagedTransaction, query: string, generation: string, T: string, lists: RecallLists,
+  queryVector: number[] | null, profileId: string | null): Promise<Map<string, ElementNode>> {
+  const derivedNodes = new Map<string, ElementNode>(), q = luceneQuery(query);
+  const channel = async (name: string, cypher: string, params: Record<string, unknown>) => {
+    const rows = await tx.run<{ f: ElementNode }>(cypher, { generation, T, ...params });
+    const list = lists[name] ?? (lists[name] = []);
+    for (const row of rows.records) {
+      const fact = row.get("f"), id = String(fact.properties["id"]);
+      derivedNodes.set(id, fact); list.push({ id });
+    }
+  };
+  if (q) await channel("bm25", `CALL db.index.fulltext.queryNodes('element_content',$q,{limit:256}) YIELD node,score
+    WITH node AS f,score WHERE f:Fact AND f.generation=$generation AND f.time_utc <= $T
+    RETURN f ORDER BY score DESC,f.id ASC LIMIT 64`, { q });
+  // Non-Episode Elements have no revision_key; embedding pins their canonical digest instead.
+  if (queryVector && profileId) await channel("vector", `CALL db.index.vector.queryNodes($index,256,$vector) YIELD node,score
+    MATCH (f:Element:Fact {id:node.fact_id})
+    WHERE node.profile_id=$profile AND node.input_revision=coalesce(f.revision_key,f.digest)
+      AND node.input_digest=f.digest AND f.generation=$generation AND f.time_utc <= $T
+    RETURN f ORDER BY score DESC,f.id ASC LIMIT 64`,
+    { index: `vec_fact_${profileId}`, vector: queryVector, profile: profileId });
   return derivedNodes;
 }
 
@@ -112,13 +147,14 @@ export class RecallStore {
 
   /** Derived Facts as ranked items: each is rechecked against policy through its source Episode, its contrast peers
    * become companions, and every served Fact joins `ranked`. */
-  private async factItemsTx(tx: ManagedTransaction, policy: PolicyState, generation: string, T: string, derivedNodes: Map<string, ElementNode>,
-    pprScores: Map<string, number>, ranked: RpcRecallItem[]): Promise<Map<string, RpcRecallItem>> {
+  private async factItemsTx(tx: ManagedTransaction, policy: PolicyState, generation: string, scope: RecallScope, derivedNodes: Map<string, ElementNode>,
+    pprScores: Map<string, number>, ranked: RpcRecallItem[], lists: RecallLists): Promise<Map<string, RpcRecallItem>> {
     const factItems = new Map<string, RpcRecallItem>();
     const factItem = async (node: ElementNode): Promise<RpcRecallItem | null> => {
       const id = String(node.properties["id"]), cached = factItems.get(id);
       if (cached) return cached;
-      const sourceRows = await tx.run(`MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) RETURN e.id AS source LIMIT 2`, { id });
+      const sourceRows = await tx.run(`MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode)
+        WHERE ${RECALL_ALLOWED} RETURN e.id AS source ORDER BY e.id LIMIT 2`, { ...scope, id });
       const sourceId = sourceRows.records[0]?.get("source");
       if (typeof sourceId !== "string") return null;
       try { await this.core.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
@@ -127,14 +163,15 @@ export class RecallStore {
       const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: SCHEMA_ID.CLAIM, epistemic: "derived",
         content: fact.content, time: fact.time!, mass: Math.max(0, Math.min(1, ppr || fact.mass)), utility: 0,
         relevance: Math.max(0, ppr), score: Math.max(0, ppr || fact.mass), sources: [z.uuidv7().parse(sourceId)],
+        window: { source: sourceId, before: [], after: [] },
         provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
-          contrasts: [], warnings: [] }, channels: derivedNodes.has(id) ? ["bm25"] : [] });
+          contrasts: [], warnings: [] }, channels: Object.keys(lists).filter(name => lists[name]!.some(candidate => candidate.id === id)) });
       factItems.set(id, item); return item;
     };
     for (const [id, node] of derivedNodes) {
       const item = await factItem(node); if (!item) continue;
       const peers = await tx.run<{ other: ElementNode }>(`MATCH (f:Fact {id:$id})-[:CONTRASTS]-(other:Fact {generation:$generation})
-        WHERE other.time_utc <= $T RETURN DISTINCT other ORDER BY other.id LIMIT 4`, { id, generation, T });
+        WHERE other.time_utc <= $T RETURN DISTINCT other ORDER BY other.id LIMIT 4`, { id, generation, T: scope.T });
       for (const row of peers.records) {
         const peer = await factItem(row.get("other"));
         if (peer) item.provenance.contrasts.push(peer.id);
@@ -165,24 +202,27 @@ export class RecallStore {
       // that specify both source and Episode ID.
       const scope: RecallScope = { T: new Date(T).toISOString(), denies: denies.map(deny => policySelector(deny.selector)), schemas: [...EPISODE_SCHEMAS] };
       const serving = request.limit > 0 && budget.limit > 0;
-      const { lists, nodes } = serving ? await episodeChannelsTx(tx, scope, request, queryVector, profileId) : { lists: {}, nodes: new Map<string, ElementNode>() };
+      const { lists, nodes } = serving ? await episodeChannelsTx(tx, scope, request) : { lists: {}, nodes: new Map<string, ElementNode>() };
       const ranked = await rankedEpisodesTx(tx, nodes, lists, now);
-      const derivedNodes = selection.generation_id && budget.limit > 0 ? await derivedCandidatesTx(tx, request.query, selection.generation_id, scope.T, lists) : new Map<string, ElementNode>();
+      const derivedNodes = selection.generation_id && serving
+        ? await derivedCandidatesTx(tx, request.query, selection.generation_id, scope.T, lists, queryVector, profileId) : new Map<string, ElementNode>();
       const pprScores = selection.generation_id ? await pprScoresTx(tx, selection.generation_id, lists, derivedNodes) : null;
       // Derived serving is strictly generation-selected and policy-authorized.
       // Every source Episode is rechecked for primaries AND their mandatory peers.
-      const factItems = selection.generation_id && budget.limit > 0
-        ? await this.factItemsTx(tx, policy, selection.generation_id, scope.T, derivedNodes, pprScores ?? new Map(), ranked) : new Map<string, RpcRecallItem>();
+      const factItems = selection.generation_id && serving
+        ? await this.factItemsTx(tx, policy, selection.generation_id, scope, derivedNodes, pprScores ?? new Map(), ranked, lists) : new Map<string, RpcRecallItem>();
       // Originals are retained in `nodes`; Facts are served from `derivedNodes`.
       ranked.sort((a, b) => b.score - a.score || b.relevance - a.relevance || b.mass - a.mass || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const bundles: RecallBundle[] = [];
-      for (const primary of ranked) {
+      for (const candidate of ranked) {
+        const primary = { ...candidate };
         await supersedesTx(tx, primary, denies);
-        bundles.push({ primary, companions: primary.provenance.contrasts.map(id => factItems.get(id)!) });
+        const optional = await windowTx(tx, primary, scope, request.window, now);
+        bundles.push({ primary, companions: primary.provenance.contrasts.map(id => factItems.get(id)!), optional });
       }
       const result = RpcRecallResult.parse(packRecall(bundles, {
         recall_id: recallId, expires_at: now + 3600000, results: [], companions: [], entities: [], context_text: "", used_budget: 0,
-        budget, renderer: "canonical-jsonl-v1", diagnostics: { pipeline: ranked.some(item => item.kind === "Fact") ? "derived-hybrid-v1" : "originals-hybrid-v1", now, T,
+        budget, renderer: "canonical-jsonl-v1", diagnostics: { pipeline: "derived-hybrid-v1", now, T,
           policy_revision: policy.policy_revision, channels_used: Object.keys(lists).filter(name => lists[name]!.length > 0) as RpcRecallResult["diagnostics"]["channels_used"],
           vector_reason: vectorReason, embedding_profile_id: profileId, candidate_count: ranked.length, skipped_bundles: 0,
           ppr_used: pprScores !== null, identity_mode: "exact_episode_id" },

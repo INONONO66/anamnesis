@@ -21,12 +21,26 @@ assert.ok(digestContract, 'authoritative receipt digest contract required');
 const { receiptBodyDigestInput, canonicalReceiptJson: canonical } = digestContract;
 const profile = { model: 'deterministic-wiring-fixture-v1', model_incarnation: 'a'.repeat(64), dimensions: 3,
   document_prefix: 'document: ', query_prefix: 'query: ', max_input_bytes: 65536, norm: 'unit_l2', norm_tolerance: 0.001 };
+const extraction = { model: 'surface-extraction-fixture', model_incarnation: 'b'.repeat(64) };
 let mode = 'ok', calls = 0;
 const signals = new EventEmitter(), providerSockets = new Set();
 const provider = createServer(async (req, res) => {
   try {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const request = JSON.parse(Buffer.concat(chunks)); calls++;
+    if (request.task) {
+      const output = request.task === 'claim'
+        ? { task: 'claim', language: 'en', modality: 'text', claims: request.text.startsWith('large ') ? [] : [{ text: request.text,
+          evidence: { start: 0, end: Buffer.byteLength(request.text), text: request.text },
+          confidence: 0.9, entities: [{ mention: request.text.split(/\s/)[0], normalized_name: request.text.split(/\s/)[0], entity_kind: 'person' }] }] }
+        : request.task === 'judge_claims'
+          ? { task: 'judge_claims', language: 'en', modality: 'text', claim_body_digest: request.claim_context.body_digest,
+            decisions: request.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: 'retain', evidence: claim.evidence, confidence: 0.8 })) }
+          : { task: 'judge_relations', language: 'en', modality: 'text', relation_context_digest: request.relation_context.body_digest,
+            judgements: request.relation_context.candidates.map(candidate => ({ candidate_id: candidate.id, relation: 'unrelated', confidence: 0.9, reason: 'fixture' })) };
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ...extraction, output })); return;
+    }
     assert.equal(request.model, profile.model); assert.equal(request.model_incarnation, profile.model_incarnation);
     assert.equal(request.dimensions, 3); assert.equal(request.truncate, false);
     signals.emit('request', request);
@@ -49,7 +63,7 @@ const query = async (cypher, params = {}) => (await driver.executeQuery(cypher, 
 // read sees one whole version. Absent until the first ledger mutation.
 const ledgerPath = root + '/embedding-state.json';
 const ledger = async () => {
-  try { const file = JSON.parse(await readFile(ledgerPath, 'utf8')); assert.equal(file.version, 1); return file.episodes; }
+  try { const file = JSON.parse(await readFile(ledgerPath, 'utf8')); assert.equal(file.version, 2); return file.facts; }
   catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
 };
 const ledgerAttempts = async () => Object.values(await ledger()).flatMap(entry => entry.attempts);
@@ -57,7 +71,8 @@ let daemon, client;
 async function start() {
   const child = spawn(process.execPath, ['dist/anamnesis-daemon.mjs'], { env: { ...process.env, ANAMNESIS_RUNTIME_ROOT: root,
     ANAMNESIS_RUNTIME_TOKEN: token, ANAMNESIS_NEO4J_URI: uri, ANAMNESIS_NEO4J_PASSWORD: password,
-    ANAMNESIS_EMBEDDING_CONFIG: JSON.stringify(config) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    ANAMNESIS_EMBEDDING_CONFIG: JSON.stringify(config),
+    ANAMNESIS_EXTRACTION_CONFIG: JSON.stringify({ endpoint: config.endpoint, ...extraction, timeout_ms: 5000 }) }, stdio: ['ignore', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout }), done = once(child, 'exit');
   child.stderr.on('data', chunk => process.stderr.write(chunk));
   const ready = new Promise((resolve, reject) => {
@@ -73,11 +88,20 @@ async function stop() {
   }
   await client?.close(); daemon?.lines.close();
 }
-async function remember(record, content, session = 'small', previous = null, sourceRevision = 'v1') {
+async function remember(record, content, session = 'small', previous = null, sourceRevision = 'v1', admitted = true) {
   const result = await client.request('remember', { episode: { schema: 'anamnesis.original-message/1', content,
     time: { value: '2026-09-01T00:00:00Z', precision: 'second' }, mass: 0, properties: {},
-    origin: { source: root, session, actor: 'fixture', record } }, source_revision: sourceRevision, expected_previous_revision_key: previous });
+    origin: { source: root, session, actor: 'fixture', record } }, source_revision: sourceRevision, expected_previous_revision_key: previous,
+    ...(admitted ? { origin_role: 'user', lineage_mode: 'direct', parent_recall_ids: [] } : {}) });
   assert.equal(result.state, 'committed'); return result;
+}
+async function factFor(source) {
+  const read = async () => (await query('MATCH (f:Element:Fact)-[:DERIVED_FROM]->(:Episode {id:$id}) RETURN f.id AS id ORDER BY id', { id: source.id }))[0]?.id;
+  for (let id = await read();;) {
+    if (id) return id;
+    await daemonEvent('workers_idle');
+    id = await read();
+  }
 }
 const log = (name, value) => console.log(JSON.stringify({ checkpoint: name, value }));
 const contextRecords = result => result.context_text ? result.context_text.split('\n').map(line => JSON.parse(line)) : [];
@@ -103,68 +127,82 @@ const idleWhen = settled => new Promise((resolve, reject) => {
   daemon.lines.on('line', onLine);
 });
 try {
+  await query('MATCH (n) DETACH DELETE n'); // Isolate this surface from earlier owned acceptance scenarios.
   await start();
   assert.deepEqual((await client.request('status', {})).capabilities.recall, true);
   assert.equal((await client.request('status', {})).capabilities.embeddings, true);
-  // The daemon embeds every committed original on its own lane. A rejecting provider lets it quarantine both
-  // originals first, so every later provider call is attributable and the explicit recovery starts from nothing.
+  // The extraction worker materializes a Fact per admitted Episode. A rejecting embedding provider
+  // quarantines both Facts before explicit recovery begins.
   mode = 'fail';
+  const a = await remember('a', 'needle A\né🙂'), b = await remember('b', 'unrelated original');
+  const aFact = await factFor(a), bFact = await factFor(b);
   const originalsSettled = idleWhen(async () => Object.keys(await ledger()).length === 2);
   const originalsAsked = Promise.all([providerRequest('document: needle A\né🙂'), providerRequest('document: unrelated original')]);
-  const a = await remember('a', 'needle A\né🙂'), b = await remember('b', 'unrelated original');
+  await client.request('embedding.requeue', { limit: 100 });
   await originalsAsked; await originalsSettled;
   await stat(ledgerPath); // The daemon created the ledger file on its first mutation.
   const originals = await ledger();
-  assert.deepEqual(Object.keys(originals).sort(), [a.id, b.id].sort());
+  assert.deepEqual(Object.keys(originals).sort(), [aFact, bFact].sort());
   for (const entry of Object.values(originals)) {
     assert.equal(entry.state, 'quarantined'); assert.equal(entry.retry_after, null); assert.equal(entry.attempts.length, 1);
     assert.deepEqual([entry.attempts[0].state, entry.attempts[0].reason], ['quarantined', 'provider_rejected']);
   }
-  // Quarantined Episodes are not pending work, and no ledger lives in the graph.
+  // Quarantined Facts are not pending work, and no ledger lives in the graph.
   assert.equal((await client.request('status', {})).outbox_pending, 0);
   assert.equal((await query('MATCH (x) WHERE x:EmbeddingAttempt OR x:Outbox RETURN count(x) AS n'))[0].n, 0);
-  const failedRequest = { episode_id: a.id, operation_id: uuid() };
+  const failedRequest = { fact_id: aFact, operation_id: uuid() };
   const failed = await client.request('embedding.recover', failedRequest);
   assert.equal(failed.state, 'quarantined'); assert.equal(failed.reason, 'provider_rejected');
   const count = calls; assert.deepEqual(await client.request('embedding.recover', failedRequest), failed); assert.equal(calls, count);
   assert.equal((await query('MATCH (v:EmbeddingVector) RETURN v')).length, 0);
   mode = 'ok'; const recovered = await client.request('embedding.recover', { ...failedRequest, operation_id: uuid() });
-  assert.equal(recovered.state, 'succeeded'); assert.equal(recovered.input_revision, a.revision_key);
-  assert.equal(recovered.input_digest, (await query('MATCH (e:Episode {id:$id}) RETURN e.digest AS digest', { id: a.id }))[0].digest);
-  assert.equal((await ledger())[a.id], undefined, 'a success deletes the ledger entry');
+  assert.equal(recovered.state, 'succeeded');
+  assert.equal(recovered.input_digest, (await query('MATCH (f:Fact {id:$id}) RETURN f.digest AS digest', { id: aFact }))[0].digest);
+  assert.equal(recovered.input_revision, recovered.input_digest);
+  assert.equal((await ledger())[aFact], undefined, 'a success deletes the ledger entry');
   // A provider answer that fails validation quarantines the still unembedded b and writes no vector.
   const validVectors = await query('MATCH (v:EmbeddingVector) RETURN properties(v) AS p ORDER BY v.key');
-  const recordedForB = ((await ledger())[b.id]?.attempts ?? []).length;
+  const recordedForB = ((await ledger())[bFact]?.attempts ?? []).length;
   for (const [failure, reason] of [['dimension','invalid_vector'], ['norm','invalid_vector'], ['model','profile_mismatch'], ['incarnation','profile_mismatch']]) {
     mode = failure;
-    const attempt = await client.request('embedding.recover', { episode_id: b.id, operation_id: uuid() });
+    const attempt = await client.request('embedding.recover', { fact_id: bFact, operation_id: uuid() });
     assert.equal(attempt.state, 'quarantined'); assert.equal(attempt.reason, reason);
     assert.deepEqual(await query('MATCH (v:EmbeddingVector) RETURN properties(v) AS p ORDER BY v.key'), validVectors);
   }
-  assert.equal((await ledger())[b.id].attempts.length, recordedForB + 4);
+  assert.equal((await ledger())[bFact].attempts.length, recordedForB + 4);
   mode = 'ok';
-  await client.request('embedding.recover', { episode_id: b.id, operation_id: uuid() });
-  assert.equal((await ledger())[b.id], undefined);
-  // An embedded Episode answers every later recover, under any id, with the attempt that wrote its vector:
+  await client.request('embedding.recover', { fact_id: bFact, operation_id: uuid() });
+  assert.equal((await ledger())[bFact], undefined);
+  // An embedded Fact answers every later recover, under any id, with the attempt that wrote its vector:
   // the provider is not asked again, so a provider fault cannot even be reported for it.
   mode = 'dimension'; const settled = calls;
-  const again = await client.request('embedding.recover', { episode_id: a.id, operation_id: uuid() });
+  const again = await client.request('embedding.recover', { fact_id: aFact, operation_id: uuid() });
   assert.equal(again.state, 'succeeded'); assert.equal(again.operation_id, recovered.operation_id); assert.equal(calls, settled);
   mode = 'ok';
   // a's success deleted its ledger entry, so the vector is now the only record of an operation on a; reusing its
-  // operation id for another Episode still conflicts.
-  await assert.rejects(client.request('embedding.recover', { episode_id: b.id, operation_id: recovered.operation_id }), { code: 'idempotency_conflict' });
+  // operation id for another Fact still conflicts.
+  await assert.rejects(client.request('embedding.recover', { fact_id: bFact, operation_id: recovered.operation_id }), { code: 'idempotency_conflict' });
+  const [generation] = await query('MATCH (g:ExtractionGeneration) RETURN g.id AS id,g.body AS body');
+  assert.ok(generation);
+  const active = { ...JSON.parse(generation.body), state: 'active' };
+  const body = JSON.stringify(Object.fromEntries(Object.entries(active).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)));
+  await query("MATCH (g:ExtractionGeneration {id:$id}),(s:Meta {key:'extraction_selector'}) SET g.state='active',g.body=$body,s.generation_id=$id,s.selector_version=1",
+    { id: generation.id, body });
   const request = { query: 'needle', session: { source: root, session: 'small' }, limit: 2, budget: { unit: 'utf8_bytes', limit: 65536 } };
   const hybrid = await client.request('recall', request);
-  assert.deepEqual(hybrid.results.map(item => item.id), [a.id, b.id]);
-  assert.deepEqual(hybrid.results[0].channels, ['bm25', 'session', 'vector']);
-  assert.deepEqual(contextRecords(hybrid), hybrid.results);
+  const selectedFact = hybrid.results.find(item => item.id === aFact);
+  assert.equal(selectedFact?.kind, 'Fact');
+  assert.ok(selectedFact.channels.includes('vector'));
+  assert.deepEqual(selectedFact.window, { source: a.id, before: [], after: [b.id] });
+  assert.ok(hybrid.companions.some(item => item.id === b.id && item.kind === 'Episode'));
+  assert.deepEqual(contextRecords(hybrid).map(item => item.id).sort(),
+    [...hybrid.results, ...hybrid.companions].map(item => item.id).sort());
   assert.equal(hybrid.used_budget, Buffer.byteLength(hybrid.context_text));
   const storedReceipt = (await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: hybrid.recall_id }))[0];
   assert.ok(storedReceipt, 'durable receipt exists before response consumption');
   const receipt = JSON.parse(storedReceipt.body);
-  assert.deepEqual(receipt.primary_ids, [a.id,b.id]); assert.deepEqual(receipt.serving.response, hybrid);
-  assert.deepEqual(receipt.primaries.map(item => item.sources), [[a.id],[b.id]]);
+  assert.deepEqual(receipt.primary_ids, hybrid.results.map(item => item.id)); assert.deepEqual(receipt.serving.response, hybrid);
+  assert.deepEqual(receipt.primaries.find(item => item.id === aFact)?.sources, [a.id]);
   assert.equal(receipt.serving.response.diagnostics.embedding_profile_id, recovered.profile_id);
   assert.equal(receipt.serving.context_digest, sha256(hybrid.context_text));
   assert.equal(receipt.serving.result_digest, sha256(canonical({ results: hybrid.results, companions: hybrid.companions })));
@@ -183,39 +221,43 @@ try {
     const exact = await client.request('recall', { ...request, budget: { unit, limit } });
     assert.equal(exact.used_budget, limit); assert.deepEqual(exact.results, hybrid.results);
     const below = await client.request('recall', { ...request, budget: { unit, limit: limit - 1 } });
-    assert.equal(below.results.length, 1); assert.equal(below.results[0].rank, 0);
+    assert.ok(below.used_budget <= limit - 1);
+    assert.ok(below.companions.length < hybrid.companions.length || below.results.length < hybrid.results.length);
     const zeroCalls = calls;
     const zero = await client.request('recall', { ...request, budget: { unit, limit: 0 } });
     assert.deepEqual([zero.results,zero.companions,zero.context_text,zero.used_budget], [[],[],'',0]); assert.equal(calls, zeroCalls);
     assert.ok((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r', { id: zero.recall_id }))[0]);
   }
   await assert.rejects(client.request('recall', { ...request, budget: { unit: 'tokens', limit: 10, tokenizer_id: 'unknown-v1@sha256:'+'f'.repeat(64) } }), { code: 'invalid_budget' });
-  const identity = await client.request('recall', { query: b.id, limit: 1 });
-  assert.equal(identity.results[0].id, b.id); assert.ok(identity.results[0].channels.includes('identity'));
+  const identity = await client.request('recall', { query: b.id, limit: 10 });
+  assert.ok(identity.results.some(item => item.id === b.id && item.channels.includes('identity')));
   mode = 'fail'; const degraded = await client.request('recall', request);
   assert.equal(degraded.diagnostics.vector_reason, 'provider_rejected'); assert.ok(!degraded.diagnostics.channels_used.includes('vector'));
-  assert.equal(degraded.results[0].id, a.id);
+  assert.ok(degraded.results.some(item => item.id === a.id || item.id === aFact));
   mode = 'ok';
   // Receipt mode appends no exposure Hits, and the wire `commit` report is deferred.
   assert.equal((await query('MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n', { id: hybrid.recall_id }))[0].n, 0);
   const policy = { policy_id: uuid(), selector: { episode_id: a.id }, scope: 'content' };
   await client.request('policy.set', policy);
-  const denied = await client.request('recall', request); assert.ok(!denied.results.some(item => item.id === a.id));
+  const denied = await client.request('recall', request); assert.ok(!denied.results.some(item => item.id === a.id || item.id === aFact));
   await client.request('policy.revoke', { policy_id: policy.policy_id });
   // Immutable revisions retain their own vectors; superseded input never serves as primary.
   const a2 = await remember('a', 'needle revised A\né🙂', 'small', a.revision_key, 'v2');
-  await client.request('embedding.recover', { episode_id: a2.id, operation_id: uuid() });
-  const revised = await client.request('recall', request);
-  assert.equal(revised.results[0].id, a2.id); assert.equal(revised.results[0].provenance.supersedes[0].id, a.id);
+  const a2Fact = await factFor(a2);
+  await client.request('embedding.recover', { fact_id: a2Fact, operation_id: uuid() });
+  const revised = await client.request('recall', { ...request, limit: 10 });
+  assert.ok(revised.results.some(item => item.id === a2Fact && item.channels.includes('vector')));
+  assert.equal(revised.results.find(item => item.id === a2.id)?.provenance.supersedes[0].id, a.id);
   await client.request('policy.set', { ...policy, policy_id: uuid() });
-  const redacted = await client.request('recall', request);
-  assert.equal(redacted.results[0].provenance.supersedes_redacted, true);
-  assert.deepEqual(redacted.results[0].provenance.supersedes, []);
-  assert.equal(redacted.results[0].provenance.warnings[0].code, 'supersedes_withheld');
+  const redacted = await client.request('recall', { ...request, limit: 10 });
+  const redactedEpisode = redacted.results.find(item => item.id === a2.id);
+  assert.equal(redactedEpisode?.provenance.supersedes_redacted, true);
+  assert.deepEqual(redactedEpisode.provenance.supersedes, []);
+  assert.equal(redactedEpisode.provenance.warnings[0].code, 'supersedes_withheld');
   assert.ok(redacted.context_text.includes('supersedes_withheld'));
   // Nine 63k originals fit input caps, but their duplicated structured/context
   // output cannot all fit the real RPC cap. Whole bundles are rejected.
-  for (let i = 0; i < 9; i++) await remember('large-'+i, 'large '+ 'x'.repeat(63000), 'large');
+  for (let i = 0; i < 9; i++) await remember('large-'+i, 'large '+ 'x'.repeat(63000), 'large', null, 'v1', false);
   mode = 'fail'; // Isolate the session bundle cap from unrelated vector hits.
   const oversized = await client.request('recall', { query: '', session: { source: root, session: 'large' }, limit: 64, budget: { unit: 'utf8_bytes', limit: 1048576 } });
   assert.ok(oversized.results.length > 0 && oversized.results.length < 9);
@@ -223,15 +265,17 @@ try {
   assert.ok(Buffer.byteLength(JSON.stringify(oversized)) < 1048576);
   for (const item of oversized.results) assert.equal(item.content.length, 63006);
   // An in-flight attempt is never persisted: kill at the exact HTTP request event, restart, and the operation is
-  // unknown until the same operation ID is resumed. The Episode is a fresh one the lane has already quarantined:
-  // an embedded Episode is never sent to the provider again, so only an unembedded one has an in-flight attempt.
+  // unknown until the same operation ID is resumed. The Fact is fresh and already quarantined:
+  // an embedded Fact is never sent to the provider again, so only an unembedded one has an in-flight attempt.
   let pendingId; const pendingKnown = new Promise(resolve => { pendingId = resolve; });
+  const p = await remember('p', 'pending original', 'small');
+  const pFact = await factFor(p);
+  pendingId(pFact);
   const pendingSettled = idleWhen(async () => (await ledger())[await pendingKnown]?.state === 'quarantined');
   const pendingAsked = providerRequest('document: pending original');
-  const p = await remember('p', 'pending original', 'small');
-  pendingId(p.id);
+  await client.request('embedding.requeue', { limit: 100 });
   await pendingAsked; await pendingSettled;
-  const pendingRequest = { episode_id: p.id, operation_id: uuid() }; mode = 'hold';
+  const pendingRequest = { fact_id: pFact, operation_id: uuid() }; mode = 'hold';
   const requested = providerRequest('document: pending original');
   const pendingReply = client.request('embedding.recover', pendingRequest).catch(error => error);
   await requested;
@@ -241,8 +285,8 @@ try {
   mode = 'ok'; await start();
   assert.deepEqual(await client.request('embedding.status', { operation_id: pendingRequest.operation_id }), { state: 'unknown', operation_id: pendingRequest.operation_id });
   assert.equal((await client.request('embedding.recover', pendingRequest)).state, 'succeeded');
-  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: p.id }))[0].n, 1);
-  assert.equal((await ledger())[p.id], undefined, 'the resumed success deletes the quarantine entry');
+  assert.equal((await query('MATCH (v:EmbeddingVector {fact_id:$id}) RETURN count(v) AS n', { id: pFact }))[0].n, 1);
+  assert.equal((await ledger())[pFact], undefined, 'the resumed success deletes the quarantine entry');
   // The status of a vector-backed operation is synthesized from its EmbeddingVector and still honors the policy.
   await assert.rejects(client.request('embedding.status', { operation_id: recovered.operation_id }), { code: 'policy_denied' });
   // a's first failure was dropped from the ledger by its later success; no attempt row survives in the graph.
@@ -250,29 +294,31 @@ try {
   assert.deepEqual(await client.request('embedding.status', { operation_id: failedRequest.operation_id }), { state: 'unknown', operation_id: failedRequest.operation_id });
   assert.deepEqual(JSON.parse((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: hybrid.recall_id }))[0].body), receipt);
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
-  // embedding.requeue drops a quarantined ledger entry so the missing-vector scan finds the Episode again; the call
+  // embedding.requeue drops a quarantined ledger entry so the missing-vector scan finds the Fact again; the call
   // itself wakes the lane.
   mode = 'fail';
   // The idle that ends the candidate's quarantine can be printed before remember's reply carries its id, so the
   // check waits for the identity instead of discarding that idle.
   let candidateId; const candidateKnown = new Promise(resolve => { candidateId = resolve; });
+  const c = await remember('c', 'requeue candidate', 'small');
+  const cFact = await factFor(c);
+  candidateId(cFact);
   const candidateSettled = idleWhen(async () => (await ledger())[await candidateKnown]?.attempts.length === 1);
   const candidateAsked = providerRequest('document: requeue candidate');
-  const c = await remember('c', 'requeue candidate', 'small');
-  candidateId(c.id);
+  await client.request('embedding.requeue', { limit: 100 });
   await candidateAsked; await candidateSettled;
-  const candidate = (await ledger())[c.id];
+  const candidate = (await ledger())[cFact];
   assert.equal(candidate.state, 'quarantined');
   assert.deepEqual(candidate.attempts.map(item => [item.state, item.reason]), [['quarantined', 'provider_rejected']]);
-  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 0);
+  assert.equal((await query('MATCH (v:EmbeddingVector {fact_id:$id}) RETURN count(v) AS n', { id: cFact }))[0].n, 0);
   mode = 'ok';
   const idleAfterRequeue = daemonEvent('workers_idle'), candidateRetried = providerRequest('document: requeue candidate');
   const requeued = await client.request('embedding.requeue', { limit: 100 });
   assert.ok(requeued.requeued >= 1, `requeued ${requeued.requeued}`);
   await candidateRetried; await idleAfterRequeue;
-  assert.equal((await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN count(v) AS n', { id: c.id }))[0].n, 1);
-  assert.equal((await ledger())[c.id], undefined, 'the successful retry deletes the ledger entry');
-  const retried = (await query('MATCH (v:EmbeddingVector {episode_id:$id}) RETURN v.operation_id AS id', { id: c.id }))[0].id;
+  assert.equal((await query('MATCH (v:EmbeddingVector {fact_id:$id}) RETURN count(v) AS n', { id: cFact }))[0].n, 1);
+  assert.equal((await ledger())[cFact], undefined, 'the successful retry deletes the ledger entry');
+  const retried = (await query('MATCH (v:EmbeddingVector {fact_id:$id}) RETURN v.operation_id AS id', { id: cFact }))[0].id;
   assert.notEqual(retried, candidate.attempts[0].operation_id);
   assert.equal((await client.request('embedding.status', { operation_id: retried })).state, 'succeeded');
   assert.deepEqual(await client.request('embedding.requeue', { limit: 100 }), { requeued: 0 });

@@ -86,7 +86,7 @@ export class Store {
       const profile = this.core.embeddingProvider.profile, id = embeddingProfileId(profile);
       await this.core.run(`MERGE (p:EmbeddingProfile {id:$id}) ON CREATE SET p.body=$body`, { id, body: canonicalJson(profile) });
       // Digest-derived identifiers only, never caller/model-name interpolation.
-      await this.core.run(`CREATE VECTOR INDEX vec_episode_${id} IF NOT EXISTS FOR (v:Embedding_${id}) ON (v.vector)
+      await this.core.run(`CREATE VECTOR INDEX vec_fact_${id} IF NOT EXISTS FOR (v:Embedding_${id}) ON (v.vector)
         OPTIONS {indexConfig: {\`vector.dimensions\`: ${profile.dimensions}, \`vector.similarity_function\`: 'cosine'}}`);
     }
     await this.core.run(`CALL db.awaitIndexes(60)`);

@@ -27,16 +27,41 @@ export function renderContext(results: RpcRecallItem[], companions: RpcRecallIte
     const item = byId.get(id); if (!item) throw new Error("missing mandatory companion");
     emitted.add(id); records.push(canonicalContext(item));
   };
-  for (const item of results) { emit(item.id); for (const id of [...item.provenance.contrasts].sort()) emit(id); }
+  for (const item of results) {
+    emit(item.id);
+    for (const id of [...item.provenance.contrasts].sort()) emit(id);
+    if (item.kind === "Fact") for (const id of [...item.window.before, ...item.window.after]) emit(id);
+  }
   return records.join("\n");
 }
-export type RecallBundle = { primary: RpcRecallItem; companions: RpcRecallItem[] };
+export type RecallBundle = { primary: RpcRecallItem; companions: RpcRecallItem[]; optional: RpcRecallItem[] };
 /** Full response reserve includes the maximum request-ID escaping and all unknown
  * envelope numbers. Actual wire encoding is checked again before socket write. */
 export function recallResponseBytes(result: RpcRecallResult): number {
   return Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", method: "recall", id: "\u0000".repeat(128),
     server_time: Number.MAX_SAFE_INTEGER, structure_revision: Number.MAX_SAFE_INTEGER,
     policy_revision: Number.MAX_SAFE_INTEGER, result }));
+}
+/** Render the actual deduplicated delivery, including only window IDs that survived packing. */
+function prospectiveRecall(result: RpcRecallResult, bundle: RecallBundle, optional: RpcRecallItem[], budget: RpcOutputBudget,
+  encode: ((text: string) => number) | undefined): RpcRecallResult | null {
+  let primary = { ...bundle.primary, rank: result.results.length };
+  const results = [...result.results, primary];
+  const companions = [...new Map([...result.companions, ...bundle.companions, ...optional].map(item => [item.id, item])).values()]
+    .filter(item => !results.some(itemPrimary => itemPrimary.id === item.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  if (companions.length > 256) return null;
+  if (primary.kind === "Fact") {
+    const delivered = new Set([...results, ...companions].map(item => item.id));
+    primary = { ...primary, window: { source: primary.window.source,
+      before: primary.window.before.filter(id => delivered.has(id)), after: primary.window.after.filter(id => delivered.has(id)) } };
+    results[results.length - 1] = primary;
+  }
+  const context_text = renderContext(results, companions);
+  if (Buffer.byteLength(context_text) > RPC_LIMITS.frame_bytes) return null;
+  const used_budget = countBudget(context_text, budget.unit, encode);
+  const prospective = { ...result, results, companions, context_text, used_budget,
+    diagnostics: { ...result.diagnostics, skipped_bundles: 177 } }; // reserve final counter width
+  return used_budget > budget.limit || recallResponseBytes(prospective) > RPC_LIMITS.frame_bytes ? null : prospective;
 }
 export function packRecall(bundles: RecallBundle[], base: RpcRecallResult, limit: number, tokenizers: Tokenizers): RpcRecallResult {
   if (!Number.isSafeInteger(limit) || limit < 0 || limit > 64 || bundles.length > 177) throw new RangeError("unbounded recall");
@@ -49,16 +74,13 @@ export function packRecall(bundles: RecallBundle[], base: RpcRecallResult, limit
   for (const bundle of bundles) {
     if (result.results.length === limit) break;
     if (result.results.some(item => item.id === bundle.primary.id)) continue;
-    const results = [...result.results, { ...bundle.primary, rank: result.results.length }];
-    const companions = [...new Map([...result.companions, ...bundle.companions].map(item => [item.id, item])).values()]
-      .filter(item => !results.some(primary => primary.id === item.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-    const context_text = renderContext(results, companions);
-    if (companions.length > 256 || Buffer.byteLength(context_text) > RPC_LIMITS.frame_bytes) { skipped++; continue; }
-    const used_budget = countBudget(context_text, budget.unit, encode);
-    const prospective = { ...result, results, companions, context_text, used_budget,
-      diagnostics: { ...result.diagnostics, skipped_bundles: 177 } }; // reserve final counter width
-    if (used_budget > budget.limit || recallResponseBytes(prospective) > RPC_LIMITS.frame_bytes) { skipped++; continue; }
-    result = prospective;
+    let prospective: RpcRecallResult | null = null;
+    for (let dropped = 0; dropped <= bundle.optional.length; dropped++) {
+      prospective = prospectiveRecall(result, bundle, bundle.optional.slice(dropped), budget, encode);
+      if (prospective) break;
+    }
+    if (prospective) result = prospective;
+    else skipped++;
   }
   return { ...result, diagnostics: { ...result.diagnostics, skipped_bundles: skipped } };
 }

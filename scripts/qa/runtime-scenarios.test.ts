@@ -44,7 +44,7 @@ const scenarioFiles = {
     "./packages/core/src/legacy-integrity.test.ts",
     "./packages/core/src/storage-contract.test.ts",
   ],
-  "episode-embedding-recovery": [
+  "fact-embedding-recovery": [
     "./packages/core/src/embedding-recall.test.ts",
     "./scripts/qa/g003-embedding-recall.test.ts",
   ],

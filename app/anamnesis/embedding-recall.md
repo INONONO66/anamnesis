@@ -1,15 +1,15 @@
-# Original-Episode embedding and hybrid recall increment
+# Fact embeddings and windowed hybrid recall
 
-This implements `originals-hybrid-v1`, the current increment named in
+This implements `derived-hybrid-v1`, the current increment named in
 diagnostics, not the complete future pipeline in `docs/05-recall.md`.
-`hello.capabilities.recall=true` names this operational original-Episode
+`hello.capabilities.recall=true` names this operational
 API. It is not a semantic-quality claim. `extraction` reports whether an
 extraction provider is configured; `embeddings` is true only with explicit
 provider configuration.
 
-D56 replaces Episode vectors by Fact vectors (`vec_fact_<profileId>`) in a
-later PR; once that lands the Episode embedding lane and the
-`originals-hybrid-v1` name retire. Nothing from D56 is in code yet.
+D56's Fact vectors, `vec_fact_<profileId>`, bounded same-session recall
+window and Fact embedding coverage gate are shipped. Episodes remain
+separate provenance records and are never vector targets.
 
 ## Provider configuration
 
@@ -34,7 +34,7 @@ the served model behind that endpoint. `profileId`, which names the vector
 index, is the SHA-256 of the canonical profile JSON.
 
 The server sends one POST with `model`, `model_incarnation`, `dimensions`,
-`input` (the exact original/query with its pinned prefix), and `truncate:false`.
+`input` (the exact Fact content/query with its pinned prefix), and `truncate:false`.
 The response must contain the matching `model` and `model_incarnation`, and
 `data: [{index: 0, embedding: [...]}]`. Provider responses are streamed under a
 256 KiB cap. Inputs are never truncated; vectors are never padded or normalized.
@@ -49,7 +49,7 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
 
 ## RPC and durability
 
-- `embedding.recover {operation_id, episode_id}` processes one original Episode
+- `embedding.recover {operation_id, fact_id}` processes one materialized Fact
   with the configured profile. Input revision/digest are checked before the
   provider call; nothing "pending" is written down. Completion records
   `succeeded`, `quarantined` or `deferred`. Only `provider_unavailable`
@@ -57,61 +57,55 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
   quarantines on the first attempt. The attempt's `detail` names the failing
   branch (`http 503`, `timeout 30000ms`, a socket code, `8193 bytes > 8192`).
 - Attempt and quarantine state lives in `embedding-state.json` under the
-  runtime root, not in Neo4j (D54). Neo4j holds the Episode and, once it
-  exists, the vector on a separate `Embedding_<profileId>` node with
-  properties `vector`, `episode_id` and `profile_id`, linked to the Episode;
-  vectors are never Episode properties. The index is
-  `vec_episode_<profileId>` over `(v:Embedding_<profileId>) ON (v.vector)`.
-  An Episode needs embedding when it has no vector for
-  the configured profile; that missing-vector scan is the only work queue.
-  A ledger entry exists only while an Episode has no vector, and a success
-  deletes it, including the Episode's earlier failed attempts: those operation
-  IDs then answer `unknown` and are free to reuse. An Episode that already
-  holds the profile's vector is never sent to the provider again:
-  `embedding.recover` under any further operation ID answers with the attempt
-  that wrote the vector, the submitted ID did no work and is recorded nowhere,
-  and a lingering entry for that Episode is deleted. Every lane drain first
-  drops entries whose Episode already holds a vector (a process lost between
-  the vector commit and the entry's deletion, or a seeded ledger), and only
-  the configured profile's entries hide an Episode from the scan: another
-  profile's entry is superseded by the first attempt under this one. A process
-  interrupted mid-attempt leaves no trace; the scan finds the Episode again.
+  runtime root, not in Neo4j (D54). Its version-2 `facts` map is keyed by
+  Fact ID; a version-1 Episode ledger loads as empty and rewrites on mutation.
+  A vector lives on a separate `Embedding_<profileId>` node with `fact_id`,
+  `profile_id`, `input_revision`, `input_digest` and `vector`. The index is
+  `vec_fact_<profileId>` over `(v:Embedding_<profileId>) ON (v.vector)`.
+  The scan finds missing vectors across Facts of every generation. The input
+  is Fact content, its revision is `revision_key` or the checked digest, and
+  authorization checks its `DERIVED_FROM` source Episodes. A success deletes
+  that Fact's ledger entry and earlier failures; a vector-backed recovery
+  returns the attempt that wrote it without asking the provider again.
+  An interrupted attempt is rediscovered by the missing-vector scan.
 - Reusing a completed operation ID is a no-op that returns the recorded
   attempt, or one synthesized from the vector that carries that
-  `operation_id`. The same ID bound to a different Episode or profile is an
+  `operation_id`. The same ID bound to a different Fact or profile is an
   `idempotency_conflict`. Retry a quarantined or deferred attempt with a new
   operation ID.
 - An explicit quarantine from `embedding.recover` and one from the daemon's
-  lane are the same ledger state: the worker skips the Episode and it's
+  lane are the same ledger state: the worker skips the Fact and it's
   eligible for requeue. A deferral keeps the entry and its retry budget.
-- The lane drain defers a transiently failing Episode with exponential backoff
+- The lane drain defers a transiently failing Fact with exponential backoff
   (30 s doubling, capped at 1 h) for at most 8 deferrals; the next transient
   failure quarantines it as `provider_unavailable_exhausted`. An operator
   `embedding.recover` never exhausts: a transient failure defers again.
-  Episodes with no ledger entry are served before deferred ones whose backoff
+  Facts with no ledger entry are served before deferred ones whose backoff
   has elapsed.
 - `embedding.requeue {limit?, reasons?}` deletes quarantined ledger entries
   of the configured profile (filtered by the latest attempt's reason when
-  `reasons` is given, ordered by Episode ID, up to `limit`) so the
-  missing-vector scan discovers those Episodes again, then wakes the lane.
-  Entries whose Episode already holds a vector are dropped without being
+  `reasons` is given, ordered by Fact ID, up to `limit`) so the
+  missing-vector scan discovers those Facts again, then wakes the lane.
+  Entries whose Fact already holds a vector are dropped without being
   counted; a second call with nothing left returns `{requeued: 0}`.
   `anamnesis-ops embed-requeue [--limit N]` is the operator entry point.
 - `embedding.status {operation_id}` answers from the ledger when some entry
   holds that attempt; otherwise it looks up the embedding node with that
   `operation_id` and synthesizes a `succeeded` attempt (model, incarnation,
   dimensions and timestamps from the vector); otherwise `unknown`. Status and
-  recovery revalidate current Episode/source policy. A denied Episode does not
+  recovery revalidate current source-Episode policy. A denied source does not
   become visible through its status record.
 - Model/dimension/norm mismatch is quarantined. The first valid vector for an
-  immutable Episode/profile is preserved. Different profiles have separate
+  immutable Fact/profile is preserved. Different profiles have separate
   digest-named Neo4j vector indexes and cannot overwrite one another.
-- Recovery is explicit and bounded, not an automatic ingestion worker or a
-  spool consumer. It does not claim contiguous embedding coverage.
+- Recovery is explicit and bounded, not an ingestion worker or a spool
+  consumer. Activation requires vectors for every Fact of the target
+  generation; zero Facts are covered.
 
-`recall {query, session?: {source,session}, T?, limit?, budget?}` uses at most
-one exact Episode-ID identity hit, 64 fulltext hits, 64 vector hits, and the
-last 32 session Episodes. Fulltext/vector overfetch is capped at 256. The
+`recall {query, session?: {source,session}, T?, limit?, window?, budget?}` uses at most
+one exact Episode-ID identity hit, 64 Episode fulltext hits, 64
+selected-generation Fact BM25 hits, 64 Fact vector hits, and the last 32
+session Episodes. Fulltext/vector overfetch is capped at 256. The
 identity channel is exact Episode-ID lookup, not Entity/profile-cache identity.
 Fulltext retains the existing Lucene escaping behavior. Query embedding
 failure omits the vector channel with an explicit reason. Graph/index failures
@@ -128,13 +122,15 @@ selection hashes before delivery. Feedback uses the existing atomic ledger.
 A failed send is not adoption. Auto mode persists the impression but this
 increment does not add asynchronous exposure Hits.
 
-Results are original Episodes only. Their source is themselves. CONTRASTS is
-Fact-only in the current lattice, so production `companions` and `entities`
-are empty. The core packer handles deduplicated mandatory companions and
-companion-to-primary promotion, covered by unit fixtures; this does not claim
-production Fact/conflict retrieval. Up to eight prior-revision records and
-mandatory withheld/incomplete warnings are included intact. No text or warning
-is removed to make a bundle fit.
+Results include original Episodes from exact-ID, BM25 and session channels,
+and selected-generation Facts from BM25 and vector. Fact results list all
+channels that found them, resolve `DERIVED_FROM` source Episodes, and carry
+`window: {source, before, after}` with up to two same-session eligible Episodes
+on either side by default (maximum eight). Delivered window Episodes are
+optional companions. D44 packing drops the farthest optional companions
+first until exact budget and response-frame caps fit, rewriting the window
+IDs before rendering and receipt hashing. Mandatory contrast companions,
+prior revisions and warnings remain atomic with their primary.
 
 ## Exact budgets and limits
 

@@ -5,16 +5,17 @@ reinforces accessibility merely by returning context. It does persist a durable
 RecallReceipt control record before delivery (§10). Determinism is conditional
 on the captured serving inputs and degradation state, not graph state alone
 (§11). The pipeline below is the normative target; the shipped subset today
-is the Episode exact-ID, BM25, session and vector channels, Fact BM25 over
+is the Episode exact-ID, BM25 and session channels, Fact BM25 and vector over
 the selected extraction generation, the T/now pin, the D43 policy barrier,
 the D44 budget, the D45 receipt and a bounded PPR solver, each marked under
 its section as shipped or not shipped. The decided direction is Fact-first
-recall, where Fact vectors replace Episode vectors and Episodes stay
-provenance and context only (docs/10 D56). D43-D51 in [10-decision-log](10-decision-log.md)
+recall, where Fact vectors in `vec_fact_<profileId>` resolve source Episodes
+through `DERIVED_FROM`; Episodes stay provenance and context (docs/10 D56).
+D43-D51 in [10-decision-log](10-decision-log.md)
 supersede the affected D40/D42 contracts.
 
 ```text
-  recall(query, session?, T = now, limit = 10, budget?)
+  recall(query, session?, T = now, limit = 10, window = 2, budget?)
     │
     ├─ ① pin         recall_id · T · now · R0 · policy_revision · config_version · active[*]
     │
@@ -57,7 +58,7 @@ recaptures serving revisions/selectors but preserves the request's T and now.
 | `policy_revision` | Current suppression policy, regardless of historical T; checked at delivery and commit |
 | `config_version` | Ranking, prior/calibration, rendering, budget/tokenizer and receipt-retention versions |
 | pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the adjudication `judge_profile_id`, and the `embedding_profile_id` behind the vector channel. All are recorded on the receipt (D48–D51) |
-| request options | Session, `limit`, validated `budget`, client mode and authenticated principal |
+| request options | Session, `limit`, `window` (0..8), validated `budget`, client mode and authenticated principal |
 | query embedding | One call to the embedding service, on the caller's verbatim query inside the active profile's pinned template. On failure the vector channel is absent |
 
 The query text is used **as the caller wrote it** (D48). BM25 runs on that
@@ -72,15 +73,16 @@ beyond "no mandatory translation".
 ## 2. Candidate channels
 
 Status — Shipped: Episode exact-ID, Episode BM25 (Lucene `element_content`,
-cjk analyzer, 64), Episode session (32), Episode vector over
-`vec_episode_<profileId>` (64) and Fact BM25 of the selected generation (64),
-all under visible(T) and current policy. Not shipped: Fact, Entity and
+cjk analyzer, 64), Episode session (32), Fact BM25 of the selected
+generation (64), and Fact vectors in `vec_fact_<profileId>` (64). A vector
+Fact resolves its source Episodes through `DERIVED_FROM`; selected-generation
+and current-policy predicates apply. Not shipped: Entity and
 relationship vectors, Fact session top-2, the Entity/profile identity channel,
 `k_fetch` over-fetch, per-channel 50 ms timeouts and the lineage gate.
 
 | Channel | Source | Size | Ranking |
 |---|---|---|---|
-| `vector` | global `vec_episode_<indexhex>` plus active-generation `vec_fact_g<g>_<indexhex>` — `queryNodes`; active-generation `vec_rel_g<g>_<indexhex>` — `queryRelationships` | 64 nodes + 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
+| `vector` | shipped: `vec_fact_<profileId>` — `queryNodes` on Facts of the selected generation; proposed: generation-scoped relationship vectors | 64 Facts; proposed 16 relationships (≤ 32 endpoints) | cosine DESC, id ASC |
 | `bm25` | global Episode fulltext plus `fts_fact_g<active>` (cjk) | 64 | Lucene score DESC, id ASC |
 | `session` | last 32 Episodes plus top 2 non-synthesis Facts per Episode through composite index seeks | ≤ 32 + 64 | Episodes: time_utc DESC, ingest_seq DESC; Facts: time_utc DESC, id ASC; merged by time, kind, id |
 | `identity` | user and agent Entity anchors + profile cache (dreaming, top-16 Facts) | ≤ 18 | score DESC, Fact.id ASC |
@@ -501,6 +503,17 @@ estimates. Deduplicated companions are separately bounded and are not additional
 primaries. Budget 0 or limit 0 yields `results: []`, `companions: []`,
 `context_text: ""`, `used_budget: 0`.
 
+Each primary Fact carries `window: {source, before, after}`. Its source Episode
+anchors up to `window` eligible same-session Episodes on either side, ordered
+closest-first by `ingest_seq` in the response. These are optional Episode
+companions with zero relevance and score. D44 packing first tries the full
+window, then drops optional companions farthest-first (after, then before at
+each distance) until the exact byte/token budget, response-frame cap and
+256-companion cap fit. The Fact's `window.before` and `window.after` list only
+delivered IDs before context rendering and receipt hashing. Mandatory contrast
+companions and warnings are never stripped; if they cannot fit with the primary,
+the whole bundle is skipped. Episode primaries have no window.
+
 `used_budget` counts the exact final context_text including separator LFs:
 UTF-8 encoded length, Unicode scalar count (not UTF-16 code units), or the
 pinned tokenizer's token count. JSON transport escaping, diagnostics and other
@@ -664,7 +677,7 @@ is no separate public `receipt_id` field.
 ## 9. Diagnostics and budget
 
 Status — Shipped: `recall_id`, T, now, `policy_revision`, `channels_used`,
-`ppr_used` and the increment name `originals-hybrid-v1`. Not shipped:
+`ppr_used` and the increment name `derived-hybrid-v1`. Not shipped:
 `structure_revision`, `config_version`, `torn`, the `embedding_coverages`
 array, `degree_probe`, `envelope` and `ppr` counters, the timing breakdown
 and the latency targets as measured numbers.

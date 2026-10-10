@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import type { InstallationContext } from "@anamnesis/core";
-import type { RpcRememberParams } from "@anamnesis/protocol";
+import { Engine, type InstallationContext } from "@anamnesis/core";
+import { extractionBodyDigest, type RpcRememberParams } from "@anamnesis/protocol";
 import { fakeAuthorityAdapter, sha256 } from "./authority-adapter.fixture.ts";
 import type { Installation } from "./config.ts";
 import { Runtime, type BackgroundLane } from "./runtime.ts";
@@ -104,6 +104,49 @@ async function spoolOffline(installation: Installation, ...deliveries: RpcRememb
   await shutdown(offline.runtime);
 }
 const bumpWriterEpoch = () => query("MATCH (m:Meta {key:'meta'}) SET m.writer_epoch = m.writer_epoch + 1000");
+
+/** Materialize a retained Fact through the audited extraction and semantic review contract. */
+async function seedFact(root: string): Promise<string> {
+  const content = "runtime Fact embedding fixture";
+  const incarnation = extractionBodyDigest("runtime-extraction");
+  const engine = new Engine({ uri: TEST_DB.uri, user: TEST_DB.user, password: TEST_DB.password, objectsRoot: root,
+    materializationStatePath: join(root, "materialization-state.json"),
+    extractionProvider: { model: "runtime-extraction", modelIncarnation: incarnation, async extract(input) {
+      if (input.task === "claim") return { task: "claim" as const, language: "en", modality: "text" as const,
+        claims: [{ text: content, evidence: { start: 0, end: Buffer.byteLength(content), text: content } }] };
+      if (input.task !== "judge_claims" || !input.claim_context) throw new Error(`unexpected ${input.task}`);
+      return { task: "judge_claims" as const, language: "en", modality: "text" as const, claim_body_digest: input.claim_context.body_digest,
+        decisions: input.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain" as const, evidence: claim.evidence })) };
+    } },
+    semanticReviewProvider: { profileId: extractionBodyDigest("runtime-review"),
+      async resolve() { return { entity_resolutions: [], attribution_speakers: [], allow_no_single_locus: false, content_language: "en" }; },
+      async review(input) { return { disposition: "retain", semantic_claim: input.premises.request.semantic_claim, reason: "fixture" }; } } });
+  try {
+    await engine.init();
+    await engine.claimWriterEpoch();
+    const generation = uuidv7();
+    await engine.store.createExtractionGeneration({ id: generation, stream: "extraction", incarnation,
+      state: "catching_up", covered_ingest_seq: 0, created_at: 100, updated_at: 100 }, receiptContext);
+    const source = await engine.remember({ content, time: { value: "2026-09-01T00:00:00Z", precision: "second" },
+      origin: { source: root, session: "runtime", actor: "user", record: "fact" } },
+    { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context: receiptContext });
+    const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation, source_id: source.id }, receiptContext);
+    const audit = await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "runtime", lease_ms: 30000 }, receiptContext);
+    if (audit.state !== "known" || audit.judge_attempt?.state !== "succeeded") throw new Error("Fact audit failed");
+    const episode = await engine.store.semanticEpisode(source.id, receiptContext);
+    const semantic_claim = { content, content_language: "en", sub_kind: "fact" as const, modality: "asserted" as const, confidence: 0.7,
+      time: { time_value: episode.time.time_value, time_utc: episode.time.time_utc, time_precision: "inherited" as const,
+        resolution: "inherited" as const, anchor_time_utc: episode.time.time_utc },
+      entities: [], subject_keys: null, predicate_text: content, scope_complete: false,
+      scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] },
+      evidence: { kind: "source_locus" as const, span: { start: 0, end: Buffer.byteLength(content) } } };
+    const proposal = { proposal_id: uuidv7(), generation_id: generation, source_episode_id: source.id,
+      judge_attempt_id: audit.judge_attempt.id, claim_index: 0, semantic_claim };
+    await engine.proposeRetainedClaim(proposal, receiptContext);
+    await engine.reviewRetainedClaim({ review_id: uuidv7(), proposal_id: proposal.proposal_id, action: "accept", reason: "fixture" }, receiptContext);
+    return (await engine.materializeRetainedClaim({ ...proposal, operation_id: uuidv7() }, receiptContext)).fact_id;
+  } finally { await engine.close(); }
+}
 
 beforeEach(async () => { if (LIVE) await query("MATCH (n) DETACH DELETE n"); });
 afterEach(async () => {
@@ -323,36 +366,41 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   await shutdown(plain);
   await expect(withEnv({ ...dbEnv(TEST_DB.uri), ANAMNESIS_LLM_BASE_URL: "http://127.0.0.1:1", ANAMNESIS_LLM_API_KEY_FILE: undefined }, () => Runtime.create(installation)))
     .rejects.toThrow("ANAMNESIS_LLM_API_KEY_FILE required");
-
   const keyFile = join(installation.root, "llm-key.json");
   await writeFile(keyFile, JSON.stringify({ bearer: "fixture-bearer" }));
   const lanes: BackgroundLane[] = [];
   const env = { ...dbEnv(TEST_DB.uri), ANAMNESIS_LLM_BASE_URL: "http://127.0.0.1:1", ANAMNESIS_LLM_API_KEY_FILE: keyFile, ANAMNESIS_LLM_MODEL: "fixture-chat",
     ANAMNESIS_EMBEDDING_BASE_URL: "http://127.0.0.1:1", ANAMNESIS_EMBEDDING_MODEL: "fixture-embedding", ANAMNESIS_EMBEDDING_DIMENSIONS: "3",
     ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: undefined, ANAMNESIS_LLM_MIN_INTERVAL_MS: undefined, ANAMNESIS_LLM_JITTER_FRACTION: undefined };
+  const empty = await withEnv(env, () => Runtime.create(installation));
+  opened.push(empty);
+  await empty.init();
+  expect(await empty.embeddingTurn()).toBe("idle");
+  expect((await empty.status(0, false)).workers.embedding).toMatchObject({ pending: 0, drained_total: 0 });
+  await shutdown(empty);
+  const factId = await seedFact(installation.root);
   const runtime = await withEnv(env, () => Runtime.create(installation, lane => { lanes.push(lane); }));
   opened.push(runtime);
   expect(runtime.capabilities).toMatchObject({ extraction: true, embeddings: true });
   await runtime.init();
   expect([...lanes].sort()).toEqual(["embedding", "extraction", "spool"]);
-  expect(await runtime.embeddingTurn()).toBe("idle");
-  expect(await runtime.extractionTurn()).toBe("idle");
-  expect(await runtime.extractionTurn()).toBe("idle");
+  expect(await runtime.embeddingTurn()).toBe("more");
+  expect(await runtime.extractionTurn()).toBe("waiting");
 
   const committed = asCommitted(await runtime.remember(delivery({ record: "embedded" })));
   expect(lanes.slice(3).sort()).toEqual(["embedding", "extraction", "spool"]);
-  expect(await runtime.embeddingTurn()).toBe("more");
   const deferred = await runtime.status(0, false);
   expect(deferred.workers.embedding).toMatchObject({ pending: 1, drained_total: 0, quarantined_total: 0 });
   expect(deferred.workers.embedding.last_error).toContain("deferred");
+  expect(await runtime.embeddingTurn()).toBe("idle");
   expect(deferred.workers.extraction).toMatchObject({ pacing: { max_in_flight: 4, min_interval_ms: 0, jitter_fraction: 0.5, calls_total: 0, waited_total_ms: 0 } });
   expect(await runtime.embeddingTurn()).toBe("idle");
   expect((await runtime.status(0, false)).workers.embedding).toMatchObject({ pending: 1, last_error: null });
   expect(await runtime.requeueQuarantinedEmbeddings({ limit: 10 }, receiptContext)).toEqual({ requeued: 0 });
   expect(lanes.at(-1)).toBe("embedding");
   const operation = uuidv7();
-  const attempt = await runtime.recoverEmbedding({ operation_id: operation, episode_id: committed.id }, receiptContext);
-  expect(attempt).toMatchObject({ operation_id: operation, episode_id: committed.id, state: "deferred", reason: "provider_unavailable" });
+  const attempt = await runtime.recoverEmbedding({ operation_id: operation, fact_id: factId }, receiptContext);
+  expect(attempt).toMatchObject({ operation_id: operation, fact_id: factId, state: "deferred", reason: "provider_unavailable" });
   expect(await runtime.embeddingStatus(operation, receiptContext)).toEqual(attempt);
   const absent = uuidv7();
   expect(await runtime.embeddingStatus(absent, receiptContext)).toEqual({ state: "unknown", operation_id: absent });
@@ -370,7 +418,7 @@ dbTest("storage-backed RPCs pass through to the engine under the caller's custod
   const committed = asCommitted(await runtime.remember(delivery({ record: "recallable", content: "the quick brown fox" })));
   const recall = await runtime.recall({ query: "quick brown fox", limit: 5 }, autoContext);
   expect(recall.results.map(item => item.id)).toEqual([committed.id]);
-  expect(recall).toMatchObject({ renderer: "canonical-jsonl-v1", diagnostics: { pipeline: "originals-hybrid-v1", vector_reason: "not_configured", channels_used: ["bm25"] } });
+  expect(recall).toMatchObject({ renderer: "canonical-jsonl-v1", diagnostics: { pipeline: "derived-hybrid-v1", vector_reason: "not_configured", channels_used: ["bm25"] } });
   expect(await runtime.recordRecallTransport({ recall_id: recall.recall_id, state: "local_complete" }, autoContext))
     .toMatchObject({ recall_id: recall.recall_id, state: "local_complete", principal: "installation", commit_mode: "auto", boundary: "node-write-callback-v1" });
   expect(await runtime.exposeRecall(recall.recall_id, autoContext)).toEqual({ applied: 1 });
@@ -384,8 +432,15 @@ dbTest("storage-backed RPCs pass through to the engine under the caller's custod
   expect(await runtime.extractionPipelineStatus(uuidv7(), receiptContext)).toMatchObject({ state: "unknown" });
   expect(await runtime.runExtractionPipeline({ task_id: uuidv7(), expected_version: 1, worker_id: "runtime-test", lease_ms: 1000 }, receiptContext)).toMatchObject({ state: "unknown" });
   await expect(runtime.createExtractionPipeline({ id: uuidv7(), generation_id: uuidv7(), source_id: committed.id }, receiptContext)).rejects.toMatchObject({ code: "extraction_not_configured" });
-  await expect(runtime.recoverEmbedding({ operation_id: uuidv7(), episode_id: committed.id }, receiptContext)).rejects.toMatchObject({ code: "embedding_not_configured" });
   expect(await runtime.embeddingStatus(uuidv7(), receiptContext)).toMatchObject({ state: "unknown" });
+});
+
+dbTest("embedding recovery rejects a materialized Fact when the provider is not configured", async () => {
+  const installation = installationAt(await freshRoot());
+  const factId = await seedFact(installation.root);
+  const { runtime } = await boot(installation);
+  await expect(runtime.recoverEmbedding({ operation_id: uuidv7(), fact_id: factId }, receiptContext))
+    .rejects.toMatchObject({ code: "embedding_not_configured" });
 });
 
 dbTest("a prior revision denied by episode id is withheld from the primary's supersedes view", async () => {

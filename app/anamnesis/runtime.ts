@@ -139,7 +139,8 @@ export class Runtime {
       materializationStatePath: join(installation.root, "materialization-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
     this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
-      read: (query, params) => this.read(query, params), wake: () => this.wakeExtraction() });
+      // A settled pipeline may have materialized Facts, and Facts are the embedding lane's input (D56): wake both lanes.
+      read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } });
     this.database = config.database ?? "neo4j";
     this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
@@ -389,8 +390,8 @@ export class Runtime {
       this.embedding.drained_total += batch.drained;
       if ("reason" in batch) return "idle";
       this.embedding.quarantined_total += batch.quarantined;
-      // A deferred Episode is a provider-side failure recorded in the embedding ledger with a retry_after in the
-      // future, so the next turn moves on to the other Episodes lacking a vector and the deferred one is retried on a
+      // A deferred Fact is a provider-side failure recorded in the embedding ledger with a retry_after in the
+      // future, so the next turn moves on to the other Facts lacking a vector and the deferred one is retried on a
       // later wake, never in a loop of its own. The turn is "more" either way: the lane only rests once nothing is due.
       this.embedding.last_error = batch.deferred ? `${batch.deferred} embeddings deferred: ${batch.deferral_reason}` : null;
       if (batch.drained > 0 || batch.deferred > 0) { this.embedding.requested = true; return "more"; }
@@ -677,8 +678,8 @@ export class Runtime {
     await this.requireStorage();
     return this.engine.embeddingStatus(operationId, context);
   }
-  /** Operator requeue: quarantined ledger entries are dropped so their Episodes are found again by the missing-vector
-   * scan, and the lane wakes at once, which also retries any deferred Episode whose backoff elapsed. */
+  /** Operator requeue: quarantined ledger entries are dropped so their Facts are found again by the missing-vector
+   * scan, and the lane wakes at once, which also retries any deferred Fact whose backoff elapsed. */
   async requeueQuarantinedEmbeddings(params: RpcEmbeddingRequeueParams, context: InstallationContext) {
     await this.requireStorage();
     const result = await this.engine.requeueQuarantinedEmbeddings(params, context);

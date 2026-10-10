@@ -13,10 +13,13 @@ const Entry = z.strictObject({
 });
 export type EmbeddingLedgerEntry = z.infer<typeof Entry>;
 const FileSchema = z.strictObject({
-  version: z.literal(1),
-  episodes: z.record(z.uuidv7(), Entry),
+  version: z.literal(2),
+  facts: z.record(z.uuidv7(), Entry),
 });
 type LedgerFile = z.infer<typeof FileSchema>;
+const ReadSchema = z.union([FileSchema, z.strictObject({
+  version: z.literal(1), episodes: z.record(z.uuidv7(), z.unknown()),
+})]);
 
 /** A serial, write-through ledger. Only completed failures live here; successful
  * vectors are represented by the graph and have no ledger entry. */
@@ -25,8 +28,11 @@ export class EmbeddingLedger {
 
   constructor(path?: string) {
     this.file = new StateFile(path, {
-      parse: text => FileSchema.parse(JSON.parse(text)).episodes,
-      serialize: episodes => JSON.stringify({ version: 1, episodes } satisfies LedgerFile),
+      parse: text => {
+        const file = ReadSchema.parse(JSON.parse(text));
+        return file.version === 2 ? file.facts : {};
+      },
+      serialize: facts => JSON.stringify({ version: 2, facts } satisfies LedgerFile),
     });
   }
 
@@ -51,10 +57,10 @@ export class EmbeddingLedger {
   }
 
   async set(id: string, entry: EmbeddingLedgerEntry): Promise<void> {
-    await this.file.mutate(episodes => { episodes[id] = Entry.parse(entry); });
+    await this.file.mutate(facts => { facts[id] = Entry.parse(entry); });
   }
 
   async delete(id: string): Promise<void> {
-    await this.file.mutate(episodes => { delete episodes[id]; });
+    await this.file.mutate(facts => { delete facts[id]; });
   }
 }

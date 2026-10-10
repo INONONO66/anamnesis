@@ -1373,6 +1373,9 @@ D43 through D47, D49 and D50 stay normative. D56 supersedes the parts of
 docs/05 §2 and of docs/01 "The embedding stream" that name Episode vectors,
 and the per-Episode extraction call shape in docs/02.
 
+**Status**: Fact vectors in `vec_fact_<profileId>`, the bounded same-session
+recall window, and the Fact embedding coverage gate shipped in this PR.
+
 **Alternative**: (a) keep Episode vectors beside Fact vectors, paying the
 embedding cost twice and running two coverage gates; (b) filter at
 collection time, which loses provenance and makes later re-extraction
