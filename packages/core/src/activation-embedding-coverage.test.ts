@@ -122,8 +122,8 @@ test("activation covers generation Facts, including an empty generation and a Fa
     expect(await filled.engine.drainEmbeddingOutbox(100)).toMatchObject({ drained: 1 });
     const c = await filled.cutover();
     expect(c).toEqual([]);
-    if (process.env.ANAMNESIS_G4_EVIDENCE) {
-      const path = "/Users/ino/Develop/anamnesis/.omo/evidence/ulw/01a11b8c-9f0b-71f3-ac0c-cb1048614a4e/G004-g4-fact-first-recall-embedding-lane/a1/activation-coverage.json";
+    const path = process.env.ANAMNESIS_G4_ACTIVATION_EVIDENCE;
+    if (path) {
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, JSON.stringify({ a, b, c }, null, 2) + "\n");
     }

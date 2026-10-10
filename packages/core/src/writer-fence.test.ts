@@ -122,11 +122,12 @@ test("a concurrent epoch claim cannot overtake a validated write or consume stal
     expect(after).toBe(sequenceAtClaim);
     expect(after).toBe(before + 1);
     expect(locks).toBeGreaterThan(readLocks);
-    expect(await store.counts()).toEqual({ ...counts, elements: counts.elements + 1, pending: counts.pending + 1 });
+    // D56: `pending` counts Facts without vectors; a bare Episode adds an element and nothing to the outbox.
+    expect(await store.counts()).toEqual({ ...counts, elements: counts.elements + 1 });
     await expect(store.putElement({ ...input, id: uuidv7(), schema: "anamnesis.original-message/1",
       origin: { ...input.origin, record: `${tag}-stale` } })).rejects.toThrow("stale_writer_epoch");
     expect(await sequence()).toBe(after);
-    expect(await store.counts()).toEqual({ ...counts, elements: counts.elements + 1, pending: counts.pending + 1 });
+    expect(await store.counts()).toEqual({ ...counts, elements: counts.elements + 1 });
   } finally {
     events.emit("resume");
     clearTimeout(deadline);

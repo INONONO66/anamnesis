@@ -29,10 +29,12 @@ const provider = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const request = JSON.parse(Buffer.concat(chunks)); calls++;
     if (request.task) {
-      const output = request.task === 'claim'
-        ? { task: 'claim', language: 'en', modality: 'text', claims: request.text.startsWith('large ') ? [] : [{ text: request.text,
-          evidence: { start: 0, end: Buffer.byteLength(request.text), text: request.text },
-          confidence: 0.9, entities: [{ mention: request.text.split(/\s/)[0], normalized_name: request.text.split(/\s/)[0], entity_kind: 'person' }] }] }
+      // D56 claims arrive as one window per provider call: one claim per admitted Episode, none for the large ones.
+      const claims = text => text.startsWith('large ') ? [] : [{ text,
+        evidence: { start: 0, end: Buffer.byteLength(text), text },
+        confidence: 0.9, entities: [{ mention: text.split(/\s/)[0], normalized_name: text.split(/\s/)[0], entity_kind: 'person' }] }];
+      const output = request.task === 'claim_window'
+        ? { task: 'claim_window', episodes: request.episodes.map(({ id, text }) => ({ id, language: 'en', modality: 'text', claims: claims(text) })) }
         : request.task === 'judge_claims'
           ? { task: 'judge_claims', language: 'en', modality: 'text', claim_body_digest: request.claim_context.body_digest,
             decisions: request.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: 'retain', evidence: claim.evidence, confidence: 0.8 })) }
