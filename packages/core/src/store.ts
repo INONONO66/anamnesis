@@ -85,6 +85,15 @@ export class Store {
     if (this.core.embeddingProvider) {
       const profile = this.core.embeddingProvider.profile, id = embeddingProfileId(profile);
       await this.core.run(`MERGE (p:EmbeddingProfile {id:$id}) ON CREATE SET p.body=$body`, { id, body: canonicalJson(profile) });
+      // A pre-D56 store carries this schema under vec_episode_<id>; IF NOT EXISTS would then
+      // silently keep that name and recall would query a vec_fact_<id> that never exists.
+      // The index is derived from the retained EmbeddingVector rows, so dropping it loses nothing.
+      const legacy = await this.core.run<{ name: string; labels: string[]; properties: string[] }>(
+        `SHOW VECTOR INDEXES YIELD name, labelsOrTypes AS labels, properties RETURN name, labels, properties`);
+      for (const index of legacy) {
+        if (index.name === `vec_fact_${id}` || !index.labels.includes(`Embedding_${id}`) || !index.properties.includes("vector")) continue;
+        await this.core.run(`DROP INDEX \`${index.name.replaceAll("`", "``")}\` IF EXISTS`);
+      }
       // Digest-derived identifiers only, never caller/model-name interpolation.
       await this.core.run(`CREATE VECTOR INDEX vec_fact_${id} IF NOT EXISTS FOR (v:Embedding_${id}) ON (v.vector)
         OPTIONS {indexConfig: {\`vector.dimensions\`: ${profile.dimensions}, \`vector.similarity_function\`: 'cosine'}}`);

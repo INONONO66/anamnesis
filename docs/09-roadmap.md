@@ -39,10 +39,14 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   `embedding.recover` / `embedding.requeue` / `embedding.status` RPCs
   (D54, D56). Episodes are never embedded.
 - The extraction scheduler (`packages/core/src/extraction-scheduler.ts`),
-  running continuously in the daemon one Episode per provider call through
-  the OpenAI-compatible chat provider: claim → judge → materialize Facts,
-  Entities, evidence and ConductingArc for the generation, with the
-  relation judge (D53) gating Fact→Fact relations. State lives in
+  running continuously in the daemon through the OpenAI-compatible chat
+  provider: a `claim_window` call per same-`session_key` window of up to
+  eight Episodes plus up to three preceding context Episodes (D56), then a
+  judge per Episode → materialize Facts, Entities, evidence and
+  ConductingArc for the generation, with the relation judge (D53) gating
+  Fact→Fact relations. With `ANAMNESIS_EXTRACTION_GATE=jev` the Jev pre-gate
+  (`packages/core/src/jev-gate.ts`) cancels Episodes under the threshold
+  before the provider call. State lives in
   `extraction-state.json` (D55); `extraction.audit.create` / `run` /
   `status` run the same pipeline on demand. This is the production
   extraction path, not an audit-only one.
@@ -50,12 +54,11 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   conflict bundles (D46), `backup` / `restore`, the authority snapshot and
   the hit cache.
 
-Not in code: Fact, Entity and relationship vectors (no `vec_fact_*` or
-`vec_rel_*` index, no `embedding_m_<modelhex>` property), the Fact session
-channel, the Entity identity channel, hub damping, the top-128 seed cap,
-the 2,000-node / 20,000-link bounded envelope and its timeout degradation,
-D46 occurrence grouping, the same-session ±N window around source Episodes,
-dreaming, and the version-2 digest. The former `Engine.recall(string)`
+Not in code: Entity and relationship vectors (no `vec_rel_*` index, no
+`embedding_m_<modelhex>` property), the Fact session channel, the Entity
+identity channel, hub damping, the top-128 seed cap, the 2,000-node /
+20,000-link bounded envelope and its timeout degradation, D46 occurrence
+grouping, dreaming, and the version-2 digest. The former `Engine.recall(string)`
 fulltext-only test helper is gone; tests go through `Engine.recallHybrid`.
 
 Everything below is the normative target, not a description of the code.

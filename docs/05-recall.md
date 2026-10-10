@@ -451,10 +451,12 @@ and an assistant echo of delivered text adds no independent root.
 
 ### Exact output budget (D44)
 
-Status — Shipped: `limit` validation, the exact byte budget, the admitted
+Status — Shipped: `limit` validation, the exact `utf8_bytes`,
+`unicode_scalars` and `tokens` budgets (packages/core/src/dynamics/budget.ts;
+`tokens` requires a pinned tokenizer registered through
+`ANAMNESIS_TOKENIZER_CONFIG`, app/anamnesis/tokenizer.ts), the admitted
 budget echo, canonical JSON-lines `context_text`, greedy whole-bundle packing
-and `used_budget` (packages/core/src/recall.ts). Not shipped: the `tokens`
-unit with a pinned tokenizer, the `unicode_scalars` unit and the 16 KiB
+and `used_budget` (packages/core/src/recall.ts). Not shipped: the 16 KiB
 diagnostics cap.
 
 `limit` is a nonnegative safe integer (default **10**, hard maximum **64**;

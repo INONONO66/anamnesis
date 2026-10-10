@@ -59,9 +59,9 @@ async function fixture(reply: (input: ExtractionProviderInput) => unknown = answ
   const schedulers: ExtractionScheduler[] = [];
   return {
     engine, read, calls, snapshots, advance: (ms: number) => { now += ms; },
-    remember: (content: string, session = root) => engine.remember({ content,
+    remember: (content: string, session = root, source = root) => engine.remember({ content,
       time: { value: "2026-09-01T00:00:00Z", precision: "day" },
-      origin: { source: root, session, actor: "user", record: String(++seq) }, source_revision: "v1", expected_previous_revision_key: null,
+      origin: { source, session, actor: "user", record: String(++seq) }, source_revision: "v1", expected_previous_revision_key: null,
     }, { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context }),
     scheduler(options: Partial<ExtractionSchedulerOptions> = {}) {
       const scheduler = new ExtractionScheduler(engine, { provider, context, read, clock: currentTime, maxInFlight: 1, wake() {}, ...options });
@@ -119,6 +119,28 @@ test("ten Episodes use two balanced claim windows while keeping individual judge
     expect(journal_excerpt.every(entry => entry.claim_attempt?.state === "succeeded" && entry.judge_attempt?.state === "succeeded")).toBe(true);
     const path = process.env.ANAMNESIS_G5_EVIDENCE;
     if (path) await writeFile(path, JSON.stringify({ calls_by_task, windows, derived_from, journal_excerpt }, null, 2) + "\n");
+  } finally { await f.close(); }
+}, 120000);
+
+test("two sources that reuse a session string never share a window or context", async () => {
+  const f = await fixture();
+  try {
+    const session = "shared-session";
+    const a = [], b = [];
+    for (let n = 0; n < 3; n++) a.push((await f.remember(`Alice wrote source a note ${n}.`, session, "source-a")).id);
+    for (let n = 0; n < 3; n++) b.push((await f.remember(`Alice wrote source b note ${n}.`, session, "source-b")).id);
+    expect(await drain(f.scheduler({ windowMax: 8, contextMax: 2 }), 6)).toMatchObject({ completed_total: 6, failed_total: 0 });
+    const windows = f.calls.filter(call => call.task === "claim_window")
+      .map(call => ({ targets: call.episodes.map(episode => episode.id), context: call.context.map(episode => episode.id) }));
+    expect(windows).toHaveLength(2);
+    for (const window of windows) {
+      const own = a.includes(window.targets[0]!) ? a : b, other = own === a ? b : a;
+      expect(window.targets).toEqual(own);
+      expect(window.context.filter(id => other.includes(id))).toEqual([]);
+    }
+    const sessions = await f.read<{ source: string; session: string; facts: number }>(
+      `MATCH (f:Fact)-[:DERIVED_FROM]->(e:Episode) RETURN e.origin_source AS source, e.origin_session AS session, count(f) AS facts ORDER BY source`, {});
+    expect(sessions).toEqual([{ source: "source-a", session, facts: 3 }, { source: "source-b", session, facts: 3 }]);
   } finally { await f.close(); }
 }, 120000);
 

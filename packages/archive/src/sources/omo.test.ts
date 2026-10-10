@@ -35,6 +35,24 @@ test("omo preserves backfill identity time and revision while admitting filtered
   expect(records.map((record) => record.line)).toEqual([2, 4, 5, 6, 7, 8]);
 });
 
+test("omo keeps reasoning-only and whitespace-only message contents", async () => {
+  const lines = [
+    { type: "session", id: "reasoning-session" },
+    { type: "message", id: "thinking", timestamp: "2026-10-10T12:00:00Z", message: { role: "assistant", content: [
+      { type: "thinking", text: "thought" }, { type: "reasoning", text: "more" }, { type: "toolCall" },
+    ] } },
+    { type: "message", id: "spaces", timestamp: "2026-10-10T12:00:00Z", message: { role: "user", content: "  \n " } },
+    { type: "message", id: "parts", timestamp: "2026-10-10T12:00:00Z", message: { role: "user", content: [
+      { type: "text", text: " " }, { type: "toolResult" }, { type: "text", text: "\t" },
+    ] } },
+    { type: "message", id: "tool-only", timestamp: "2026-10-10T12:00:00Z", message: { role: "assistant", content: [{ type: "tool_use" }] } },
+  ];
+  const parsed = await omoAdapter.parse("/native.jsonl", new TextEncoder().encode(lines.map((line) => JSON.stringify(line)).join("\n")));
+  expect(parsed[0]?.records.map((record) => [record.origin.record, record.text, record.reasoning])).toEqual([
+    ["thinking", "", "thought\nmore"], ["spaces", "  \n ", undefined], ["parts", " \n\t", undefined],
+  ]);
+});
+
 test("omo discovers header-bearing sessions and message sqlite without admitting artifact and derived copies", async () => {
   const root = await mkdtemp(join(tmpdir(), "archive-omo-"));
   try {

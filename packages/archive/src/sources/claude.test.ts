@@ -36,6 +36,14 @@ test("claude preserves backfill identity time and revision while keeping what ba
   for (const record of records) expect(record.revision).toBe(revisionOf(record.occurred_at, record.text));
 });
 
+test("claude keeps thinking-field messages without prose", async () => {
+  const line = JSON.stringify({ type: "assistant", sessionId: "thought-session", uuid: "thought", timestamp: 1000, message: {
+    role: "assistant", content: [{ type: "thinking", thinking: "private thought", signature: "signed" }],
+  } });
+  const parsed = await claudeAdapter.parse(path, encoder.encode(`${line}\n`));
+  expect(parsed[0]?.records.map((record) => [record.text, record.reasoning])).toEqual([["", "private thought"]]);
+});
+
 test("claude discovers transcripts from ~/.claude, ~/.claude/projects or a renamed copy of it, skipping derived and ._ copies", async () => {
   const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

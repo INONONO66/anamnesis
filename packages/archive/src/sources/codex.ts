@@ -6,7 +6,7 @@ import type { ParsedSession, SourceAdapter } from "./types.ts";
 type Entry = ParsedSession["records"][number];
 type Payload = Record<string, unknown>;
 
-const TOOL_PART_TYPES = new Set(["tool_result", "tool_use", "function_call", "function_call_output", "reasoning"]);
+const TOOL_PART_TYPES = new Set(["tool_result", "tool_use", "function_call", "function_call_output"]);
 const MESSAGE_TYPES = new Set(["message", "user_message", "agent_message"]);
 const SYSTEM_EVENT_TYPES = new Set(["event_msg", "session_meta", "turn_context"]);
 
@@ -17,7 +17,7 @@ function texts(parts: unknown, keep: (part: Record<string, unknown>) => boolean)
 
 function contentText(payload: Payload): string {
   if (typeof payload["message"] === "string") return payload["message"];
-  return texts(payload["content"], (part) => !TOOL_PART_TYPES.has(String(part["type"])));
+  return texts(payload["content"], (part) => !TOOL_PART_TYPES.has(String(part["type"])) && part["type"] !== "reasoning");
 }
 
 function reasoningText(payload: Payload, subtype: string): string {
@@ -57,19 +57,30 @@ function parseLine(raw: string): Record<string, unknown> | undefined {
   }
 }
 
+function isToolOnly(parts: unknown): boolean {
+  return Array.isArray(parts) && parts.length > 0 && parts.every((part) =>
+    isRecord(part) && TOOL_PART_TYPES.has(String(part["type"])));
+}
+
+function omitMessage(subtype: string, prose: string, parts: unknown): boolean {
+  if (subtype === "function_call_output" || subtype === "function_call") return true;
+  return MESSAGE_TYPES.has(subtype) && prose === "" && (isToolOnly(parts) || !Array.isArray(parts) || parts.length === 0);
+}
+
 function toEntry(value: Record<string, unknown>, episode: RawSessionEpisode | undefined, session: string, index: number, line: number): Entry | undefined {
   const payload = value["payload"] as Payload;
   const type = optionalText(value["type"]) ?? "other";
   const subtype = optionalText(payload["type"]) ?? type;
   const prose = contentText(payload);
-  if ((MESSAGE_TYPES.has(subtype) || subtype === "function_call_output" || subtype === "function_call") && prose === "") return undefined;
+  if (omitMessage(subtype, prose, payload["content"])) return undefined;
   const native = optionalText(payload["id"]);
   const origin = episode?.input.origin ?? {
     source: "codex", session, actor: actorOf(payload),
     record: native === undefined ? `${session}:${index}` : `${native}:content:0`,
   };
   const reasoning = reasoningText(payload, subtype);
-  const text = episode?.input.properties?.["kind"] === "compaction" ? "context_compacted" : prose || JSON.stringify(value);
+  const text = episode?.input.properties?.["kind"] === "compaction" ? "context_compacted"
+    : MESSAGE_TYPES.has(subtype) ? prose : prose || JSON.stringify(value);
   const date = episode?.input.time?.value ?? occurredAt(value);
   return {
     origin, role: subtype === "function_call_output" ? "tool" : roleOf(origin.actor),

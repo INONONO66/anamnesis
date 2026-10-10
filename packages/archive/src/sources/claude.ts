@@ -17,7 +17,11 @@ type Decoded = {
 
 function blocks(content: unknown, type: string): string[] {
   if (!Array.isArray(content)) return [];
-  return content.flatMap((part) => isRecord(part) && part["type"] === type && typeof part["text"] === "string" ? [part["text"]] : []);
+  return content.flatMap((part) => {
+    if (!isRecord(part) || part["type"] !== type) return [];
+    const text = type === "thinking" && typeof part["thinking"] === "string" ? part["thinking"] : part["text"];
+    return typeof text === "string" ? [text] : [];
+  });
 }
 
 function roleOf(role: unknown): ArchiveRecord["role"] {
@@ -44,8 +48,9 @@ function decode(value: Record<string, unknown>): Decoded | undefined {
   const kind = optionalText(value["type"]) ?? "other";
   const toolOnly = (kind === "user" || kind === "assistant") && Array.isArray(content) && prose === "" && reasoning === "";
   if (toolOnly) return undefined;
-  const text = prose || (kind === "summary" ? optionalText(value["summary"]) : undefined)
-    || (typeof value["content"] === "string" ? value["content"] : undefined) || JSON.stringify(value);
+  const text = kind === "user" || kind === "assistant" ? prose
+    : prose || (kind === "summary" ? optionalText(value["summary"]) : undefined)
+      || (typeof value["content"] === "string" ? value["content"] : undefined) || JSON.stringify(value);
   return { kind, canonical_kind: canonicalOf(kind), content, message, text, prose, reasoning };
 }
 
@@ -60,9 +65,9 @@ function parityEntries(decoded: Decoded, episodes: RawSessionEpisode[], line: nu
     const date = episode.input.time?.value ?? occurredAt;
     return {
       origin, role: roleOf(origin.actor), occurred_at: date, time_precision: "second",
-      text: piece || text, ...(reasoning ? { reasoning } : {}),
+      text: piece === "" ? text : piece, ...(reasoning ? { reasoning } : {}),
       kind, canonical_kind: episode.input.properties?.["kind"] === "compaction" ? "compaction" : canonical_kind,
-      revision: revisionOf(date, piece || text), line,
+      revision: revisionOf(date, piece === "" ? text : piece), line,
     };
   });
 }

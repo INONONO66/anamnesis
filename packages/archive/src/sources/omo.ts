@@ -1,10 +1,11 @@
-import { isRecord, messageText, optionalText } from "@anamnesis/backfill";
+import { isRecord, optionalText } from "@anamnesis/backfill";
 import { Database } from "bun:sqlite";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { revisionOf } from "../record.ts";
 import type { ArchiveRecord } from "../record.ts";
 import type { ParsedSession, SourceAdapter } from "./types.ts";
+import { readdirOrEmpty } from "./fs.ts";
 
 type Entry = ParsedSession["records"][number];
 const decoder = new TextDecoder();
@@ -19,9 +20,12 @@ function roleOf(role: string): ArchiveRecord["role"] {
 }
 
 function textual(value: unknown): string | undefined {
-  if (typeof value === "string") return value.trim() === "" ? undefined : value;
-  if (!Array.isArray(value)) return undefined;
-  return messageText(value);
+  if (typeof value === "string") return value === "" ? undefined : value;
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const parts = value.filter(isRecord);
+  const toolTypes = new Set(["toolCall", "toolResult", "tool_use", "tool_result", "function_call", "function_call_output"]);
+  if (parts.length === 0 || parts.every((part) => toolTypes.has(String(part["type"])))) return undefined;
+  return parts.flatMap((part) => part["type"] === "text" && typeof part["text"] === "string" ? [part["text"]] : []).join("\n");
 }
 
 function entry(source: string, session: string, id: string, role: string, timestamp: string, kind: string, text: string, line: number, reasoning?: string): Entry {
@@ -77,7 +81,7 @@ function sqliteRow(raw: unknown, source: string, line: number): Entry | undefine
   const role = optionalText(raw["role"]), timestamp = optionalText(raw["created_at"]);
   if (!id || !session || !role || !timestamp || Number.isNaN(Date.parse(timestamp))) return undefined;
   let content: unknown = raw["content"];
-  if (typeof content !== "string" || content.trim() === "") return undefined;
+  if (typeof content !== "string" || content === "") return undefined;
   if (content.startsWith("[") || content.startsWith("{")) {
     try { content = JSON.parse(content); } catch (error) { if (!(error instanceof SyntaxError)) throw error; }
   }
@@ -107,7 +111,7 @@ function sqliteSessions(path: string, source: string): ParsedSession[] {
 }
 
 async function* walk(root: string): AsyncGenerator<string> {
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdirOrEmpty(root);
   for (const item of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (item.name.startsWith("._")) continue;
     const path = join(root, item.name);

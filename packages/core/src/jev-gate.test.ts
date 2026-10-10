@@ -16,13 +16,17 @@ function response(model: string, content: string, status = 200): Response {
   return new Response(JSON.stringify({ model, choices: [{ message: { content } }] }), { status });
 }
 
-test("construction refuses another model before reading the key", async () => {
-  let reads = 0;
+test("construction refuses any other model before reading the key or calling the gateway", async () => {
+  let reads = 0, calls = 0;
   const original = fs.readFile;
   fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => { reads++; return original(...args); }) as typeof fs.readFile;
-  try { await assert.rejects(JevGate.create({ keyFile: "/never-read", model: "other" }), /only serves/); }
-  finally { fs.readFile = original; }
+  try {
+    for (const model of ["other", "anthropic/claude-haiku-4-5", ""]) {
+      await assert.rejects(JevGate.create({ keyFile: "/never-read", model, fetch: async () => { calls++; return response(JEV_MODEL, "[]"); } }), /only serves/);
+    }
+  } finally { fs.readFile = original; }
   assert.equal(reads, 0);
+  assert.equal(calls, 0);
 });
 
 test("construction enforces HTTPS and the Jev allowlist", async () => {
@@ -47,6 +51,24 @@ test("score sends the fixed model, bearer, truncates input, and clamps scores", 
     assert.equal(body.model, JEV_MODEL);
     assert.equal(JSON.parse(body.messages[1].content)[0].text.length, 2048);
     assert.equal((request?.headers as Record<string, string>).authorization, "Bearer fixture-bearer");
+  } finally { await fs.rm(fixture.root, { recursive: true, force: true }); }
+});
+
+test("the deadline covers the response body, and an oversized body is a mismatch", async () => {
+  const fixture = await fixtureKey();
+  try {
+    let closeBody: (() => void) | undefined;
+    const stalled = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{\"model\":\"typesafe-ai/jev\","));
+        closeBody = () => controller.close();
+      },
+    }), { status: 200 });
+    const gate = await JevGate.create({ keyFile: fixture.file, timeoutMs: 20, fetch: async () => stalled });
+    await assert.rejects(gate.score([{ id: "a", text: "x" }]), error => error instanceof ExtractionGateError && error.reason === "gate_unavailable");
+    closeBody?.();
+    const oversized = await JevGate.create({ keyFile: fixture.file, fetch: async () => response(JEV_MODEL, "[" + "0,".repeat(40000) + "0]") });
+    await assert.rejects(oversized.score([{ id: "a", text: "x" }]), error => error instanceof ExtractionGateError && error.reason === "gate_mismatch");
   } finally { await fs.rm(fixture.root, { recursive: true, force: true }); }
 });
 

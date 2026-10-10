@@ -39,6 +39,18 @@ test("codex preserves backfill identity and time while keeping what backfill dro
   for (const record of records) expect(record.revision).toBe(revisionOf(record.occurred_at, record.text));
 });
 
+test("codex keeps reasoning-only message parts and omits tool-only parts", async () => {
+  const stamp = "2026-03-09T15:36:16.000Z";
+  const lines = [
+    { timestamp: stamp, type: "session_meta", payload: { id: "thought-session" } },
+    { timestamp: stamp, type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "reasoning", text: "private thought" }] } },
+    { timestamp: stamp, type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "function_call", arguments: "{}" }] } },
+  ];
+  const parsed = await codexAdapter.parse(path, new TextEncoder().encode(lines.map((line) => JSON.stringify(line)).join("\n")));
+  expect(parsed[0]?.records.filter((record) => record.kind === "message").map((record) => [record.text, record.reasoning]))
+    .toEqual([["", "private thought"]]);
+});
+
 test("codex discovers rollout files under the dated tree in sorted order", async () => {
   const root = await mkdtemp(join(tmpdir(), "archive-codex-"));
   try {
