@@ -28,9 +28,11 @@ test("five Episodes produce distinct Facts with no graph extraction ledgers and 
   const provider = {
     model, modelIncarnation: extractionBodyDigest(model),
     async extract(input: ExtractionProviderInput) {
-      const evidence = { start: 0, end: Buffer.byteLength(input.text), text: input.text };
-      if (input.task === "claim") return { task: "claim", language: "en", modality: "text",
-        claims: [{ text: input.text, evidence, confidence: 0.9, entities: [{ mention: "Alice", normalized_name: "Alice", entity_kind: "person" }] }] };
+      const claims = (text: string) => [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text }, confidence: 0.9,
+        entities: [{ mention: "Alice", normalized_name: "Alice", entity_kind: "person" }] }];
+      // D56 claims arrive as one window per provider call; answer per Episode.
+      if (input.task === "claim_window") return { task: "claim_window",
+        episodes: input.episodes.map(({ id, text }) => ({ id, language: "en", modality: "text", claims: claims(text) })) };
       if (input.task === "judge_claims") return { task: "judge_claims", language: "en", modality: "text",
         claim_body_digest: input.claim_context!.body_digest,
         decisions: input.claim_context!.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence, confidence: 0.85 })) };
