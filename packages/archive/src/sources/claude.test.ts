@@ -44,6 +44,28 @@ test("claude keeps thinking-field messages without prose", async () => {
   expect(parsed[0]?.records.map((record) => [record.text, record.reasoning])).toEqual([["", "private thought"]]);
 });
 
+test("claude keeps every non-tool message identity, however empty, and omits only tool-only messages", async () => {
+  const message = (uuid: string, role: "user" | "assistant", content: unknown) =>
+    JSON.stringify({ type: role, sessionId: "edge-session", uuid, timestamp: 1000, message: { role, content } });
+  const lines = [
+    message("signature-only", "assistant", [{ type: "thinking", thinking: "", signature: "signed" }]),
+    message("empty-text", "assistant", [{ type: "text", text: "" }]),
+    message("image-only", "user", [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }]),
+    message("empty-parts", "user", []),
+    message("tool-use-only", "assistant", [{ type: "tool_use", id: "call-1", name: "read", input: {} }]),
+    message("tool-result-only", "user", [{ type: "tool_result", tool_use_id: "call-1", content: "ignored" }, { type: "tool_result", tool_use_id: "call-2" }]),
+    message("result-with-prose", "user", [{ type: "tool_result", tool_use_id: "call-1", content: "ignored" }, { type: "text", text: "kept" }]),
+  ];
+  const parsed = await claudeAdapter.parse(path, encoder.encode(`${lines.join("\n")}\n`));
+  expect(parsed[0]?.records.map((record) => [record.origin.record, record.role, record.text, record.reasoning])).toEqual([
+    ["signature-only", "assistant", "", undefined],
+    ["empty-text", "assistant", "", undefined],
+    ["image-only", "user", "", undefined],
+    ["empty-parts", "user", "", undefined],
+    ["result-with-prose:content:1", "user", "kept", undefined],
+  ]);
+});
+
 test("claude discovers transcripts from ~/.claude, ~/.claude/projects or a renamed copy of it, skipping derived and ._ copies", async () => {
   const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

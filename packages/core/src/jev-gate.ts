@@ -37,7 +37,8 @@ function gateError(reason: "gate_unavailable" | "gate_rejected" | "gate_mismatch
   return new ExtractionGateError(reason);
 }
 
-/** Reads at most MAX_RESPONSE_BYTES; the caller's deadline still bounds a body that never ends. */
+/** Reads at most MAX_RESPONSE_BYTES; the caller's deadline still bounds a body that never ends.
+ * Cancelling an oversized body is cleanup, never awaited: the verdict must not wait on the transport. */
 async function readBounded(response: Response): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return response.text();
@@ -47,7 +48,7 @@ async function readBounded(response: Response): Promise<string> {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_RESPONSE_BYTES) { await reader.cancel(); throw gateError("gate_mismatch"); }
+    if (size > MAX_RESPONSE_BYTES) { void reader.cancel().catch(() => undefined); throw gateError("gate_mismatch"); }
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -99,7 +100,9 @@ export class JevGate implements ExtractionGate {
   }
 
   /** One deadline covers the request, the response headers and the whole body: a reply that
-   * sends headers and then stalls must fail open like a reply that never arrives. */
+   * sends headers and then stalls must fail open like a reply that never arrives. Body cancellation
+   * on a non-OK status is cleanup that is never awaited, so a transport whose cancel never settles
+   * cannot hold the verdict past the status line. */
   private async requestScores(body: string, count: number): Promise<number[]> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -116,7 +119,7 @@ export class JevGate implements ExtractionGate {
         }), deadline]);
       } catch { throw gateError("gate_unavailable"); }
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
+        void response.body?.cancel().catch(() => undefined);
         throw gateError(response.status === 429 || response.status >= 500 ? "gate_unavailable" : "gate_rejected");
       }
       let text: string;

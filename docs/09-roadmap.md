@@ -45,8 +45,9 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   judge per Episode → materialize Facts, Entities, evidence and
   ConductingArc for the generation, with the relation judge (D53) gating
   Fact→Fact relations. With `ANAMNESIS_EXTRACTION_GATE=jev` the Jev pre-gate
-  (`packages/core/src/jev-gate.ts`) cancels Episodes under the threshold
-  before the provider call. State lives in
+  (`packages/core/src/jev-gate.ts`) scores the window and cancels all of its
+  members only when the window's maximum score is under the threshold;
+  otherwise the provider call proceeds. State lives in
   `extraction-state.json` (D55); `extraction.audit.create` / `run` /
   `status` run the same pipeline on demand. This is the production
   extraction path, not an audit-only one.

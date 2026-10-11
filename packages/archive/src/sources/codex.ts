@@ -62,9 +62,10 @@ function isToolOnly(parts: unknown): boolean {
     isRecord(part) && TOOL_PART_TYPES.has(String(part["type"])));
 }
 
-function omitMessage(subtype: string, prose: string, parts: unknown): boolean {
+/** Tool calls, tool results and messages made exclusively of tool parts are tool records; every other message keeps its identity, even with no text. */
+function omitMessage(subtype: string, parts: unknown): boolean {
   if (subtype === "function_call_output" || subtype === "function_call") return true;
-  return MESSAGE_TYPES.has(subtype) && prose === "" && (isToolOnly(parts) || !Array.isArray(parts) || parts.length === 0);
+  return MESSAGE_TYPES.has(subtype) && isToolOnly(parts);
 }
 
 function toEntry(value: Record<string, unknown>, episode: RawSessionEpisode | undefined, session: string, index: number, line: number): Entry | undefined {
@@ -72,7 +73,7 @@ function toEntry(value: Record<string, unknown>, episode: RawSessionEpisode | un
   const type = optionalText(value["type"]) ?? "other";
   const subtype = optionalText(payload["type"]) ?? type;
   const prose = contentText(payload);
-  if (omitMessage(subtype, prose, payload["content"])) return undefined;
+  if (omitMessage(subtype, payload["content"])) return undefined;
   const native = optionalText(payload["id"]);
   const origin = episode?.input.origin ?? {
     source: "codex", session, actor: actorOf(payload),

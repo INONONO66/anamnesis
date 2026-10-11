@@ -45,10 +45,13 @@ test("codex keeps reasoning-only message parts and omits tool-only parts", async
     { timestamp: stamp, type: "session_meta", payload: { id: "thought-session" } },
     { timestamp: stamp, type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "reasoning", text: "private thought" }] } },
     { timestamp: stamp, type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "function_call", arguments: "{}" }] } },
+    { timestamp: stamp, type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "" }] } },
+    { timestamp: stamp, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" }] } },
+    { timestamp: stamp, type: "response_item", payload: { type: "message", role: "user", content: [] } },
   ];
   const parsed = await codexAdapter.parse(path, new TextEncoder().encode(lines.map((line) => JSON.stringify(line)).join("\n")));
-  expect(parsed[0]?.records.filter((record) => record.kind === "message").map((record) => [record.text, record.reasoning]))
-    .toEqual([["", "private thought"]]);
+  expect(parsed[0]?.records.filter((record) => record.kind === "message").map((record) => [record.role, record.text, record.reasoning]))
+    .toEqual([["assistant", "", "private thought"], ["assistant", "", undefined], ["user", "", undefined], ["user", "", undefined]]);
 });
 
 test("codex discovers rollout files under the dated tree in sorted order", async () => {

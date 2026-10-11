@@ -46,10 +46,16 @@ test("omo keeps reasoning-only and whitespace-only message contents", async () =
       { type: "text", text: " " }, { type: "toolResult" }, { type: "text", text: "\t" },
     ] } },
     { type: "message", id: "tool-only", timestamp: "2026-10-10T12:00:00Z", message: { role: "assistant", content: [{ type: "tool_use" }] } },
+    { type: "message", id: "native-thought", timestamp: "2026-10-10T12:00:00Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "native thought" }] } },
+    { type: "message", id: "empty-string", timestamp: "2026-10-10T12:00:00Z", message: { role: "assistant", content: "" } },
+    { type: "message", id: "empty-parts", timestamp: "2026-10-10T12:00:00Z", message: { role: "user", content: [] } },
+    { type: "message", id: "image-only", timestamp: "2026-10-10T12:00:00Z", message: { role: "user", content: [{ type: "image", data: "iVBORw0KGgo=" }] } },
+    { type: "message", id: "two-tools", timestamp: "2026-10-10T12:00:00Z", message: { role: "assistant", content: [{ type: "toolCall" }, { type: "toolResult" }] } },
   ];
   const parsed = await omoAdapter.parse("/native.jsonl", new TextEncoder().encode(lines.map((line) => JSON.stringify(line)).join("\n")));
   expect(parsed[0]?.records.map((record) => [record.origin.record, record.text, record.reasoning])).toEqual([
     ["thinking", "", "thought\nmore"], ["spaces", "  \n ", undefined], ["parts", " \n\t", undefined],
+    ["native-thought", "", "native thought"], ["empty-string", "", undefined], ["empty-parts", "", undefined], ["image-only", "", undefined],
   ]);
 });
 
@@ -73,18 +79,20 @@ test("omo discovers header-bearing sessions and message sqlite without admitting
       JSON.stringify([{ type: "thinking", text: "db reasoning" }, { type: "text", text: "db content" }, { type: "toolCall" }]),
       "2026-04-05T06:07:09Z",
     );
+    db.query("INSERT INTO messages VALUES (?, ?, ?, ?, ?)").run("blank", "db-session", "user", "", "2026-04-05T06:07:10Z");
+    db.query("INSERT INTO messages VALUES (?, ?, ?, ?, ?)").run("tool-row", "db-session", "assistant", JSON.stringify([{ type: "toolCall" }]), "2026-04-05T06:07:11Z");
     db.close();
     expect(await Array.fromAsync(omoAdapter.files(root))).toEqual([native, dbPath].sort((a, b) => a.localeCompare(b)));
     const session = await omoAdapter.parse(dbPath, await readFile(dbPath));
     expect(session[0]?.records[0]?.origin).toEqual({ source: "omo", session: "db-session", actor: "assistant", record: "row" });
     expect(session[0]?.records[1]?.reasoning).toBe("db reasoning");
     expect(session[0]?.records[1]?.role).toBe("system");
-    expect(session[0]?.records.map((record) => record.line)).toEqual([0, 0]);
+    expect(session[0]?.records.map((record) => [record.origin.record, record.text, record.line])).toEqual([["row", "db text", 0], ["parts", "db content", 0], ["blank", "", 0]]);
     const archiveDir = join(root, "archive-output");
-    expect(await collect({ adapter: omoAdapter, root, archiveDir })).toEqual({ files: 2, sessions: 2, records: 8, skipped: 0 });
+    expect(await collect({ adapter: omoAdapter, root, archiveDir })).toEqual({ files: 2, sessions: 2, records: 9, skipped: 0 });
     const manifest = Manifest.open(archiveDir);
     try {
-      expect(manifest.countsBySource()).toEqual([{ source: "omo", sessions: 2, records: 8 }]);
+      expect(manifest.countsBySource()).toEqual([{ source: "omo", sessions: 2, records: 9 }]);
     } finally { manifest.close(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
