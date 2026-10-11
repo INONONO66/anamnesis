@@ -9,6 +9,7 @@ import { revisionOf, type ArchiveRecord } from "../record.ts";
 import type { ParsedSession, SourceAdapter } from "./types.ts";
 
 type Entry = ParsedSession["records"][number];
+const TOOL_PART_TYPES = new Set(["tool_use", "tool_result"]);
 type Line = { value: Record<string, unknown>; episodes: RawSessionEpisode[]; line: number; fallback: string };
 type Decoded = {
   kind: string; canonical_kind: ArchiveRecord["canonical_kind"]; content: unknown; message: Record<string, unknown> | undefined;
@@ -22,6 +23,11 @@ function blocks(content: unknown, type: string): string[] {
     const text = type === "thinking" && typeof part["thinking"] === "string" ? part["thinking"] : part["text"];
     return typeof text === "string" ? [text] : [];
   });
+}
+
+/** Only a message made exclusively of tool parts is a tool record; any other message keeps its identity, even with no prose or thinking text. */
+function toolOnly(content: unknown): boolean {
+  return Array.isArray(content) && content.length > 0 && content.every((part) => isRecord(part) && TOOL_PART_TYPES.has(String(part["type"])));
 }
 
 function roleOf(role: unknown): ArchiveRecord["role"] {
@@ -46,8 +52,7 @@ function decode(value: Record<string, unknown>): Decoded | undefined {
   const prose = typeof content === "string" ? content : blocks(content, "text").join("\n");
   const reasoning = blocks(content, "thinking").join("\n");
   const kind = optionalText(value["type"]) ?? "other";
-  const toolOnly = (kind === "user" || kind === "assistant") && Array.isArray(content) && prose === "" && reasoning === "";
-  if (toolOnly) return undefined;
+  if ((kind === "user" || kind === "assistant") && toolOnly(content)) return undefined;
   const text = kind === "user" || kind === "assistant" ? prose
     : prose || (kind === "summary" ? optionalText(value["summary"]) : undefined)
       || (typeof value["content"] === "string" ? value["content"] : undefined) || JSON.stringify(value);

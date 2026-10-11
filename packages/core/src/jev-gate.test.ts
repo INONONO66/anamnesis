@@ -72,6 +72,30 @@ test("the deadline covers the response body, and an oversized body is a mismatch
   } finally { await fs.rm(fixture.root, { recursive: true, force: true }); }
 });
 
+test("a verdict never waits on body cancellation, even one that never settles", async () => {
+  const fixture = await fixtureKey();
+  const entered: string[] = [];
+  let release: (() => void) | undefined;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const stream = (label: string, chunk: Uint8Array) => new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(chunk); },
+    cancel() { entered.push(label); return pending; },
+  });
+  try {
+    // A 60 s deadline: were either cancellation awaited, the verdict would arrive only after `release`, which runs last.
+    const unavailable = await JevGate.create({ keyFile: fixture.file, timeoutMs: 60_000,
+      fetch: async () => new Response(stream("503", new TextEncoder().encode("busy")), { status: 503 }) });
+    await assert.rejects(unavailable.score([{ id: "a", text: "x" }]), error => error instanceof ExtractionGateError && error.reason === "gate_unavailable");
+    const oversized = await JevGate.create({ keyFile: fixture.file, timeoutMs: 60_000,
+      fetch: async () => new Response(stream("oversized", new Uint8Array(64 * 1024 + 1)), { status: 200 }) });
+    await assert.rejects(oversized.score([{ id: "a", text: "x" }]), error => error instanceof ExtractionGateError && error.reason === "gate_mismatch");
+    assert.deepEqual(entered, ["503", "oversized"]);
+  } finally {
+    release?.();
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("score maps response, transport, and HTTP failures without exposing secrets", async () => {
   const fixture = await fixtureKey();
   try {

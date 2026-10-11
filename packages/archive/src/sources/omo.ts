@@ -19,12 +19,18 @@ function roleOf(role: string): ArchiveRecord["role"] {
   }
 }
 
+const TOOL_PART_TYPES = new Set(["toolCall", "toolResult", "tool_use", "tool_result", "function_call", "function_call_output"]);
+
+/** Only a message made exclusively of tool parts is a tool record; every other message keeps its identity, even with no text. */
+function toolOnly(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((part) => isRecord(part) && TOOL_PART_TYPES.has(String(part["type"])));
+}
+
 function textual(value: unknown): string | undefined {
   if (typeof value === "string") return value === "" ? undefined : value;
   if (!Array.isArray(value) || value.length === 0) return undefined;
   const parts = value.filter(isRecord);
-  const toolTypes = new Set(["toolCall", "toolResult", "tool_use", "tool_result", "function_call", "function_call_output"]);
-  if (parts.length === 0 || parts.every((part) => toolTypes.has(String(part["type"])))) return undefined;
+  if (parts.length === 0 || toolOnly(value)) return undefined;
   return parts.flatMap((part) => part["type"] === "text" && typeof part["text"] === "string" ? [part["text"]] : []).join("\n");
 }
 
@@ -60,9 +66,9 @@ function eventEntry(raw: Record<string, unknown>, source: string, session: strin
   const message = isRecord(raw["message"]) ? raw["message"] : undefined;
   const actor = optionalText(message?.["role"]) ?? "unknown";
   const content = message?.["content"];
+  if (kind === "message" && toolOnly(content)) return undefined;
   const text = kind === "compaction" ? textual(raw["summary"]) : kind === "message"
-    ? textual(content) : textual(raw["text"]) ?? textual(raw["summary"]) ?? textual(raw["content"]) ?? JSON.stringify(raw);
-  // Only messages made exclusively of tool parts (or empty content) have no text.
+    ? textual(content) ?? "" : textual(raw["text"]) ?? textual(raw["summary"]) ?? textual(raw["content"]) ?? JSON.stringify(raw);
   if (text === undefined) return undefined;
   return entry(source, session, id, actor, timestamp, kind, text, line, thinkingText(content));
 }
@@ -70,7 +76,7 @@ function eventEntry(raw: Record<string, unknown>, source: string, session: strin
 function thinkingText(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined;
   const parts = content.flatMap((part) =>
-    isRecord(part) && (part["type"] === "thinking" || part["type"] === "reasoning") ? [optionalText(part["text"])] : [])
+    isRecord(part) && (part["type"] === "thinking" || part["type"] === "reasoning") ? [optionalText(part["thinking"]) ?? optionalText(part["text"])] : [])
     .filter((part): part is string => part !== undefined);
   return parts.length === 0 ? undefined : parts.join("\n");
 }
@@ -81,13 +87,13 @@ function sqliteRow(raw: unknown, source: string, line: number): Entry | undefine
   const role = optionalText(raw["role"]), timestamp = optionalText(raw["created_at"]);
   if (!id || !session || !role || !timestamp || Number.isNaN(Date.parse(timestamp))) return undefined;
   let content: unknown = raw["content"];
-  if (typeof content !== "string" || content === "") return undefined;
+  if (typeof content !== "string") return undefined;
   if (content.startsWith("[") || content.startsWith("{")) {
     try { content = JSON.parse(content); } catch (error) { if (!(error instanceof SyntaxError)) throw error; }
   }
-  const text = isRecord(content) ? textual(content["text"]) : textual(content);
-  if (text === undefined) return undefined;
-  return entry(source, session, id, role, timestamp, "message", text, line, thinkingText(content));
+  const body = isRecord(content) ? content["text"] : content;
+  if (toolOnly(body)) return undefined;
+  return entry(source, session, id, role, timestamp, "message", textual(body) ?? "", line, thinkingText(content));
 }
 
 function sqliteSessions(path: string, source: string): ParsedSession[] {

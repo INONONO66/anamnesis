@@ -6,6 +6,7 @@ packages/core/src/spool-integrity.test.ts
 packages/core/src/openai-embedding-provider.test.ts
 packages/core/src/objects.test.ts
 packages/core/src/extraction.test.ts
+packages/core/src/jev-gate.test.ts
 packages/core/src/spool-completion.test.ts
 packages/core/src/remember-input.test.ts
 packages/core/src/paced-extraction-provider.test.ts
@@ -80,3 +81,4 @@ packages/archive/src/sources/notion.test.ts
 packages/archive/src/sources/agentlog.test.ts
 packages/archive/src/sources/claude.test.ts
 packages/archive/src/sources/codex.test.ts
+packages/archive/src/sources/fs.test.ts

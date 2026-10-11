@@ -33,9 +33,11 @@ The scheduler batches a same-session window of Episodes per provider call
 Episode is still attributed individually through `DERIVED_FROM`, and an
 oversized window retries as single targets. `ANAMNESIS_EXTRACTION_GATE=jev`
 places the Jev pre-gate (`packages/core/src/jev-gate.ts`) in front of the
-model call: Episodes scoring below `ANAMNESIS_EXTRACTION_GATE_THRESHOLD`
-(default `0.2`) are journaled as `gate_skipped` cancellations and sealed as
-coverage without a provider call. The gate defaults to `off`.
+model call: it scores the whole window, and only when the window's maximum
+score is below `ANAMNESIS_EXTRACTION_GATE_THRESHOLD` (default `0.2`) is every
+member journaled as a `gate_skipped` cancellation and sealed as coverage
+without a provider call; one Episode above the threshold keeps the whole
+window. The gate defaults to `off`.
 
 ## Provider and ABI
 
