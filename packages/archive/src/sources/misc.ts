@@ -1,9 +1,10 @@
 import { asideSessionId, isRecord, messageText, optionalText } from "@anamnesis/backfill";
-import { readdir, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { revisionOf } from "../record.ts";
 import type { ArchiveRecord } from "../record.ts";
 import type { ParsedSession, SourceAdapter } from "./types.ts";
+import { isFileOrAbsent, readdirOrEmpty } from "./fs.ts";
 
 type Entry = ParsedSession["records"][number];
 type Context =
@@ -86,14 +87,14 @@ function opencodeRecord(records: Entry[], context: Extract<Context, { source: "o
 }
 
 async function* asideFiles(root: string): AsyncGenerator<string> {
-  const users = await readdir(join(root, "aside", "home", ".aside", "u"), { withFileTypes: true }).catch(() => []);
+  const users = await readdirOrEmpty(join(root, "aside", "home", ".aside", "u"));
   for (const user of users.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!user.isDirectory() || user.name.startsWith("._")) continue;
-    const sessions = await readdir(join(root, "aside", "home", ".aside", "u", user.name, "sessions"), { withFileTypes: true }).catch(() => []);
+    const sessions = await readdirOrEmpty(join(root, "aside", "home", ".aside", "u", user.name, "sessions"));
     for (const session of sessions.sort((a, b) => a.name.localeCompare(b.name))) {
       if (session.isDirectory() && !session.name.startsWith("._")) {
         const path = join(root, "aside", "home", ".aside", "u", user.name, "sessions", session.name, "messages.jsonl");
-        if (await stat(path).then((info) => info.isFile()).catch(() => false)) yield path;
+        if (await isFileOrAbsent(path)) yield path;
       }
     }
   }
@@ -105,14 +106,14 @@ export const miscAdapter: SourceAdapter = {
     const paths: string[] = [];
     for await (const path of asideFiles(root)) paths.push(path);
     const brain = join(root, "gemini-antigravity", "home", ".gemini", "antigravity-cli", "brain");
-    const conversations = await readdir(brain, { withFileTypes: true }).catch(() => []);
+    const conversations = await readdirOrEmpty(brain);
     for (const conversation of conversations) {
       if (!conversation.isDirectory() || conversation.name.startsWith("._")) continue;
       const path = join(brain, conversation.name, ".system_generated", "logs", "transcript.jsonl");
-      if (await stat(path).then((info) => info.isFile()).catch(() => false)) paths.push(path);
+      if (await isFileOrAbsent(path)) paths.push(path);
     }
     const opencode = join(root, "opencode", "home", ".local", "state", "opencode", "prompt-history.jsonl");
-    if (await stat(opencode).then((info) => info.isFile()).catch(() => false)) paths.push(opencode);
+    if (await isFileOrAbsent(opencode)) paths.push(opencode);
     for (const path of paths.sort((a, b) => a.localeCompare(b))) yield resolve(path);
   },
   async parse(path, bytes) {

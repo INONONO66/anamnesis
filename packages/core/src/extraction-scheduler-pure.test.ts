@@ -157,7 +157,7 @@ class Harness {
     let rows: Record<string, unknown>[];
     if (query.includes("state:'catching_up'")) rows = this.catchingUp.map(body => ({ body: JSON.stringify(body) }));
     else if (query.includes("ExtractionCoverage")) rows = PARTITIONS.map(partition => ({ partition, covered: this.coverage.get(`${params.generation}:${partition}`) ?? null }));
-    else if (query.includes("e.origin_session=$session")) rows = this.episodes.filter(e => e.session === params.session && e.seq < Number(params.before))
+    else if (query.includes("e.session_key=$session")) rows = this.episodes.filter(e => e.session === params.session && e.seq < Number(params.before))
       .sort((a, b) => b.seq - a.seq).slice(0, Number(params.limit)).map(e => ({ id: e.id }));
     else {
       const from = Number(params.from);

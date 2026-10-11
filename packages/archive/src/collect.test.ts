@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { copyFile, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, readdir, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -39,6 +39,54 @@ test("insertSession is idempotent and a second path only changes session_paths",
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("manifest preserves provider origin separately from adapter directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "archive-origin-"));
+  try {
+    const manifest = Manifest.open(root);
+    manifest.insertSession({ sha256, source: "agentlog", sessionId: "s", bytes: 3, path: "/fixture/one", collectedAt: occurred_at },
+      [{ ...fixture, origin: { ...fixture.origin, source: "codex" } }]);
+    expect(manifest.recordsFor("agentlog", "s")[0]?.origin.source).toBe("codex");
+    manifest.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("manifest rejects old layouts before an insert", async () => {
+  const root = await mkdtemp(join(tmpdir(), "archive-old-layout-"));
+  try {
+    const db = new Database(join(root, "manifest.sqlite"));
+    db.run("CREATE TABLE records (sha256 TEXT, seq INTEGER)");
+    db.close();
+    expect(() => Manifest.open(root)).toThrow("manifest layout outdated; collect into a fresh --archive dir");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("identical file bytes are collected once per adapter kind", async () => {
+  const root = await mkdtemp(join(tmpdir(), "archive-sources-"));
+  try {
+    const input = join(root, "one");
+    const archiveDir = join(root, "archive");
+    await Bun.write(input, "one");
+    for (const kind of ["first", "second"]) {
+      const adapter: SourceAdapter = {
+        kind,
+        async *files() { yield input; },
+        async parse() {
+          const { seq, file, ...record } = fixture;
+          return [{ sessionId: "s", records: [{ ...record, origin: { ...record.origin, source: `${kind}-provider` }, line: 1 }] }];
+        },
+      };
+      expect(await collect({ adapter, root, archiveDir })).toEqual({ files: 1, sessions: 1, records: 1, skipped: 0 });
+      const saved = JSON.parse(await readFile(join(archiveDir, "records", kind, "s.jsonl"), "utf8"));
+      expect(saved.origin.source).toBe(`${kind}-provider`);
+    }
+    const manifest = Manifest.open(archiveDir);
+    expect(manifest.countsBySource()).toEqual([
+      { source: "first", sessions: 1, records: 1 }, { source: "second", sessions: 1, records: 1 },
+    ]);
+    manifest.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("collect preserves JSONL and manifest across repeated paths without reparsing", async () => {
@@ -80,6 +128,32 @@ test("collect preserves JSONL and manifest across repeated paths without reparsi
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("collect restores a missing JSONL for a skipped file without reparsing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "archive-repair-"));
+  try {
+    const input = join(root, "one");
+    const archiveDir = join(root, "archive");
+    await Bun.write(input, "one");
+    let parsed = 0;
+    const adapter: SourceAdapter = {
+      kind: "fixture",
+      async *files() { yield input; },
+      async parse() {
+        parsed++;
+        const { seq, file, ...record } = fixture;
+        return [{ sessionId: "s", records: [{ ...record, line: 1 }] }];
+      },
+    };
+    await collect({ adapter, root, archiveDir });
+    const destination = join(archiveDir, "records", "fixture", "s.jsonl");
+    const expected = await readFile(destination);
+    await unlink(destination);
+    expect(await collect({ adapter, root, archiveDir })).toEqual({ files: 1, sessions: 0, records: 0, skipped: 1 });
+    expect(await readFile(destination)).toEqual(expected);
+    expect(parsed).toBe(1);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("collect rewrites one session JSONL from every distinct source file in timestamp order", async () => {

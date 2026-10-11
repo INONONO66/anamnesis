@@ -618,10 +618,12 @@ lost-lease budget and re-runs it.
 
 ### 5.4 Windowed extraction and the Jev gate (D56)
 
-Queued claim work is grouped by `origin_session` and split in ingest order
-into near-equal windows, with `ceil(n / 8)` windows for a group of `n`
-Episodes. A window reads at most three preceding Episodes from the same
-session as context; context is read-only and is never a claim source. One
+Queued claim work is grouped by `session_key` (`sha256(origin_source,
+origin_session)`, so two adapters reusing one session string never share a
+group) and split in ingest order into near-equal windows, with `ceil(n / 8)`
+windows for a group of `n` Episodes. A window reads at most three preceding
+Episodes with the same `session_key` as context; context is read-only and is
+never a claim source. One
 `claim_window` call produces per-Episode claims, while each Episode retains
 its own custody entry, extraction attempt, pipeline and `DERIVED_FROM` edges.
 The judge and relation stages remain per Episode.

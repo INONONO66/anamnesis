@@ -2,11 +2,14 @@
 
 This is the production extraction pipeline. The daemon's extraction scheduler
 (`packages/core/src/extraction-scheduler.ts`) runs it continuously: it scans
-committed Episodes above the generation's covered `ingest_seq`, drives each
-one through the configured chat provider, seals the terminal outcome as
-coverage, and cuts a caught-up generation over. Today one provider call
-handles one Episode. Each pipeline is a claim task followed by its unique
-child judge task; retained claims materialize generation-scoped Facts,
+committed Episodes above the generation's covered `ingest_seq`, groups them
+by `session_key` (origin source plus session) into windows of up to eight
+consecutive Episodes with up to three preceding same-session context
+Episodes, drives each window through the configured chat provider as one
+`claim_window` call, seals every target's terminal outcome as coverage, and
+cuts a caught-up generation over. Each target still has its own pipeline: a
+claim task followed by its unique child judge task; retained claims
+materialize generation-scoped Facts,
 Entities, evidence links and conducting arcs, and the relation judge (D53)
 gates every Fact to Fact relation. Pipeline state lives in
 `extraction-state.json` with sealed-entry pruning (D55).
@@ -23,14 +26,16 @@ The `extraction.audit.create`, `extraction.audit.run` and
 the scheduler drives. They keep their names; they are not a separate
 verification-only path.
 
-## Direction (D56)
+## Windowing and the pre-gate (D56)
 
-The next increment batches a same-session window of Episodes per provider
-call (several consecutive Episodes plus a few context Episodes), with every
-Episode still attributed individually through `DERIVED_FROM`, and places a
-cheap pre-gate in front of the model call to score Episodes before they are
-sent. None of that is shipped: the running scheduler calls the provider once
-per Episode and no pre-gate exists in code.
+The scheduler batches a same-session window of Episodes per provider call
+(several consecutive Episodes plus a few preceding context Episodes); every
+Episode is still attributed individually through `DERIVED_FROM`, and an
+oversized window retries as single targets. `ANAMNESIS_EXTRACTION_GATE=jev`
+places the Jev pre-gate (`packages/core/src/jev-gate.ts`) in front of the
+model call: Episodes scoring below `ANAMNESIS_EXTRACTION_GATE_THRESHOLD`
+(default `0.2`) are journaled as `gate_skipped` cancellations and sealed as
+coverage without a provider call. The gate defaults to `off`.
 
 ## Provider and ABI
 

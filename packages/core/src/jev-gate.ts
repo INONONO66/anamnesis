@@ -6,6 +6,8 @@ export const JEV_MODEL = "typesafe-ai/jev" as const;
 const DEFAULT_BASE_URL = "https://ai-gateway.vercel.sh/v1";
 const MAX_EPISODE_BYTES = 2048;
 const MAX_BODY_BYTES = 64 * 1024;
+/** A gateway reply never needs more than this; a larger body is a mismatch, not something to buffer. */
+const MAX_RESPONSE_BYTES = 64 * 1024;
 const SYSTEM_PROMPT = "Score each numbered episode from 0 to 1 for how much durable, extractable personal/factual memory it contains (0 = chatter/boilerplate, 1 = rich facts). Respond with ONLY a JSON array of numbers, one per episode, in order.";
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -33,6 +35,22 @@ function truncated(text: string): string {
 
 function gateError(reason: "gate_unavailable" | "gate_rejected" | "gate_mismatch"): ExtractionGateError {
   return new ExtractionGateError(reason);
+}
+
+/** Reads at most MAX_RESPONSE_BYTES; the caller's deadline still bounds a body that never ends. */
+async function readBounded(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return response.text();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) { await reader.cancel(); throw gateError("gate_mismatch"); }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function parseScoresPayload(payload: unknown, count: number): number[] {
@@ -80,27 +98,34 @@ export class JevGate implements ExtractionGate {
     return this.toJSON();
   }
 
+  /** One deadline covers the request, the response headers and the whole body: a reply that
+   * sends headers and then stalls must fail open like a reply that never arrives. */
   private async requestScores(body: string, count: number): Promise<number[]> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let response: Response;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { controller.abort(); reject(gateError("gate_unavailable")); }, this.timeoutMs);
+    });
+    deadline.catch(() => undefined);
     try {
-      const timeout = new Promise<Response>((_, reject) => {
-        timer = setTimeout(() => { controller.abort(); reject(gateError("gate_unavailable")); }, this.timeoutMs);
-      });
-      response = await Promise.race([this.request(`${this.baseUrl}/chat/completions`, {
-        method: "POST", signal: controller.signal,
-        headers: { authorization: `Bearer ${this.bearer}`, "content-type": "application/json" }, body,
-      }), timeout]);
-    } catch { throw gateError("gate_unavailable"); }
-    finally { if (timer) clearTimeout(timer); }
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw gateError(response.status === 429 || response.status >= 500 ? "gate_unavailable" : "gate_rejected");
-    }
-    let payload: unknown;
-    try { payload = JSON.parse(await response.text()); } catch { throw gateError("gate_mismatch"); }
-    return parseScoresPayload(payload, count);
+      let response: Response;
+      try {
+        response = await Promise.race([this.request(`${this.baseUrl}/chat/completions`, {
+          method: "POST", signal: controller.signal,
+          headers: { authorization: `Bearer ${this.bearer}`, "content-type": "application/json" }, body,
+        }), deadline]);
+      } catch { throw gateError("gate_unavailable"); }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw gateError(response.status === 429 || response.status >= 500 ? "gate_unavailable" : "gate_rejected");
+      }
+      let text: string;
+      try { text = await Promise.race([readBounded(response), deadline]); }
+      catch (error) { throw error instanceof ExtractionGateError ? error : gateError("gate_unavailable"); }
+      let payload: unknown;
+      try { payload = JSON.parse(text); } catch { throw gateError("gate_mismatch"); }
+      return parseScoresPayload(payload, count);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   async score(episodes: readonly { id: string; text: string }[]): Promise<number[]> {

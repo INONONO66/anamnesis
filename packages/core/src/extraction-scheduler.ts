@@ -155,7 +155,7 @@ export class ExtractionScheduler {
     const generation = await this.writableGeneration();
     const rows = await this.read<ScanRow>(`MATCH (m:Meta {key:'meta'})
       OPTIONAL MATCH (e:Element:Episode) WHERE e.ingest_seq > $from AND e.ingest_seq <= m.ingest_seq
-      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,e.origin_session AS session ORDER BY seq LIMIT ${COVERAGE_STEP}`,
+      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,e.session_key AS session ORDER BY seq LIMIT ${COVERAGE_STEP}`,
       { from: generation.covered_ingest_seq, generation: generation.id });
     this.live = rows[0]?.live ?? generation.covered_ingest_seq;
     const { prefix, open } = this.scanWindow(generation, rows);
@@ -271,11 +271,12 @@ export class ExtractionScheduler {
     return settled;
   }
 
+  /** Same-session means the stored (source, session) key: two sources that reuse a session string never share a window or context. */
   private async contextIds(rows: WindowRow[]): Promise<string[]> {
     const first = rows[0];
     if (!first || first.session === null || this.contextMax === 0) return [];
     const preceding = await this.read<{ id: string }>(`MATCH (e:Element:Episode)
-      WHERE e.origin_session=$session AND e.ingest_seq < $before AND NOT e.id IN $targets
+      WHERE e.session_key=$session AND e.ingest_seq < $before AND NOT e.id IN $targets
       RETURN e.id AS id ORDER BY e.ingest_seq DESC LIMIT toInteger($limit)`,
     { session: first.session, before: first.seq, targets: rows.map(row => row.id), limit: this.contextMax });
     return preceding.map(row => row.id).reverse();
