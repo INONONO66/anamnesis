@@ -11,7 +11,7 @@ import { elementDigest, verifyLineageRetry, verifyEpisodeLineage } from "@anamne
 import { EchoLineage, parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
-import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
 import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
@@ -25,7 +25,7 @@ import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { fencedAdapter, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { logEvent } from "./log.ts";
 
-export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: false, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
+export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, writer_fence: "database" };
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -667,6 +667,10 @@ export class Runtime {
   async recall(params: RpcRecallParams, context: InstallationContext) {
     await this.requireStorage();
     return this.engine.recallHybrid(params, context);
+  }
+  async commit(params: RpcCommitParams, context: InstallationContext) {
+    await this.requireStorage();
+    return this.engine.commitReceipt(params, context);
   }
   async recordRecallTransport(input: RecallTransportInput, context: InstallationContext) {
     await this.requireStorage();

@@ -1,4 +1,4 @@
-import { RecallLineageSelection, RpcRecallResult } from "@anamnesis/protocol";
+import { RecallLineageSelection, RpcCommitParams, RpcRecallResult } from "@anamnesis/protocol";
 import { z } from "zod";
 import { ADOPTION_NUMERIC_VERSION } from "../dynamics/adoption-numeric.ts";
 
@@ -49,16 +49,9 @@ export const RecallTransport = RecallTransportInput.extend({
   created_at: receiptTime, principal: z.literal("installation"),
   commit_mode: z.enum(["auto", "receipt"]), boundary: z.literal("node-write-callback-v1"),
 });
-/** Feedback contains no derived state; attribution is resolved from the receipt. In-process only until the commit RPC ships. */
-export const CommitReceiptInput = z.strictObject({
-  operation_id: z.uuidv7(), recall_id: z.uuidv7(),
-  adopted: z.array(z.uuidv7()).max(64).optional(),
-  reward: z.number().finite().min(-1).max(1).optional(),
-}).superRefine((value, context) => {
-  if (value.adopted === undefined && value.reward === undefined) context.addIssue({ code: "custom", message: "adopted or reward is required" });
-  if (value.adopted && new Set(value.adopted).size !== value.adopted.length) context.addIssue({ code: "custom", message: "adopted IDs must be distinct" });
-});
-export type CommitReceiptInput = z.infer<typeof CommitReceiptInput>;
+/** Feedback contains no derived state; attribution is resolved from the receipt. The wire schema is the contract. */
+export const CommitReceiptInput = RpcCommitParams;
+export type CommitReceiptInput = RpcCommitParams;
 export interface CommitReceiptResult {
   operation_id: string; recall_id: string; adopted: string[]; reward: number | null; applied: boolean;
 }
