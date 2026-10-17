@@ -105,7 +105,7 @@ export async function ingestSource(source: string, checkpointPath: string, clien
   });
 }
 
-async function uploadPayload(client: RpcClient, record: SourceRecord): Promise<void> {
+export async function uploadPayload(client: RpcClient, record: SourceRecord): Promise<void> {
   const payload = record.payload!;
   const bytes = Buffer.from(payload.bytes_b64, "base64");
   const hash = sha(bytes);
