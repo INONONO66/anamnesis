@@ -100,6 +100,19 @@ test("after the invalidation takes effect the replacing Fact carries the superse
   expect(receipt?.serving?.candidates.map(candidate => candidate.id)).not.toContain(facts.a);
 }, 120000);
 
+test("a receipt whose primary supersedes a Fact commits through that Fact's source Episodes, under the current policy", async () => {
+  const result = await engine.recallHybrid({ query, window: 0, T: Date.parse("2026-09-03T00:00:00Z") }, context);
+  const replacing = result.results.find(item => item.id === facts.b);
+  assert(replacing?.kind === "Fact" && replacing.provenance.supersedes.map(prior => prior.id).join() === facts.a, JSON.stringify(result.results));
+  const commit = () => engine.commitReceipt({ operation_id: uuidv7(), recall_id: result.recall_id, adopted: [facts.b] }, context);
+
+  const policy_id = uuidv7();
+  await engine.setPolicy({ policy_id, selector: { episode_id: sources.a }, scope: "content" }, context);
+  try { await expect(commit()).rejects.toMatchObject({ code: "policy_denied" }); }
+  finally { await engine.revokePolicy({ policy_id }, context); }
+  expect(await commit()).toMatchObject({ adopted: [facts.b], applied: true });
+}, 120000);
+
 test("before the invalidation takes effect only the earlier Fact is served", async () => {
   const result = await engine.recallHybrid({ query, window: 0, T: Date.parse("2026-09-01T12:00:00Z") }, context);
 
