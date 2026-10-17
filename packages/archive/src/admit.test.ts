@@ -46,7 +46,8 @@ function stub(created: boolean, failAfter = Infinity): Rememberer & { calls: Rpc
   };
 }
 
-const run = (archiveDir: string, client: Rememberer, stopped = () => false) => admit({ archiveDir, source: "omo", client, stopped });
+const run = (archiveDir: string, client: Rememberer, stopped = () => false, since?: string) =>
+  admit({ archiveDir, source: "omo", client, stopped, ...(since === undefined ? {} : { since }) });
 const cursor = async (root: string): Promise<Record<string, unknown>> => JSON.parse(await readFile(join(root, "admit", "omo.cursor.json"), "utf8"));
 const ORDER = ["s-a-r0", "s-a-r1", "s-a-r2", "s-b-r0", "s-b-r1"];
 
@@ -54,7 +55,7 @@ test("admit sends one remember per record in session then record order", async (
   const root = await archive();
   try {
     const client = stub(true);
-    expect(await run(root, client)).toEqual({ source: "omo", records: 5, created: 5, duplicates: 0, failed: 0, resumed_from: null });
+    expect(await run(root, client)).toEqual({ source: "omo", records: 5, created: 5, duplicates: 0, failed: 0, skipped: 0, since: null, resumed_from: null });
     expect(client.calls.map((params) => params.episode.origin.record)).toEqual(ORDER);
     const first = client.calls[0]!;
     expect(first.source_revision).toBe(record("s-a", 0).revision);
@@ -71,7 +72,7 @@ test("a rerun after a complete cursor starts over and reports the daemon's dupli
   try {
     await run(root, stub(true));
     const client = stub(false);
-    expect(await run(root, client)).toEqual({ source: "omo", records: 5, created: 0, duplicates: 5, failed: 0, resumed_from: null });
+    expect(await run(root, client)).toEqual({ source: "omo", records: 5, created: 0, duplicates: 5, failed: 0, skipped: 0, since: null, resumed_from: null });
     expect(client.calls.map((params) => params.episode.origin.record)).toEqual(ORDER);
     expect(await cursor(root)).toMatchObject({ status: "complete", created: 0, duplicates: 5 });
   } finally {
@@ -85,7 +86,7 @@ test("a run that dies after the k-th remember resumes at k+1", async () => {
     await expect(run(root, stub(true, 2))).rejects.toThrow("connection reset");
     expect(await cursor(root)).toMatchObject({ status: "in_progress", last: { session_id: "s-a", index: 1 }, created: 2, duplicates: 0 });
     const client = stub(true);
-    expect(await run(root, client)).toEqual({ source: "omo", records: 3, created: 3, duplicates: 0, failed: 0, resumed_from: { session_id: "s-a", index: 1 } });
+    expect(await run(root, client)).toEqual({ source: "omo", records: 3, created: 3, duplicates: 0, failed: 0, skipped: 0, since: null, resumed_from: { session_id: "s-a", index: 1 } });
     expect(client.calls.map((params) => params.episode.origin.record)).toEqual(ORDER.slice(2));
     expect(await cursor(root)).toMatchObject({ status: "complete", last: { session_id: "s-b", index: 1 }, created: 5 });
   } finally {
@@ -113,7 +114,29 @@ test("a non-retryable daemon refusal counts as failed and the run continues", as
         ? Promise.reject(Object.assign(new Error("conflict"), { code: "revision_conflict", retryable: false }))
         : client.remember(params),
     };
-    expect(await run(root, refusing)).toEqual({ source: "omo", records: 5, created: 4, duplicates: 0, failed: 1, resumed_from: null });
+    expect(await run(root, refusing)).toEqual({ source: "omo", records: 5, created: 4, duplicates: 0, failed: 1, skipped: 0, since: null, resumed_from: null });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("--since skips earlier records without moving the cursor and re-applies the bound on resume", async () => {
+  const root = await archive();
+  try {
+    // s-a-r1 and s-b-r1 occurred exactly at the bound; s-a-r0 and s-b-r0 one second before it.
+    const since = record("s-a", 1).occurred_at;
+    const full = stub(true);
+    expect(await run(root, full, () => false, since)).toEqual({ source: "omo", records: 3, created: 3, duplicates: 0, failed: 0, skipped: 2, since, resumed_from: null });
+    expect(full.calls.map((params) => params.episode.origin.record)).toEqual(["s-a-r1", "s-a-r2", "s-b-r1"]);
+
+    const first = stub(true);
+    expect(await run(root, first, () => first.calls.length === 1, since)).toMatchObject({ records: 1, created: 1, skipped: 1 });
+    expect(await cursor(root)).toMatchObject({ status: "in_progress", last: { session_id: "s-a", index: 1 }, created: 1 });
+    const second = stub(true);
+    expect(await run(root, second, () => false, since)).toEqual({ source: "omo", records: 2, created: 2, duplicates: 0, failed: 0, skipped: 1, since, resumed_from: { session_id: "s-a", index: 1 } });
+    const delivered = [...first.calls, ...second.calls].map((params) => params.episode.origin.record);
+    expect(delivered).toEqual(["s-a-r1", "s-a-r2", "s-b-r1"]);
+    expect(await cursor(root)).toMatchObject({ status: "complete", last: { session_id: "s-b", index: 1 }, created: 3 });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

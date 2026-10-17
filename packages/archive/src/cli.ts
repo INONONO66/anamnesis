@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { z } from "zod";
 import { RpcClient } from "../../../app/anamnesis/client.ts";
 import { uploadPayload } from "../../../app/anamnesis/source.ts";
 import { admit, type Rememberer } from "./admit.ts";
@@ -8,7 +9,7 @@ import { adapters } from "./sources/index.ts";
 
 const USAGE = [
   "usage: bun packages/archive/src/cli.ts collect <source> <root> --archive <dir>",
-  "       bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>]",
+  "       bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>] [--since <iso-datetime>]",
 ].join("\n");
 
 function usage(): never {
@@ -45,16 +46,20 @@ async function runCollect(argv: string[]): Promise<void> {
 }
 
 async function runAdmit(argv: string[]): Promise<void> {
-  let values: { archive?: string; socket?: string; token?: string; source?: string };
+  let values: { archive?: string; socket?: string; token?: string; source?: string; since?: string };
   try {
     ({ values } = parseArgs({ args: argv, strict: true, allowPositionals: false, options: {
-      archive: { type: "string" }, socket: { type: "string" }, token: { type: "string" }, source: { type: "string" },
+      archive: { type: "string" }, socket: { type: "string" }, token: { type: "string" }, source: { type: "string" }, since: { type: "string" },
     } }));
   } catch {
     usage();
   }
-  const { archive, socket, token, source } = values;
+  const { archive, socket, token, source, since } = values;
   if (archive === undefined || socket === undefined || token === undefined) usage();
+  if (since !== undefined && !z.iso.datetime().safeParse(since).success) {
+    console.error(`invalid --since: ${since}`);
+    process.exit(2);
+  }
   const present = sourcesIn(archive);
   if (source !== undefined && !present.includes(source)) {
     console.error(`unknown source: ${source}; archived kinds: ${present.join(", ")}`);
@@ -72,7 +77,7 @@ async function runAdmit(argv: string[]): Promise<void> {
       },
     };
     for (const kind of source === undefined ? present : [source]) {
-      const report = await admit({ archiveDir: archive, source: kind, client: rememberer, stopped: () => signal !== undefined });
+      const report = await admit({ archiveDir: archive, source: kind, client: rememberer, stopped: () => signal !== undefined, ...(since === undefined ? {} : { since }) });
       console.log(JSON.stringify(report));
       if (signal !== undefined) break;
     }

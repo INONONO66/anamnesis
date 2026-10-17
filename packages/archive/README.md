@@ -32,10 +32,12 @@ bun packages/archive/src/cli.ts collect codex  ~/.codex/sessions     --archive ~
 ### admit
 
 ```
-bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>]
+bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>] [--since <iso-datetime>]
 ```
 
 Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC on the UDS socket. It uses the daemon's own socket client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
+
+With `--since <iso-datetime>` a record whose `occurred_at` is earlier than the bound is skipped: it is not sent, it is counted as `skipped` in the report (which also echoes the bound as `since`), and it never moves the cursor. A record exactly at the bound is admitted. Because the cursor is positional, a resumed run re-applies the bound and skips the same earlier records again.
 
 The daemon decides what counts as new. Each `remember` answer is tallied as one of:
 
@@ -46,7 +48,7 @@ The daemon decides what counts as new. Each `remember` answer is tallied as one 
 Stdout carries one JSON object per admitted source (one line when `--source` is given):
 
 ```json
-{"source":"omo","records":1234,"created":1200,"duplicates":34,"failed":0,"resumed_from":null}
+{"source":"omo","records":1234,"created":1200,"duplicates":34,"failed":0,"skipped":0,"since":null,"resumed_from":null}
 ```
 
 `resumed_from` is the cursor the run continued after, or `null` for a run that started from the first record.
