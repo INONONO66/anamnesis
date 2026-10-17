@@ -72,6 +72,13 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
 - Policy RPCs (D43), budget (D44), the Hit ledger with receipts (D45),
   conflict bundles (D46), `backup` / `restore`, the authority snapshot and
   the hit cache.
+- `ops projection write`: read-only markdown per Entity of valid Facts
+  (#268). The `projection {T?}` RPC snapshots the writable generation at T
+  with policy denies applied (`ProjectionStore.snapshotTx`,
+  `capabilities.projection: true`), and `anamnesis-ops projection write
+  <dir>` writes one `<slug>-<id tail 12 hex>.md` per Entity with a T-pinned footer, so
+  an unchanged graph yields byte-identical files. The daemon never reads the
+  directory back (01 §4).
 
 Not in code: Entity and relationship vectors (no `vec_rel_*` index, no
 `embedding_m_<modelhex>` property), the Fact session channel, the Entity
@@ -111,6 +118,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 | G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
 | G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason when the provider is absent or the embed fails; `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
 | G9 | done (#264) | archive admit over the daemon socket with per-source cursor resume; `admit --archive --socket --token [--source]` sends each archive record as one Episode through `remember`, tallies created / duplicate / failed, and keeps `<archive>/admit/<source>.cursor.json` (atomic rewrite after every ack, `in_progress` resumes after `last`, `complete` or absent means a full run that the daemon dedupes) | packages/archive README, D56 |
+| G10 | done (#268) | `ops projection write`: read-only markdown per Entity of valid Facts; `projection` RPC over the writable generation at T, `FACT_VALID` plus content deny policies, deterministic file bytes, stale `*-<12 hex>.md` files removed | 01 §4, 02 §2 |
 
 ## v0.1 — originals, forgetting, search
 
@@ -136,7 +144,7 @@ derived layer, no PPR.
 | policy | `policy.set` / `policy.revoke` RPCs, `anamnesis.memory-policy/1` Episodes, active-policy cache rebuild, policy-revision barrier, `content` scope over raw text, control Episodes excluded from search, structured-selector limit reported | 02, D43 |
 | budget | `budget {unit, limit, tokenizer_id?}`; exact byte and scalar counts; pinned tokenizer or reject; greedy whole-bundle packing over deterministic `context_text`; `used_budget`; hard response byte cap retained | 05, D44 |
 | recall | vector (nodes) + BM25 + session channels with caps, RRF, score = rel·max(m,.02)^γ·(1+β·U), policy hard filter, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR, identity, relationship vectors, conflict bundles) |
-| clients | ops CLI (`up/down/status/verify/backup/restore`), RPC contract export (`schemas/`); remember/recall harnesses are external (D39) | 08 |
+| clients | ops CLI (`up/down/status/verify/backup/restore/projection write`), RPC contract export (`schemas/`); remember/recall harnesses are external (D39) | 08 |
 | protocol | zod: Episode-only time requirement, `source_revision`, `previous_revision_key`, `revision_key`, `correction` schema, Hit, RPC methods | 08 |
 | CI | forgetting fixtures, utility attribution fixtures, budget exactness fixtures, policy suppression fixtures, receipt exact-once fixtures, RRF invariance, ordering conventions, contract schema tests | 04 §10, 07 §6, 08 |
 
@@ -258,7 +266,9 @@ envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
   is in [research/retrieval-fusion](research/retrieval-fusion.md) (D48).
 - English-normalized canonical Facts. `fact_language_policy` is a per-
   generation configuration, and generated English projections are neither
-  persisted nor indexed under this contract (D48).
+  persisted nor indexed under this contract (D48). This is about LLM
+  renderings of claim text; the markdown projection of 01 §4 is a different
+  thing, a file view of the graph that the daemon never reads back.
 - Corroboration by repetition. Occurrence count, root count and echo depth
   never move confidence, mass, utility, ranking or a conflict winner (D49).
 - Unattended automatic invalidation. Adjudication ships in shadow mode, and

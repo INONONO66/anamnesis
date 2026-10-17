@@ -7,7 +7,7 @@ import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, Complet
 import { ExtractionClaimContext, ExtractionPipeline, ExtractionDisposition, FactRelationContext } from "@anamnesis/protocol";
 import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, SemanticResolution, SemanticReviewOutput } from "@anamnesis/protocol";
 import { z } from "zod";
-import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult } from "@anamnesis/protocol";
+import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcProjectionParams, type RpcProjectionResult } from "@anamnesis/protocol";
 import { embeddingProfileId } from "./embedding.ts";
 import { type ConductingArcProbe, type GraphEnvelope, type ConductingArcVerification } from "./store/conducting.ts";
 import { SCHEMA_STATEMENTS } from "./store/schema.ts";
@@ -23,6 +23,7 @@ import { EmbeddingStore } from "./store/embedding-store.ts";
 import { ExtractionStore } from "./store/extraction-store.ts";
 import { MaterializationStore } from "./store/materialization-store.ts";
 import { RecallStore } from "./store/recall-store.ts";
+import { ProjectionStore } from "./store/projection-store.ts";
 import { IntegrityStore } from "./store/integrity-store.ts";
 import { ActivationStore } from "./store/activation-store.ts";
 import type { AuthoritySnapshot } from "./store/conducting-store.ts";
@@ -47,6 +48,7 @@ export class Store {
   private readonly extraction: ExtractionStore;
   private readonly materialization: MaterializationStore;
   private readonly recalls: RecallStore;
+  private readonly projections: ProjectionStore;
   private readonly integrity: IntegrityStore;
   private readonly activation: ActivationStore;
 
@@ -59,6 +61,7 @@ export class Store {
     this.extraction = new ExtractionStore(this.core, this.conducting);
     this.materialization = new MaterializationStore(this.core, this.receipts, this.extraction, this.elements);
     this.recalls = new RecallStore(this.core, this.extraction, this.receipts);
+    this.projections = new ProjectionStore(this.core, this.extraction);
     this.integrity = new IntegrityStore(this.core, this.receipts, this.elements);
     this.activation = new ActivationStore(this.core, this.materialization, this.extraction, this.conducting);
   }
@@ -290,6 +293,9 @@ export class Store {
 
   recall(input: z.input<typeof RpcRecallParams>, context: InstallationContext): Promise<RpcRecallResult> {
     return this.recalls.recall(input, context);
+  }
+  projection(input: RpcProjectionParams, context: InstallationContext): Promise<RpcProjectionResult> {
+    return this.projections.snapshot(input, context);
   }
 
   linksOf(id: string, role?: LinkRole): Promise<MemoryLink[]> {

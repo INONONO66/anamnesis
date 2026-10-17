@@ -122,9 +122,14 @@ export class StoreCore {
   /** Meta's write lock is held through validation, feedback/cache writes and
    * commit. Policy commands use the same fence, so policy cannot race effects. */
   async receiptLockTx(tx: ManagedTransaction): Promise<PolicyState> {
+    await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.ingest_seq=m.ingest_seq`);
+    return this.policyStateTx(tx);
+  }
+  /** The folded policy history without the Meta write lock; read transactions (projection) use it directly. */
+  async policyStateTx(tx: ManagedTransaction): Promise<PolicyState> {
     const rows = await tx.run<{ structure: number | null; policy: number | null; format: string | null; legacy: number }>(
-      `MATCH (m:Meta {key:'meta'}) SET m.ingest_seq=m.ingest_seq
-       WITH m OPTIONAL MATCH (p:PolicyAuthority {key:'installation'})
+      `MATCH (m:Meta {key:'meta'})
+       OPTIONAL MATCH (p:PolicyAuthority {key:'installation'})
        CALL () { MATCH (e:Element {schema:'anamnesis.memory-policy/1'}) RETURN count(e) AS legacy }
        RETURN m.structure_revision AS structure,m.policy_revision AS policy,p.format AS format,legacy`);
     const row = rows.records[0];

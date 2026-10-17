@@ -25,7 +25,7 @@ export const RPC_LIMITS = {
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
-  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue",
+  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
 ] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
@@ -172,6 +172,17 @@ export const RpcRecallResult = z.strictObject({
   }),
 });
 export type RpcRecallResult = z.infer<typeof RpcRecallResult>;
+/** Read-only markdown projection: an omitted T is evaluated at the server clock and echoed as null. */
+export const RpcProjectionParams = z.strictObject({ T: z.iso.datetime({ offset: true }).optional() });
+export type RpcProjectionParams = z.infer<typeof RpcProjectionParams>;
+export const RpcProjectionResult = z.strictObject({
+  generated_at: z.iso.datetime(), T: z.iso.datetime().nullable(),
+  entities: z.array(z.strictObject({
+    id: z.uuidv7(), name: boundedString(RPC_LIMITS.frame_bytes), kind: boundedString(256).optional(),
+    facts: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint.nullable(), sources: z.array(z.uuidv7()) })),
+  })),
+});
+export type RpcProjectionResult = z.infer<typeof RpcProjectionResult>;
 
 const ConductingArcRow = z.strictObject({
   source_id: z.uuidv7(), link_id: z.uuidv7(), peer_id: z.uuidv7(),
@@ -261,6 +272,7 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("extraction.audit.status", ExtractionPipelineStatus),
   request("recall", RpcRecallParams),
   request("commit", RpcCommitParams),
+  request("projection", RpcProjectionParams),
   request("graph.envelope", z.strictObject({ seed_ids: z.array(z.uuidv7()).min(1).max(128), T: counter.optional() })),
   request("embedding.recover", RpcEmbeddingRecoverParams),
   request("embedding.status", RpcEmbeddingStatusParams),
@@ -356,6 +368,7 @@ export const RpcCapabilities = z.strictObject({
   policy: z.boolean(),
   extraction: z.boolean(),
   embeddings: z.boolean(),
+  projection: z.boolean(),
   writer_fence: z.enum(["database", "local_only"]),
 });
 export type RpcCapabilities = z.infer<typeof RpcCapabilities>;
@@ -450,6 +463,7 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
     overflow: z.strictObject({ nodes: counter, arcs: counter, saturated_sources: counter.max(128) }) })),
   success("recall", RpcRecallResult),
   success("commit", RpcCommitResult),
+  success("projection", RpcProjectionResult),
   success("extraction.audit.create", ModelTask),
   success("extraction.audit.run", ExtractionPipeline),
   success("extraction.audit.status", ExtractionPipeline),

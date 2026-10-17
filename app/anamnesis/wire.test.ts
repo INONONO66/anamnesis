@@ -112,6 +112,7 @@ describe("decodeRequest", () => {
       [{ jsonrpc: "2.0", id: 8, method: "commit", params: {} }, "invalid_params", 8],
       [{ jsonrpc: "2.0", id: "req-1", method: "hello", params: { version: 2 } }, "unsupported_version", "req-1"],
       [{ jsonrpc: "2.0", id: 9, method: "status", params: { extra: true } }, "invalid_params", 9],
+      [{ jsonrpc: "2.0", id: 10, method: "projection", params: { T: "yesterday" } }, "invalid_params", 10],
       [{ jsonrpc: "2.0", method: "invented.method", params: {} }, "unsupported_method", null],
       [{ jsonrpc: "2.0", id: "x".repeat(128), method: "invented.method", params: {} }, "unsupported_method", "x".repeat(128)],
       [{ jsonrpc: "2.0", id: "x".repeat(129), method: "invented.method", params: {} }, "unsupported_method", null],
@@ -131,6 +132,9 @@ describe("decodeRequest", () => {
       expect(response.id).toBe(id);
       expect(encode(response).length).toBeLessThanOrEqual(RPC_BYTE_LIMITS.error); // fits the error-output allowance even at the longest id
     }
+  });
+  test("projection is a registered method taking an optional T", () => {
+    for (const params of [{}, { T: "2026-09-01T00:00:00Z" }]) expect(decodeRequest(frame({ jsonrpc: "2.0", id: 1, method: "projection", params }))).toMatchObject({ method: "projection", params });
   });
   test("envelope and encoding faults carry no id", () => {
     for (const bytes of [Buffer.from([0xff, 0xfe]), frame({ jsonrpc: "2.0", id: 1 }), frame("text")]) {

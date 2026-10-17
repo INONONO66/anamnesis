@@ -177,6 +177,7 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `object.commit {upload_id}` | objects/ | Verify size/hash, fsync and atomically publish the object |
 | `remember {episode, payload_hash?}` | yes | Ingest one Episode referencing an already committed object. Idempotent |
 | `recall {query, session?, T?, limit?, budget?}` | dispatcher receipt | Read-only semantic handler; dispatcher durably appends control impression before publication (docs/05) |
+| `projection {T?}` | — | Read-only snapshot of every Entity of the writable generation with at least one VALID Fact at T (`FACT_VALID`, content deny policies applied); Facts by `time_utc` DESC then id, Entities by name then id. Consumed by `anamnesis-ops projection write <dir>` (docs/01 §4); `capabilities.projection:true` advertises it |
 | `commit {operation_id, recall_id, adopted?, reward?}` | Hit | Receipt-mode adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`), dispatched to `Runtime.commit` → `Engine.commitReceipt` (docs/04 §6). Idempotent on `operation_id`: an identical replay returns the stored result with `applied:false`, a different body rejects `idempotency_conflict` |
 | `policy.set {policy_id, selector, scope}` | policy Episode/cache | Explicit authenticated deny command; idempotent by policy ID and canonical body |
 | `policy.revoke {policy_id}` | policy Episode/cache | Explicit authenticated revocation of that immutable deny |

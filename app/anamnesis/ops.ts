@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { RpcClient } from "./client.ts";
@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { applyAuthorityEnvironment, offlineBackup, offlineRestore } from "./offline-ops.ts";
 
 const ingestCommands = ["ingest", "ingest-agentlog", "ingest-slack", "ingest-notion", "ingest-claude-raw", "ingest-codex-raw", "ingest-gjc-raw", "ingest-omo-raw", "ingest-misc-raw"];
-const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|embed-requeue [--limit N]|recall <query>|foreground|managed|status|verify|ingest <snapshot.jsonl> <checkpoint.json>";
+const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|embed-requeue [--limit N]|recall <query>|projection write <dir>|foreground|managed|status|verify|ingest <snapshot.jsonl> <checkpoint.json>";
 const uuidv7 = () => { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; };
 const fail = (code: string, exit = 1): never => { console.log(JSON.stringify({ error: code })); process.exit(exit); };
 
@@ -118,6 +118,22 @@ async function verify({ root, socket }: Context): Promise<void> {
     const ok = Object.values(checks).every(Boolean); console.log(JSON.stringify({ ok, scope: remote ? "remote runtime-admission-health (filesystem checks skipped over TCP); not a full database integrity audit" : "runtime-admission-health; not a full database integrity audit", checks, status })); if (!ok) process.exitCode = 1;
   });
 }
+/** One markdown file per projected Entity, suffixed with the UUIDv7 random tail (the leading hex is a timestamp shared by ids minted in the same minute); the trailer carries the request T (none: latest), never the wall clock, so an unchanged graph rewrites identical bytes. */
+async function projection({ root, extra }: Context): Promise<void> {
+  const dir = extra[1]!;
+  const snapshot = await withClient(root, client => client.request("projection", {}));
+  await mkdir(dir, { recursive: true });
+  const names = new Set<string>();
+  for (const entity of snapshot.entities) {
+    const name = `${entity.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}-${entity.id.slice(-12)}.md`;
+    names.add(name);
+    await writeFile(join(dir, name), `# ${entity.name}\n\n${entity.facts.map(fact => `- ${fact.content} (${fact.time?.value ?? "undated"}) [${fact.id}]\n`).join("")}\n<!-- anamnesis projection; generated from graph at T=${snapshot.T ?? "latest"}; do not edit -->\n`);
+  }
+  const stale = (await readdir(dir)).filter(name => /-[0-9a-f]{12}\.md$/.test(name) && !names.has(name));
+  for (const name of stale) await rm(join(dir, name));
+  print({ generated_at: snapshot.generated_at });
+  print({ entities: snapshot.entities.length, facts: snapshot.entities.reduce((sum, entity) => sum + entity.facts.length, 0), written: names.size, removed: stale.length, dir });
+}
 const ingest = (command: string): Command => ({ arity: extra => extra.length === 2, run: ({ root, extra }) => withClient(root, client => ingestHandlers[command]!(extra[0]!, extra[1]!, client)) });
 const commands: Record<string, Command> = {
   up: { arity: none, run: up },
@@ -128,6 +144,7 @@ const commands: Record<string, Command> = {
   embed: { arity: none, run: embed },
   "embed-requeue": { arity: extra => extra.length === 0 || (extra.length === 2 && extra[0] === "--limit" && Number.isInteger(Number(extra[1])) && Number(extra[1]) >= 1 && Number(extra[1]) <= 1000), run: embedRequeue },
   recall: { arity: one, run: ({ root, extra }) => withClient(root, async client => print(await client.request("recall", { query: extra[0]!, limit: 10 }))) },
+  projection: { arity: extra => extra.length === 2 && extra[0] === "write", run: projection },
   status: { arity: none, run: ({ root }) => withClient(root, async client => print(await client.request("status", {}))) },
   verify: { arity: none, run: verify },
   ...Object.fromEntries(ingestCommands.map(command => [command, ingest(command)])),

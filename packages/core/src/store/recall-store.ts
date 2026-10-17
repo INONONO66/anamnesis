@@ -28,7 +28,7 @@ const RECALL_ALLOWED = `e.schema IN $schemas AND e.time_utc <= $T AND ($knownBy 
         AND NONE(d IN $denies WHERE (d.episode_id IS NULL OR d.episode_id=e.id) AND (d.source IS NULL OR d.source=e.origin_source))
         AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=e.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL AND ${KNOWN_INVALIDATION} }`;
 /** A Fact is valid at T when it is known at known_by and no effective known INVALIDATES targets it (ElementStore.isValidAt). */
-const FACT_VALID = `($knownBy IS NULL OR f.ingested_at <= $knownBy)
+export const FACT_VALID = `($knownBy IS NULL OR f.ingested_at <= $knownBy)
         AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->() WHERE inv.target_id=f.id AND inv.effective_time_utc <= $T AND inv.id IS NOT NULL AND ${KNOWN_INVALIDATION} }`;
 /** The requested [from, to] window is a hard filter on every candidate channel. */
 const EPISODE_IN_WINDOW = `($from IS NULL OR e.time_utc >= $from) AND e.time_utc <= $to`;
