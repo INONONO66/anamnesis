@@ -328,6 +328,7 @@ export async function foreground(): Promise<void> {
       case "remember": return runtime.remember(request.params, connection.context!);
       case "ingest.status": return runtime.ingestStatus(request.params);
       case "recall": return runtime.recall(request.params, connection.context!);
+      case "projection": return runtime.projection(request.params, connection.context!);
       case "commit": return runtime.commit(request.params, connection.context!);
       case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "policy.set":

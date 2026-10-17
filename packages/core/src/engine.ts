@@ -333,6 +333,10 @@ export class Engine {
     return this.store.recall(input, context);
   }
 
+  async projection(input: import("@anamnesis/protocol").RpcProjectionParams, context: InstallationContext) {
+    return this.store.projection(input, context);
+  }
+
   async issueReceipt(input: IssueReceiptInput, context: InstallationContext): Promise<RecallReceipt> {
     return this.store.issueReceipt(input, context);
   }
