@@ -83,9 +83,10 @@ describe("strict versioned RPC requests", () => {
     expect(RPC_METHODS).toContain("commit");
     expect(RPC_METHODS).toContain("hit-cache.verify");
     expect(RPC_METHODS).toContain("hit-cache.rebuild");
+    expect(RPC_METHODS).toContain("projection");
     expect(RpcCapabilities.parse({
       methods: [...RPC_METHODS], recall: false, commit: true, policy: false,
-      extraction: false, embeddings: false, writer_fence: "database",
+      extraction: false, embeddings: false, projection: true, writer_fence: "database",
     }).methods).toEqual([...RPC_METHODS]);
   });
 
@@ -175,6 +176,7 @@ describe("strict RPC responses", () => {
       policy: false,
       extraction: false,
       embeddings: false,
+      projection: false,
       writer_fence: "local_only",
     };
     const hello = {
