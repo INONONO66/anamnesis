@@ -89,6 +89,8 @@ export interface AdmitReport {
   created: number;
   duplicates: number;
   failed: number;
+  skipped: number;
+  since: string | null;
   resumed_from: Position | null;
 }
 
@@ -98,19 +100,23 @@ export async function admit(options: {
   readonly source: string;
   readonly client: Rememberer;
   readonly stopped: () => boolean;
+  /** ISO datetime; records that occurred strictly before it are skipped and never move the cursor. */
+  readonly since?: string;
 }): Promise<AdmitReport> {
-  const { archiveDir, source, client, stopped } = options;
+  const { archiveDir, source, client, stopped, since } = options;
+  const sinceMs = since === undefined ? undefined : Date.parse(since);
   const directory = join(archiveDir, "admit");
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${source}.cursor.json`);
   const previous = await readCursor(path);
   const resumed = previous?.status === "in_progress" ? previous.last : null;
   const cursor = { status: "in_progress" as const, last: resumed, created: resumed === null ? 0 : previous!.created, duplicates: resumed === null ? 0 : previous!.duplicates };
-  const report: AdmitReport = { source, records: 0, created: 0, duplicates: 0, failed: 0, resumed_from: resumed };
+  const report: AdmitReport = { source, records: 0, created: 0, duplicates: 0, failed: 0, skipped: 0, since: since ?? null, resumed_from: resumed };
   const manifest = Manifest.open(archiveDir);
   try {
     for (const { at, record } of positions(manifest, source, resumed)) {
       if (stopped()) return report;
+      if (sinceMs !== undefined && Date.parse(record.occurred_at) < sinceMs) { report.skipped++; continue; }
       report.records++;
       const outcome = await deliver(client, source, record);
       if ("reason" in outcome) {

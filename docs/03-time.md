@@ -374,8 +374,11 @@ RETURN n.id
 
 valid(T), including `known_by`, is applied at the candidate stage: every
 Fact channel (BM25, vector) and every Episode channel filters on it, so a Fact
-with an effective known INVALIDATES at T never enters the derived node set,
-never seeds PPR and cannot conduct. A denied Fact never conducts either.
+with an effective known INVALIDATES at T never enters the candidate set and
+never seeds PPR; a denied Fact never seeds it either. The PPR graph itself is
+built from the generation's arcs without re-checking peer validity, so such a
+Fact can still appear as a graph peer that carries mass between seeds; it is
+never a seed and, by the assembly check below, never a result.
 valid is checked again at result assembly; a Fact with an effective
 INVALIDATES at T is never a primary, and when its invalidating Fact is served
 the invalidated Fact is attached under that result's `provenance.supersedes`

@@ -83,14 +83,14 @@ test("archive admit lands every record once on the real daemon, dedupes a rerun 
     await write("01-admit-first", { records: N, exit: one.code, report: report(one.stdout), stderr: one.stderr, episode_count: oneCount,
       cursor: JSON.parse(await readFile(`${first}/admit/omo.cursor.json`, "utf8")) });
     expect(one.code).toBe(0);
-    expect(report(one.stdout)).toEqual({ source: "omo", records: N, created: N, duplicates: 0, failed: 0, resumed_from: null });
+    expect(report(one.stdout)).toEqual({ source: "omo", records: N, created: N, duplicates: 0, failed: 0, skipped: 0, since: null, resumed_from: null });
     expect(oneCount).toBe(N);
 
     const two = await admit(first, running).done;
     const twoCount = await episodes();
     await write("02-admit-again", { records: N, exit: two.code, report: report(two.stdout), stderr: two.stderr, episode_count: twoCount });
     expect(two.code).toBe(0);
-    expect(report(two.stdout)).toEqual({ source: "omo", records: N, created: 0, duplicates: N, failed: 0, resumed_from: null });
+    expect(report(two.stdout)).toEqual({ source: "omo", records: N, created: 0, duplicates: N, failed: 0, skipped: 0, since: null, resumed_from: null });
     expect(twoCount).toBe(N);
 
     await running.stop(); running = undefined;
