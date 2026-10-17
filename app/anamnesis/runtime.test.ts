@@ -161,7 +161,7 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   const installation = installationAt(await freshRoot());
   const { runtime, lanes } = await boot(installation);
   expect(lanes).toEqual(["spool"]);
-  expect(runtime.capabilities).toMatchObject({ recall: true, policy: true, extraction: false, embeddings: false });
+  expect(runtime.capabilities).toMatchObject({ recall: true, commit: true, policy: true, extraction: false, embeddings: false });
   const ready = await runtime.status(0, false);
   expect(ready).toMatchObject({ version: 1, state: "ready", storage: "available", data_incarnation: installation.incarnation, fs_epoch: installation.epoch,
     spool: { pending: 0, blocked: 0, quarantined: 0, bytes: 0 }, outbox_pending: 0, workers: { extraction: { state: "unconfigured" }, embedding: { pending: 0, drained_total: 0, quarantined_total: 0, last_error: null } } });
