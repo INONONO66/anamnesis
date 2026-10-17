@@ -4,6 +4,12 @@ import { z } from "zod";
 import { StateFile } from "./state-file.ts";
 
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
+/** The relation premise's vector channel: the profile and how many of its neighbours entered the candidates, or why it was skipped. */
+const FactRelationVector = z.union([
+  z.strictObject({ profile_id: hash, candidates: z.number().int().nonnegative().max(16) }),
+  z.strictObject({ reason: z.enum(["provider_absent", "profile_absent", "embed_failed", "query_failed"]) }),
+]);
+export type FactRelationVector = z.infer<typeof FactRelationVector>;
 const RelationEntry = z.strictObject({
   key: hash,
   context: FactRelationContext.refine(({ body_digest, ...body }) => extractionBodyDigest(body) === body_digest, "relation context digest mismatch"),
@@ -11,6 +17,7 @@ const RelationEntry = z.strictObject({
   failures: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   last_failure: z.string().nullable(), last_failure_detail: ExtractionFailureDetail.nullable(),
   model: ModelTask.shape.model.nullable(), model_incarnation: hash.nullable(), reported_model: z.string().nullable(),
+  vector: FactRelationVector.optional(),
 }).refine(value => value.judgements === null || (
   value.judgements.length === value.context.candidates.length
   && new Set(value.judgements.map(judgement => judgement.candidate_id)).size === value.context.candidates.length

@@ -1,13 +1,14 @@
 import { SCHEMA_ID } from "@anamnesis/protocol";
-import neo4j, { type ManagedTransaction } from "neo4j-driver";
+import neo4j, { Neo4jError, type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { MemoryElement, MemoryLink, Generation, type ExtractionAttempt, type ModelTask } from "@anamnesis/protocol";
 import { SemanticClaimValidationError, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "@anamnesis/protocol";
 import { canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
-import { ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext } from "@anamnesis/protocol";
+import { ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext, type FactRelationCandidate } from "@anamnesis/protocol";
 import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "@anamnesis/protocol";
 import { ExtractionModelOutput } from "@anamnesis/protocol";
 import { z } from "zod";
+import { EmbeddingError, embeddingProfileId, validateVector } from "../embedding.ts";
 import { semanticClaimTime, validatedFactTime, sha256 } from "./digest.ts";
 import { type InstallationContext, type PolicyState } from "./policy.ts";
 import { type ElementProperties } from "./records.ts";
@@ -15,7 +16,7 @@ import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ExtractionStore } from "./extraction-store.ts";
 import type { ElementStore } from "./element-store.ts";
-import type { ExtractionJournalEntry } from "./extraction-journal.ts";
+import type { ExtractionJournalEntry, FactRelationVector } from "./extraction-journal.ts";
 import { SourceMaterializationResult, type MaterializationStateEntry } from "./materialization-state.ts";
 
 /** Only model-reported confidence admits a claim to semantic writes. Audit-only
@@ -457,8 +458,8 @@ export class MaterializationStore {
       relation_judge: relationJudge, facts: factIds.length, refused: refused.length, duplicates: duplicates.length });
     return { semantic_writes: created, relation_judge: relationJudge };
   }
-  /** One validated claim's relation premise: its ACTIVE same-entity Facts of the
-   * generation (cap 16), persisted once per occurrence in the extraction journal so
+  /** One validated claim's relation premise: its ACTIVE same-entity Facts of the generation, then its
+   * top-8 vector neighbours (cap 16 together), persisted once per occurrence in the extraction journal so
    * the provider's verdict binds to a fixed digest. Returns the recorded judgements,
    * `[]` when there is nobody to compare against, or "pending" while the verdict is owed. */
   private async factRelationVerdictTx(tx: ManagedTransaction, input: {
@@ -472,22 +473,47 @@ export class MaterializationStore {
       if (known.context.candidates.length === 0) return [];
       return known.judgements ?? "pending";
     }
-    // Vector neighbours are not consulted: no Fact vector index exists in this schema.
     const rows = await tx.run(`MATCH (f:Fact {generation:$generation})-[:MENTIONS]->(e:Entity) WHERE e.id IN $entities
       AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->(f) WHERE inv.id IS NOT NULL }
       RETURN DISTINCT f.id AS id, f.content AS text, f.time_value AS value, f.time_precision AS precision ORDER BY id LIMIT 16`,
       { generation, entities: validated.identity.entity_ids });
-    const candidates = rows.records.map(record => ({ id: record.get("id"), text: record.get("text"), time: { value: record.get("value"), precision: record.get("precision") } }));
+    const shared: FactRelationCandidate[] = rows.records.map(record => ({ id: record.get("id"), text: record.get("text"), time: { value: record.get("value"), precision: record.get("precision") } }));
+    const channel = await this.factVectorNeighboursTx(tx, validated, input.source.id, generation);
+    const candidates = [...shared, ...("neighbours" in channel ? channel.neighbours : []).filter(neighbour => !shared.some(candidate => candidate.id === neighbour.id))].slice(0, 16);
+    const vector: FactRelationVector = "neighbours" in channel ? { profile_id: channel.profile_id, candidates: candidates.length - shared.length } : channel;
     const body = { fact: { text: validated.claim.content, time: validatedFactTime(validated, input.source) }, candidates };
     const context = FactRelationContext.parse({ body_digest: extractionBodyDigest(body), ...body });
     const verdicts = [...(entry.relations?.verdicts ?? []), {
       key: occurrence, context, judgements: null, failures: 0, last_failure: null, last_failure_detail: null,
-      model: null, model_incarnation: null, reported_model: null,
+      model: null, model_incarnation: null, reported_model: null, vector,
     }];
     await this.core.extractionJournal.set(input.pipeline_id, { ...entry, relations: {
       context_digest: extractionBodyDigest(verdicts.map(({ key, context }) => ({ key, context_digest: context.body_digest }))), verdicts,
     } });
     return candidates.length ? "pending" : [];
+  }
+  /** The relation judge's vector channel: the claim's top-8 committed neighbours in vec_fact_<profile>, pinned like recall,
+   * or why the channel was skipped. The query runs in its own session so a failure cannot abort the materialization tx. */
+  private async factVectorNeighboursTx(tx: ManagedTransaction, validated: ValidatedSemanticClaim, sourceId: string, generation: string):
+    Promise<{ profile_id: string; neighbours: FactRelationCandidate[] } | Extract<FactRelationVector, { reason: string }>> {
+    const provider = this.core.embeddingProvider;
+    if (!provider) return { reason: "provider_absent" };
+    const profile = embeddingProfileId(provider.profile);
+    if (!(await tx.run(`MATCH (p:EmbeddingProfile {id:$profile}) RETURN p.id AS id`, { profile })).records.length) return { reason: "profile_absent" };
+    let vector: number[];
+    try { vector = validateVector(await provider.embed(validated.claim.content, "query"), provider.profile); }
+    catch (error) { if (!(error instanceof EmbeddingError)) throw error; return { reason: "embed_failed" }; }
+    try {
+      const rows = await this.core.withReadTx(read => read.run<{ id: string; text: string; value: string; precision: FactRelationCandidate["time"]["precision"] }>(
+        `CALL db.index.vector.queryNodes($index,64,$vector) YIELD node,score
+        MATCH (f:Element:Fact {id:node.fact_id})
+        WHERE node.profile_id=$profile AND node.input_revision=coalesce(f.revision_key,f.digest) AND node.input_digest=f.digest
+          AND f.generation=$generation AND NOT (f.meaning_digest=$meaning AND f.primary_episode_id=$source)
+          AND NOT EXISTS { MATCH ()-[inv:INVALIDATES]->(f) WHERE inv.id IS NOT NULL }
+        RETURN f.id AS id, f.content AS text, f.time_value AS value, f.time_precision AS precision ORDER BY score DESC, id ASC LIMIT 8`,
+        { index: `vec_fact_${profile}`, vector, profile, generation, meaning: validated.meaning_digest, source: sourceId }));
+      return { profile_id: profile, neighbours: rows.records.map(row => ({ id: row.get("id"), text: row.get("text"), time: { value: row.get("value"), precision: row.get("precision") } })) };
+    } catch (error) { if (!(error instanceof Neo4jError)) throw error; return { reason: "query_failed" }; }
   }
   /** Mechanical application of relation verdicts, read-only: the confidence floor,
    * candidate staleness and the non-recursive INVALIDATES rule decide each outcome;

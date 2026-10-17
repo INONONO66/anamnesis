@@ -52,7 +52,10 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   eight Episodes plus up to three preceding context Episodes (D56), then a
   judge per Episode → materialize Facts, Entities, evidence and
   ConductingArc for the generation, with the relation judge (D53) gating
-  Fact→Fact relations. With `ANAMNESIS_EXTRACTION_GATE=jev` the Jev pre-gate
+  Fact→Fact relations over entity-shared Facts unioned with the top-8
+  `vec_fact` neighbours, at most 16 deduplicated with entity-shared first,
+  entity-only with a recorded reason (provider_absent, profile_absent,
+  embed_failed, query_failed) when the vector channel is unavailable (#265). With `ANAMNESIS_EXTRACTION_GATE=jev` the Jev pre-gate
   (`packages/core/src/jev-gate.ts`) scores the window and cancels all of its
   members only when the window's maximum score is under the threshold;
   otherwise the provider call proceeds. State lives in
@@ -99,6 +102,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 | G3 | done (#249) | extraction lane: the five pipeline ledger labels and their seven constraints leave the graph; coverage-driven scan; `extraction-state.json` journal with sealed-entry pruning; `extraction.*` audit events | 01 §6, §7, 02 §5, D55 |
 | G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
 | G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
+| G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason when the provider is absent or the embed fails; `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
 
 ## v0.1 — originals, forgetting, search
 

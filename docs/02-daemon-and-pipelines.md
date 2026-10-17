@@ -715,7 +715,12 @@ decisions. LLM calls cannot sit inside a transaction.
         entity_key = sha256(target_generation, normalized_name, entity_kind).
         A mention with no resolvable referent (bare pronoun, "the client")
         creates no Entity; the literal stays in the claim's content
-    L4. Claim judge against Fact candidates, under the pinned judge_profile_id:
+    L4. Claim judge against Fact candidates, under the pinned judge_profile_id
+        (shipped today as the D53 relation judge over the entity-shared ACTIVE
+        Facts unioned with the top-8 vec_fact neighbours, <= 16 deduplicated,
+        entity-shared first; entity-only with a recorded reason (provider_absent,
+        profile_absent, embed_failed, query_failed) when the vector channel is
+        unavailable, #265):
           new                        → Fact + DERIVED_FROM Episode + MENTIONS
           duplicate of F             → new occurrence Fact + DERIVED_FROM Episode,
                                         RELATES_TO F; optional audit re_mention

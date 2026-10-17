@@ -117,7 +117,7 @@ anamnesis has no equivalent of `created_at_*` on the recall path.
 | Aspect | Anamnesis | Graphiti |
 |---|---|---|
 | Duplicate policy | Never collapse written Facts. Each occurrence is its own immutable Fact; grouping happens at assembly under `anamnesis.duplicate-group/1` and only within one candidate set (D46, D49; `docs/05-recall.md` §6). Today the relation judge may refuse a claim as `duplicate` before it is written; the refusal is recorded as a `duplicate:` operation with `duplicate_of` (D53). G7: 9 refusals over 200 Episodes | Collapse. `resolve_edge` picks a duplicate index; the new edge reuses the existing UUID (dossier §2, §3) |
-| Contradiction detection | Today: `judge_relations` (`judge-relations.v1.md`) returns one of `duplicate / invalidates / contrasts / unrelated` per candidate, confidence below 0.6 is read as `unrelated`; the verdict must echo the premise digest and cover exactly the candidate set or it is rejected (D53). Candidates are at most 16 ACTIVE Facts of the writable generation that share a MENTIONS Entity with the new claim; vector neighbours are not consulted because no Fact vector index exists (D53). Target: the L4 judge against up to 128 candidates (`docs/02-daemon-and-pipelines.md` §5 L4) | `resolve_edge` prompt receives EXISTING FACTS (same endpoints), the NEW EDGE and FACT INVALIDATION CANDIDATES from a broader hybrid search; one LLM call per extracted edge decides duplicate and contradiction; `resolve_edge_contradictions` applies the temporal rule (dossier §3; `graphiti_core/prompts/dedupe_edges.py:resolve_edge`) |
+| Contradiction detection | Today: `judge_relations` (`judge-relations.v1.md`) returns one of `duplicate / invalidates / contrasts / unrelated` per candidate, confidence below 0.6 is read as `unrelated`; the verdict must echo the premise digest and cover exactly the candidate set or it is rejected (D53). Candidates are at most 16 ACTIVE Facts of the writable generation: the Facts that share a MENTIONS Entity with the new claim, unioned with the top-8 `vec_fact` vector neighbours of the claim and deduplicated, entity-shared first; when the vector channel is unavailable (no provider, no EmbeddingProfile node, embed or index query failure) the set is entity-shared only and the premise records which (D53, #265). Target: the L4 judge against up to 128 candidates (`docs/02-daemon-and-pipelines.md` §5 L4) | `resolve_edge` prompt receives EXISTING FACTS (same endpoints), the NEW EDGE and FACT INVALIDATION CANDIDATES from a broader hybrid search; one LLM call per extracted edge decides duplicate and contradiction; `resolve_edge_contradictions` applies the temporal rule (dossier §3; `graphiti_core/prompts/dedupe_edges.py:resolve_edge`) |
 | Unattended writes | Relation verdicts are applied mechanically without review: `contrasts` -> CONTRASTS new->candidate, both stay ACTIVE; `invalidates` -> INVALIDATES with the new Fact's time, non-recursive (`chain_refused` otherwise); `duplicate` -> not written (D53). No Fact of a source is written while a verdict is owed. The adjudicator for operator corrections is shadow-only (D50) | Fully unattended inside `add_episode` (dossier §2, §3) |
 | Winner selection | CONTRASTS elects no winner by confidence or recency; recall returns up to 4 companions per primary with mandatory warnings (D46; `docs/05-recall.md` §6). Today: `store.ts` L2373-2379 attaches up to 4 CONTRASTS peers. `invalidates` requires the new claim to be at or after the candidate's time; an earlier conflicting claim is `contrasts` (`judge-relations.v1.md`) | Newer `valid_at` wins when the LLM says the pair contradicts (dossier §3) |
 | Repair | `adjudication.correct` appends an operator Episode and a replacement Fact; nothing is deleted (D50; `docs/03-time.md` §5) | "Delete and re-ingest corrected episodes" (dossier §6) |
@@ -126,10 +126,12 @@ anamnesis has no equivalent of `created_at_*` on the recall path.
 Honest reading. Both systems now emit relations automatically; the shapes
 differ. Graphiti's candidate set is wider (same endpoints plus a hybrid search
 over all edges), so it can catch a contradiction between two facts that share
-no named entity. Anamnesis's candidate set is same-Entity ACTIVE Facts only
-(D53), so a paraphrase whose Entities failed to resolve is invisible to the
-judge; §9 shows paraphrase Facts from duplicated Episodes that both survive,
-which is consistent with that limit, though the artifact does not record
+no named entity. Anamnesis's candidate set is same-Entity ACTIVE Facts plus
+the top-8 `vec_fact` neighbours (D53, #265), so a paraphrase whose Entities
+failed to resolve can still reach the judge through the vector channel. At the
+time of the run below the judge was entity-only, and §9 shows paraphrase
+Facts from duplicated Episodes that both survive, which is consistent with
+that limit, though the artifact does not record
 which candidates each judgement saw. Anamnesis's advantages here are that the
 verdict is bound to the exact candidate set it saw, that retries are
 idempotent, and that a duplicate is refused before it exists rather than
@@ -496,9 +498,9 @@ model-time comparison with Graphiti is possible from these runs.
 - Export relation judge operations (`MaterializationOperation.result.relations`)
   into the E2E artifact so a future comparison can check verdict precision on
   the sample instead of counting links.
-- Decide whether same-Entity-only candidate selection is enough (D53), or
-  whether a Fact fulltext or vector neighbour channel should feed the judge;
-  the seq 8/9 paraphrases are the test case.
+- Re-run the seq 8/9 paraphrase case now that the top-8 `vec_fact`
+  neighbour channel feeds the judge beside the same-Entity set (#265), and
+  decide whether a Fact fulltext channel is still wanted.
 - Decide whether Entity alias handling is wanted, or whether "GitHub
   Enterprise" and "GitHub Enterprise Cloud" staying separate is acceptable
   for a personal corpus (§5).
