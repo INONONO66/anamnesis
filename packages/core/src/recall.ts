@@ -2,7 +2,7 @@ import { RpcOutputBudget, RPC_LIMITS, type RpcRecallItem, type RpcRecallResult }
 import { countBudget } from "./dynamics/budget.ts";
 
 export class RecallError extends Error {
-  constructor(readonly code: "invalid_budget" | "resource_exhausted" | "embedding_not_configured" | "receipt_unavailable") { super(code); }
+  constructor(readonly code: "invalid_budget" | "invalid_params" | "resource_exhausted" | "embedding_not_configured" | "receipt_unavailable") { super(code); }
 }
 export type Tokenizers = ReadonlyMap<string, (text: string) => number>;
 export function admittedBudget(input: unknown, tokenizers: Tokenizers, defaultBytes = 65536): RpcOutputBudget {

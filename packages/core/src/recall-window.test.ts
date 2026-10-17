@@ -163,7 +163,7 @@ test("window zero keeps the Fact source attribution without window companions", 
 test("a Fact found by BM25 and vector reports both lists", async () => {
   const result = await engine.recallHybrid({ query: "violet", window: 0 }, context);
 
-  expect(recalledFact(result).channels).toEqual(["bm25", "vector"]);
+  expect(recalledFact(result).channels).toEqual(["bm25", "vector", "ppr"]);
   const source = result.results.find(item => item.id === episodes[2]);
   expect(source?.kind).toBe("Episode");
   expect(source).not.toHaveProperty("window");
