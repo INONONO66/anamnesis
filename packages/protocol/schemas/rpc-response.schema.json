@@ -91,7 +91,7 @@
                   "type": "object",
                   "properties": {
                     "methods": {
-                      "maxItems": 25,
+                      "maxItems": 26,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -120,7 +120,8 @@
                           "commit",
                           "embedding.recover",
                           "embedding.status",
-                          "embedding.requeue"
+                          "embedding.requeue",
+                          "projection"
                         ]
                       }
                     },
@@ -139,6 +140,9 @@
                     "embeddings": {
                       "type": "boolean"
                     },
+                    "projection": {
+                      "type": "boolean"
+                    },
                     "writer_fence": {
                       "type": "string",
                       "enum": [
@@ -154,6 +158,7 @@
                     "policy",
                     "extraction",
                     "embeddings",
+                    "projection",
                     "writer_fence"
                   ],
                   "additionalProperties": false
@@ -366,7 +371,7 @@
                   "type": "object",
                   "properties": {
                     "methods": {
-                      "maxItems": 25,
+                      "maxItems": 26,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -395,7 +400,8 @@
                           "commit",
                           "embedding.recover",
                           "embedding.status",
-                          "embedding.requeue"
+                          "embedding.requeue",
+                          "projection"
                         ]
                       }
                     },
@@ -414,6 +420,9 @@
                     "embeddings": {
                       "type": "boolean"
                     },
+                    "projection": {
+                      "type": "boolean"
+                    },
                     "writer_fence": {
                       "type": "string",
                       "enum": [
@@ -429,6 +438,7 @@
                     "policy",
                     "extraction",
                     "embeddings",
+                    "projection",
                     "writer_fence"
                   ],
                   "additionalProperties": false
@@ -3462,6 +3472,202 @@
                 "adopted",
                 "reward",
                 "applied"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "structure_revision",
+            "policy_revision",
+            "server_time",
+            "method",
+            "result"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "type": "string",
+              "const": "2.0"
+            },
+            "id": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                  "x-maxUtf8Bytes": 128
+                }
+              ]
+            },
+            "structure_revision": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "policy_revision": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "server_time": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "method": {
+              "type": "string",
+              "const": "projection"
+            },
+            "result": {
+              "type": "object",
+              "properties": {
+                "generated_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "T": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "entities": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                      },
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1048576,
+                        "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                        "x-maxUtf8Bytes": 1048576
+                      },
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                        "x-maxUtf8Bytes": 256
+                      },
+                      "facts": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                            },
+                            "content": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1048576,
+                              "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
+                              "x-maxUtf8Bytes": 1048576
+                            },
+                            "time": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "value": {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "precision": {
+                                      "type": "string",
+                                      "enum": [
+                                        "second",
+                                        "minute",
+                                        "day",
+                                        "month",
+                                        "year"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "value",
+                                    "precision"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "sources": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "content",
+                            "time",
+                            "sources"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "facts"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "generated_at",
+                "T",
+                "entities"
               ],
               "additionalProperties": false
             }

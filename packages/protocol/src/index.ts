@@ -49,6 +49,7 @@ export {
   RpcOutputBudget,
   RpcRecallParams, RpcRecallResult, RpcRecallItem, RpcRecallChannel,
   RpcCommitParams, RpcCommitResult,
+  RpcProjectionParams, RpcProjectionResult,
   RpcEmbeddingRecoverParams, RpcEmbeddingStatusParams, RpcEmbeddingAttempt,
   RpcHelloParams,
   RpcIngestStatusParams,
