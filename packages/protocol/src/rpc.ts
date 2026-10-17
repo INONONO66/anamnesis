@@ -25,10 +25,8 @@ export const RPC_LIMITS = {
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
-  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "embedding.recover", "embedding.status", "embedding.requeue",
+  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue",
 ] as const;
-/** Specified (docs/04 §6 producer 1) but not served: the daemon rejects them as unsupported_method until a client needs them. */
-export const RPC_FUTURE_METHODS = ["commit"] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
 
@@ -114,6 +112,21 @@ export const RpcRecallParams = z.strictObject({
 });
 /** Callers may omit defaulted fields; parsing supplies limit, window and order. */
 export type RpcRecallParams = z.input<typeof RpcRecallParams>;
+/** Receipt-mode feedback; attribution is resolved from the stored receipt, never from the client. */
+export const RpcCommitParams = z.strictObject({
+  operation_id: z.uuidv7(), recall_id: z.uuidv7(),
+  adopted: z.array(z.uuidv7()).max(64).optional(),
+  reward: z.number().finite().min(-1).max(1).optional(),
+}).superRefine((value, context) => {
+  if (value.adopted === undefined && value.reward === undefined) context.addIssue({ code: "custom", message: "adopted or reward is required" });
+  if (value.adopted && new Set(value.adopted).size !== value.adopted.length) context.addIssue({ code: "custom", message: "adopted IDs must be distinct" });
+});
+export type RpcCommitParams = z.infer<typeof RpcCommitParams>;
+export const RpcCommitResult = z.strictObject({
+  operation_id: z.uuidv7(), recall_id: z.uuidv7(), adopted: z.array(z.uuidv7()),
+  reward: z.number().min(-1).max(1).nullable(), applied: z.boolean(),
+});
+export type RpcCommitResult = z.infer<typeof RpcCommitResult>;
 export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), fact_id: z.uuidv7() });
 export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams>;
 export const RpcEmbeddingStatusParams = z.strictObject({ operation_id: z.uuidv7() });
@@ -247,6 +260,7 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("extraction.audit.run", RunExtractionPipeline),
   request("extraction.audit.status", ExtractionPipelineStatus),
   request("recall", RpcRecallParams),
+  request("commit", RpcCommitParams),
   request("graph.envelope", z.strictObject({ seed_ids: z.array(z.uuidv7()).min(1).max(128), T: counter.optional() })),
   request("embedding.recover", RpcEmbeddingRecoverParams),
   request("embedding.status", RpcEmbeddingStatusParams),
@@ -435,6 +449,7 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
     pin: z.strictObject({ policy_revision: counter, generation_id: z.uuidv7(), coverage_revision: counter, covered_ingest_seq: counter, T: counter }),
     overflow: z.strictObject({ nodes: counter, arcs: counter, saturated_sources: counter.max(128) }) })),
   success("recall", RpcRecallResult),
+  success("commit", RpcCommitResult),
   success("extraction.audit.create", ModelTask),
   success("extraction.audit.run", ExtractionPipeline),
   success("extraction.audit.status", ExtractionPipeline),
