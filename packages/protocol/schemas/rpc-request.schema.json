@@ -913,6 +913,35 @@
                 "session"
               ],
               "additionalProperties": false
+            },
+            "time": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 8640000000000000
+                },
+                "to": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 8640000000000000
+                }
+              },
+              "additionalProperties": false
+            },
+            "order": {
+              "default": "relevance",
+              "type": "string",
+              "enum": [
+                "relevance",
+                "chronological"
+              ]
+            },
+            "known_by": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8640000000000000
             }
           },
           "required": [

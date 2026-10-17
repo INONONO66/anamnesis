@@ -11,6 +11,7 @@ import {
   RpcResponse,
   RpcRememberParams,
   RpcOutputBudget,
+  RpcRecallParams,
 } from "./index.ts";
 import { protocolJsonSchemas } from "../scripts/export-schemas.ts";
 import { readFile } from "node:fs/promises";
@@ -251,6 +252,17 @@ describe("strict RPC responses", () => {
     expect(RpcResponse.safeParse({ ...error, error: { ...error.error, data: { code: "invented", retryable: false } } }).success).toBe(false);
     expect(RpcResponse.safeParse({ ...error, server_time: Infinity }).success).toBe(false);
     expect(RpcResponse.safeParse({ ...error, structure_revision: Number.MAX_SAFE_INTEGER + 1 }).success).toBe(false);
+  });
+
+  test("recall params default to relevance order and accept a closed time window and known_by cut", () => {
+    expect(RpcRecallParams.parse({ query: "q" })).toEqual({ query: "q", limit: 10, window: 2, order: "relevance" });
+    expect(RpcRecallParams.parse({ query: "q", time: { from: 1, to: 2 }, order: "chronological", known_by: 3 }))
+      .toMatchObject({ time: { from: 1, to: 2 }, order: "chronological", known_by: 3 });
+    expect(RpcRecallParams.parse({ query: "q", time: {} }).time).toEqual({});
+    for (const params of [{ time: { from: -1 } }, { time: { to: 1.5 } }, { time: { until: 1 } }, { order: "recency" }, { known_by: -1 }]) {
+      expect(RpcRecallParams.safeParse({ query: "q", ...params }).success).toBe(false);
+    }
+    expect(RpcRequest.safeParse(request("recall", { query: "q", time: { from: 1, to: 2 }, known_by: 2 })).success).toBe(true);
   });
 
   test("exports machine-readable JSON schemas without erasing strictness", () => {

@@ -412,7 +412,7 @@ export class ElementStore {
     // revision edge belongs to the originals layer and keys without content.
     const seek =
       link.role === "INVALIDATES"
-        ? ", target_id: b.id, effective_time_utc: a.time_utc"
+        ? ", target_id: b.id, effective_time_utc: a.time_utc, ingested_at: a.ingested_at"
         : "";
     const res = await tx.run<{ id: string }>(
       `MATCH (a:Element { id: $from }), (b:Element { id: $to })
