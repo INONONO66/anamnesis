@@ -37,7 +37,7 @@ bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --toke
 
 Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC on the UDS socket. It uses the daemon's own socket client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
 
-With `--since <iso-datetime>` a record whose `occurred_at` is earlier than the bound is skipped: it is not sent, it is counted as `skipped` in the report (which also echoes the bound as `since`), and it never moves the cursor. A record exactly at the bound is admitted. Because the cursor is positional, a resumed run re-applies the bound and skips the same earlier records again.
+With `--since <iso-datetime>` a record whose `occurred_at` is earlier than the bound is skipped: it is not sent, it is counted as `skipped` in the report (which also echoes the bound as `since`), and it never moves the cursor. A record exactly at the bound is admitted. The cursor is positional, so a resumed run re-applies the bound to the records after the acknowledged position; records before it are neither revisited nor counted again.
 
 The daemon decides what counts as new. Each `remember` answer is tallied as one of:
 
