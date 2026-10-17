@@ -379,13 +379,18 @@ Validate before any write:
 
 - The authenticated caller's `hello.commit_mode` must be `receipt`, else
   `commit_mode_mismatch`. Auto-mode clients cannot fabricate adoption.
-- `operation_id` (UUIDv7) is the idempotency key. A repeat with the same
+- `operation_id` (UUIDv7) is the idempotency key, consulted only after the
+  receipt checks below pass (an expired replay is `receipt_expired`, not a
+  replay). A repeat with the same
   normalized params replays the stored result with `applied:false`; the same
   `operation_id` with different params rejects `idempotency_conflict`. A
   fresh call reports `applied:true` only when it wrote at least one Hit or
   recorded a new outcome.
 - Require an issued, authorized, unexpired receipt; unknown IDs reject
-  `unknown_recall`, expired receipts reject `receipt_expired`.
+  `unknown_recall`, expired receipts reject `receipt_expired`. Authorization
+  covers the primaries' source Episodes and every served prior revision: a
+  superseded Episode by itself, a superseded Fact through its DERIVED_FROM
+  source Episodes, each against the current policy (`policy_denied`).
 - At least one of `adopted` or `reward` must be present; the request schema
   rejects an empty body as `invalid_params` before dispatch.
   `adopted` must be an array of distinct delivered primary IDs; reject

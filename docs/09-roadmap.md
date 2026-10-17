@@ -76,7 +76,8 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   (#268). The `projection {T?}` RPC snapshots the writable generation at T
   with policy denies applied (`ProjectionStore.snapshotTx`,
   `capabilities.projection: true`), and `anamnesis-ops projection write
-  <dir>` writes one `<slug>-<id tail 12 hex>.md` per Entity with a T-pinned footer, so
+  <dir>` writes one `<slug>-<id tail 12 hex>.md` per Entity with a footer pinned to
+  the request T (`latest`: the command sends none), never the wall clock, so
   an unchanged graph yields byte-identical files. The daemon never reads the
   directory back (01 §4).
 
@@ -116,7 +117,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 | G3 | done (#249) | extraction lane: the five pipeline ledger labels and their seven constraints leave the graph; coverage-driven scan; `extraction-state.json` journal with sealed-entry pruning; `extraction.*` audit events | 01 §6, §7, 02 §5, D55 |
 | G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
 | G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
-| G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason when the provider is absent or the embed fails; `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
+| G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason (`provider_absent`, `profile_absent`, `embed_failed`, `query_failed`); `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
 | G9 | done (#264) | archive admit over the daemon socket with per-source cursor resume; `admit --archive --socket --token [--source]` sends each archive record as one Episode through `remember`, tallies created / duplicate / failed, and keeps `<archive>/admit/<source>.cursor.json` (atomic rewrite after every ack, `in_progress` resumes after `last`, `complete` or absent means a full run that the daemon dedupes) | packages/archive README, D56 |
 | G10 | done (#268) | `ops projection write`: read-only markdown per Entity of valid Facts; `projection` RPC over the writable generation at T, `FACT_VALID` plus content deny policies, deterministic file bytes, stale `*-<12 hex>.md` files removed | 01 §4, 02 §2 |
 
