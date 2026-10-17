@@ -108,8 +108,11 @@ export const RpcRecallParams = z.strictObject({
   window: counter.max(8).default(2),
   budget: RpcOutputBudget.optional(), T: counter.max(8640000000000000).optional(),
   session: z.strictObject({ source: identifier, session: identifier }).optional(),
+  time: z.strictObject({ from: counter.max(8640000000000000).optional(), to: counter.max(8640000000000000).optional() }).optional(),
+  order: z.enum(["relevance", "chronological"]).default("relevance"),
+  known_by: counter.max(8640000000000000).optional(),
 });
-/** Callers may omit defaulted fields; parsing supplies limit and window. */
+/** Callers may omit defaulted fields; parsing supplies limit, window and order. */
 export type RpcRecallParams = z.input<typeof RpcRecallParams>;
 export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), fact_id: z.uuidv7() });
 export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams>;
@@ -134,7 +137,7 @@ export const RpcEmbeddingRequeueParams = z.strictObject({
 export type RpcEmbeddingRequeueParams = z.input<typeof RpcEmbeddingRequeueParams>;
 export const RpcEmbeddingRequeueResult = z.strictObject({ requeued: counter });
 export type RpcEmbeddingRequeueResult = z.infer<typeof RpcEmbeddingRequeueResult>;
-export const RpcRecallChannel = z.enum(["identity", "bm25", "vector", "session"]);
+export const RpcRecallChannel = z.enum(["identity", "bm25", "vector", "session", "ppr"]);
 export const RpcRecallItem = z.discriminatedUnion("kind", [
   z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), schema: z.enum(EPISODE_SCHEMAS), epistemic: z.literal("observed"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1), provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.enum(["Episode", "Fact"]), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
   z.strictObject({ id: z.uuidv7(), kind: z.literal("Fact"), schema: z.literal(SCHEMA_ID.CLAIM), epistemic: z.literal("derived"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1),
