@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   RPC_VERSION,
   RPC_LIMITS,
-  RPC_FUTURE_METHODS,
   RPC_METHODS,
   RpcMethod,
   RpcCapabilities,
@@ -81,19 +80,26 @@ describe("strict versioned RPC requests", () => {
   test("keeps the v1 method registry aligned with request and capability surfaces", () => {
     for (const method of ["hit-cache.verify", "hit-cache.rebuild"])
       expect(RpcMethod.safeParse(method).success).toBe(true);
-    expect(RPC_METHODS).not.toContain("commit");
+    expect(RPC_METHODS).toContain("commit");
     expect(RPC_METHODS).toContain("hit-cache.verify");
     expect(RPC_METHODS).toContain("hit-cache.rebuild");
-    expect(RPC_FUTURE_METHODS).toContain("commit");
     expect(RpcCapabilities.parse({
-      methods: [...RPC_METHODS], recall: false, commit: false, policy: false,
+      methods: [...RPC_METHODS], recall: false, commit: true, policy: false,
       extraction: false, embeddings: false, writer_fence: "database",
     }).methods).toEqual([...RPC_METHODS]);
   });
 
   test("reserves future methods without admitting fake implementations", () => {
-    for (const method of [...RPC_FUTURE_METHODS, "invented.method"])
+    for (const method of ["invented.method"])
       expect(RpcRequest.safeParse(request(method, {})).success).toBe(false);
+  });
+
+  test("admits receipt commits only with adopted or reward feedback in range", () => {
+    const ids = { operation_id: uuid, recall_id: "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e10" };
+    expect(RpcRequest.safeParse(request("commit", { ...ids, adopted: ["0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e11"] })).success).toBe(true);
+    expect(RpcRequest.safeParse(request("commit", { ...ids, reward: -1 })).success).toBe(true);
+    for (const invalid of [ids, { ...ids, reward: 2 }, { ...ids, adopted: [uuid, uuid] }, { ...ids, adopted: [uuid], extra: true }])
+      expect(RpcRequest.safeParse(request("commit", invalid)).success).toBe(false);
   });
 
   test("requires explicit revision CAS and original Episode semantics", () => {
@@ -165,7 +171,7 @@ describe("strict RPC responses", () => {
     const capabilities = {
       methods: ["hello", "status", "shutdown", "object.begin", "object.chunk", "object.commit", "remember", "ingest.status"],
       recall: false,
-      commit: false,
+      commit: true,
       policy: false,
       extraction: false,
       embeddings: false,

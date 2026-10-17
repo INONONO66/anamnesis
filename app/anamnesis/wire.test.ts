@@ -108,13 +108,18 @@ describe("decodeRequest", () => {
   const frame = (value: unknown) => Buffer.from(JSON.stringify(value));
   test("frame-level refusals echo the request id so a real client can match the reply", () => {
     const refusals: [unknown, FrameFault["code"], string | number | null][] = [
-      [{ jsonrpc: "2.0", id: 7, method: "commit", params: {} }, "unsupported_method", 7],
+      [{ jsonrpc: "2.0", id: 7, method: "invented.method", params: {} }, "unsupported_method", 7],
+      [{ jsonrpc: "2.0", id: 8, method: "commit", params: {} }, "invalid_params", 8],
       [{ jsonrpc: "2.0", id: "req-1", method: "hello", params: { version: 2 } }, "unsupported_version", "req-1"],
       [{ jsonrpc: "2.0", id: 9, method: "status", params: { extra: true } }, "invalid_params", 9],
-      [{ jsonrpc: "2.0", method: "commit", params: {} }, "unsupported_method", null],
-      [{ jsonrpc: "2.0", id: "x".repeat(128), method: "commit", params: {} }, "unsupported_method", "x".repeat(128)],
-      [{ jsonrpc: "2.0", id: "x".repeat(129), method: "commit", params: {} }, "unsupported_method", null],
-      [{ jsonrpc: "2.0", id: { nested: true }, method: "commit", params: {} }, "unsupported_method", null],
+      [{ jsonrpc: "2.0", method: "invented.method", params: {} }, "unsupported_method", null],
+      [{ jsonrpc: "2.0", id: "x".repeat(128), method: "invented.method", params: {} }, "unsupported_method", "x".repeat(128)],
+      [{ jsonrpc: "2.0", id: "x".repeat(129), method: "invented.method", params: {} }, "unsupported_method", null],
+      [{ jsonrpc: "2.0", id: { nested: true }, method: "invented.method", params: {} }, "unsupported_method", null],
+      [{ jsonrpc: "2.0", method: "commit", params: {} }, "invalid_params", null],
+      [{ jsonrpc: "2.0", id: "x".repeat(128), method: "commit", params: {} }, "invalid_params", "x".repeat(128)],
+      [{ jsonrpc: "2.0", id: "x".repeat(129), method: "commit", params: {} }, "invalid_params", null],
+      [{ jsonrpc: "2.0", id: { nested: true }, method: "commit", params: {} }, "invalid_params", null],
     ];
     for (const [request, code, id] of refusals) {
       let caught: unknown;

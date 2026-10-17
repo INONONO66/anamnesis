@@ -184,8 +184,8 @@ replay evidence, not a full time machine (D47).
 
 | kind | Accessibility effect | Producer | Namespace |
 |---|---|---|---|
-| `recall_hit` | positive adoption coefficient κ = 1 before source sharing | authenticated receipt-mode `commit` (deferred on the wire; in-process `Engine.commitReceipt`) | recall UUID |
-| `outcome` | none; separate utility `(reward, weight)` | authenticated receipt-mode `commit` (same deferral) | recall UUID |
+| `recall_hit` | positive adoption coefficient κ = 1 before source sharing | authenticated receipt-mode `commit` RPC (`Runtime.commit` → `Engine.commitReceipt`) | recall UUID |
+| `outcome` | none; separate utility `(reward, weight)` | authenticated receipt-mode `commit` RPC (same path) | recall UUID |
 | `exposure` | none; audit of top-3 delivered primaries | daemon after auto-mode response | recall UUID |
 | `re_mention` | none; occurrence audit | extraction transaction | `extract:<episode_id>` |
 | `promotion` | none; synthesis support audit | dreaming transaction | `dream:<synthesis_fact_id>` |
@@ -357,7 +357,7 @@ missing feedback or expired feedback is a negative label.
 
 ### Producer 1 — authenticated commit RPC (receipt clients)
 
-> **Deferred surface.** No shipped client sends `commit`, so the daemon does not serve it (listed in `RPC_FUTURE_METHODS`, absent from `RPC_METHODS`; answered `unsupported_method` with the request id echoed). Until it ships, a receipt-mode session produces receipts that receive no feedback at all: no exposure Hits (those are auto-mode only) and no adoption or outcome Hits, so `S`, `t_last_hit` and `U` are untouched by its recalls; `hello.capabilities.commit:false` is the only wire signal of this. The validation and write rules below are implemented and tested in-process as `Engine.commitReceipt`; exposing them over the wire means re-adding the removed bindings (protocol params and envelopes, daemon dispatch, runtime method) once a receipt-mode client exists.
+The daemon serves `commit` for receipt-mode sessions (`Runtime.commit` → `Engine.commitReceipt`) and advertises it as `hello.capabilities.commit:true`; the result is `{operation_id, recall_id, adopted, reward|null, applied}`.
 
 A JSON-RPC example (IDs must identify an actual issued receipt and primary):
 
@@ -367,6 +367,7 @@ A JSON-RPC example (IDs must identify an actual issued receipt and primary):
   "id": 17,
   "method": "commit",
   "params": {
+    "operation_id": "0192f3b2-0000-7000-8000-000000000010",
     "recall_id": "0192f3b2-0000-7000-8000-000000000001",
     "adopted": ["0192f3b2-0000-7000-8000-000000000002"],
     "reward": -1
@@ -378,9 +379,15 @@ Validate before any write:
 
 - The authenticated caller's `hello.commit_mode` must be `receipt`, else
   `commit_mode_mismatch`. Auto-mode clients cannot fabricate adoption.
+- `operation_id` (UUIDv7) is the idempotency key. A repeat with the same
+  normalized params replays the stored result with `applied:false`; the same
+  `operation_id` with different params rejects `idempotency_conflict`. A
+  fresh call reports `applied:true` only when it wrote at least one Hit or
+  recorded a new outcome.
 - Require an issued, authorized, unexpired receipt; unknown IDs reject
   `unknown_recall`, expired receipts reject `receipt_expired`.
-- At least one of `adopted` or `reward` must be present (`empty_commit`).
+- At least one of `adopted` or `reward` must be present; the request schema
+  rejects an empty body as `invalid_params` before dispatch.
   `adopted` must be an array of distinct delivered primary IDs; reject
   duplicates, unknown IDs and companion-only IDs. An empty array is valid.
 - `reward` must be a finite number in `[-1,1]`; reject null, strings,

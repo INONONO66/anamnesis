@@ -37,7 +37,10 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   `provenance.supersedes` under the invalidating Fact (#263), the Fact score
   with `A_Fact` over `sigma_fact = 30` and the source-mean `U_Fact` (#267),
   the `time` window and `order` (#269), and `known_by` with `ingested_at`
-  on INVALIDATES links (#270, D57).
+  on INVALIDATES links (#270, D57), and the `commit` RPC served on the wire
+  for receipt-mode sessions (`RpcCommitParams` with `operation_id` →
+  `Runtime.commit` → `Engine.commitReceipt`, `hello.capabilities.commit:true`)
+  (#266).
 - The Fact embedding lane: vectors on separate `Embedding_<profileId>`
   nodes keyed by `fact_id`, one `vec_fact_<profileId>` index per profile,
   the `embedding-state.json` ledger (version 2, `facts`) and the
@@ -115,7 +118,7 @@ derived layer, no PPR.
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
-| commit path | `commitHits` with producers 1 (receipt `recall_hit` + `outcome`, in-process only: the `commit` RPC is deferred) and 2 (exposure); only `recall_hit` moves `S`/`t_last_hit`, the rest audit-only; `hello.commit_mode`; idem_key | 04 §5–6, 05 §10 |
+| commit path | `commitHits` with producers 1 (receipt `recall_hit` + `outcome` through the served `commit` RPC, idempotent on `operation_id`) and 2 (exposure); only `recall_hit` moves `S`/`t_last_hit`, the rest audit-only; `hello.commit_mode`; idem_key | 04 §5–6, 05 §10 |
 | receipts | append-only RecallReceipt control records (delivered IDs, snapshots, versions, channels, ranking state, digests); exact-once adoption per source and outcome per recall; explicit TTL, expired commit rejected, absence never a label | 05, D45 |
 | utility | per-Episode `U` from rank-weighted outcome attribution (`Σ w_e = 1`), rebuildable utility cache, `(1 + β·U)` in score; zero and missing distinct | 04, D45 |
 | policy | `policy.set` / `policy.revoke` RPCs, `anamnesis.memory-policy/1` Episodes, active-policy cache rebuild, policy-revision barrier, `content` scope over raw text, control Episodes excluded from search, structured-selector limit reported | 02, D43 |

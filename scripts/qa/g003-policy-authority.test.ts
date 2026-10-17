@@ -155,15 +155,16 @@ test("real Node/UDS policy set/revoke, deferred commit refusal, in-process recei
     const p = client(), auto = client();
     const unknown = { operation_id: uuidv7(), recall_id: uuidv7(), reward: 0 };
     const policy = { policy_id: uuidv7(), selector: { source: root }, scope: "content" as const };
-    failure(await p.request("commit", unknown), "unsupported_method"); // Deferred RPC: refused by the frame parser, before authentication, with the request id echoed.
+    failure(await p.request("commit", unknown), "unauthenticated");
     failure(await p.request("policy.set", policy), "unauthenticated");
     failure(await p.request("hello", { ...hello, token: "wrong", client: "installation" }), "authentication_failed");
     const authenticated = success(await p.request("hello", hello), "hello").result;
     expect(authenticated.principal).toBe("installation");
-    expect(authenticated.capabilities).toMatchObject({ commit: false, policy: true, recall: true });
+    expect(authenticated.capabilities).toMatchObject({ commit: true, policy: true, recall: true });
     expect(authenticated.capabilities.methods).toEqual([...RPC_METHODS]);
     await auto.request("hello", { ...hello, commit_mode: "auto" });
-    failure(await auto.request("commit", unknown), "unsupported_method");
+    failure(await auto.request("commit", unknown), "commit_mode_mismatch");
+    failure(await p.request("commit", unknown), "unknown_recall");
     await expect(engine.commitReceipt(unknown, context)).rejects.toThrow("unknown_recall");
     for (const forged of [{ ...policy, allowed: true }, { ...policy, policy_revision: 0 }, { ...policy, selector: {} }, { ...policy, selector: { literal: "private" } }, { ...policy, scope: "derived" }]) {
       expect(RpcPolicySetParams.safeParse(forged).success).toBe(false);
