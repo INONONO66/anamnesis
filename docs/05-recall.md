@@ -15,7 +15,7 @@ D43-D51 in [10-decision-log](10-decision-log.md)
 supersede the affected D40/D42 contracts.
 
 ```text
-  recall(query, session?, T = now, limit = 10, window = 2, budget?)
+  recall(query, session?, T = now, limit = 10, window = 2, budget?, time?, order?, known_by?)
     │
     ├─ ① pin         recall_id · T · now · R0 · policy_revision · config_version · active[*]
     │
@@ -40,8 +40,9 @@ supersede the affected D40/D42 contracts.
 ## 1. Pin
 
 Status — Shipped: `recall_id` (UUIDv7), T defaulting to now, `now`,
-`policy_revision`, `limit`, validated `budget`, session and one query
-embedding whose failure drops the vector channel. Not shipped: `R0`,
+`policy_revision`, `limit`, validated `budget`, session, the `time` window,
+`order` and `known_by` (#269, #270), and one query embedding whose failure
+drops the vector channel. Not shipped: `R0`,
 `active[*]` stream selectors, `config_version`, and the pinned data versions
 row (prompt digest, `grouping_version`, `judge_profile_id`) on the receipt.
 
@@ -58,7 +59,7 @@ recaptures serving revisions/selectors but preserves the request's T and now.
 | `policy_revision` | Current suppression policy, regardless of historical T; checked at delivery and commit |
 | `config_version` | Ranking, prior/calibration, rendering, budget/tokenizer and receipt-retention versions |
 | pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the adjudication `judge_profile_id`, and the `embedding_profile_id` behind the vector channel. All are recorded on the receipt (D48–D51) |
-| request options | Session, `limit`, `window` (0..8), validated `budget`, client mode and authenticated principal |
+| request options | Session, `limit`, `window` (0..8), validated `budget`, `time` window, `order`, `known_by`, client mode and authenticated principal |
 | query embedding | One call to the embedding service, on the caller's verbatim query inside the active profile's pinned template. On failure the vector channel is absent |
 
 The query text is used **as the caller wrote it** (D48). BM25 runs on that
@@ -69,6 +70,31 @@ variant; the offline comparison behind that default is in
 [research/retrieval-fusion](research/retrieval-fusion.md), which measured 20/20
 versus 19/20 Hit@1 on a small development set and therefore settles nothing
 beyond "no mandatory translation".
+
+### Time window, order and known_by
+
+Status — Shipped: `time`, `order` and `known_by` on `RpcRecallParams`
+(#269, #270).
+
+`time = { from?, to? }` narrows the result to a window of `time_utc`. `to`
+defaults to T; `to > T` or `from > to` is `invalid_params`. The window is a
+hard filter, applied to every candidate channel and again to the ranked list
+before packing. It is not a score adjustment. Primaries, window Episodes and
+every candidate channel are window-filtered; CONTRASTS peers delivered as
+companions are bounded only by `time_utc <= T`, so a companion outside
+`[from, to]` can accompany an in-window primary, as context, not a result.
+
+`order` is `"relevance"` (default) or `"chronological"`. Selection is the
+same either way: the top `limit` primaries by score. `chronological` changes
+only the presentation order of the selected primaries, `time_utc ASC, id
+ASC`, and ranks follow that presentation order.
+
+`known_by` has the same type as T. When present, only Episodes and Facts
+with `ingested_at <= known_by` are served, and an INVALIDATES link whose own
+`ingested_at` is later than `known_by` does not invalidate its target (a
+null link `ingested_at` is always known). This is one predicate over one
+stored timestamp, not a second time axis; the narrow exception to D4 is
+recorded as D57 in [10-decision-log](10-decision-log.md).
 
 ## 2. Candidate channels
 
@@ -216,16 +242,19 @@ degradation on a partial envelope.
 
 Status — Shipped: channel RRF relevance, retention-decayed mass, HitCache
 utility, the score formula, policy and valid(T) filtering, a first
-DERIVED_FROM companion, CONTRASTS peers (LIMIT 4) and the D44 packer. Not
-shipped: PPR inside the fused RRF list, Fact source-mean utility, D46
-occurrence grouping and the full conflict-bundle probe.
+DERIVED_FROM companion, CONTRASTS peers (LIMIT 4), the D44 packer, the
+Fact-side `A_Fact` / `U_Fact` (#267), `provenance.supersedes` (#263), the
+`time` window, `order` and `known_by` (#269, #270). Not shipped: PPR inside
+the fused RRF list for Episodes, D46 occurrence grouping and the full
+conflict-bundle probe.
 
 ### relevance — RRF
 
 Status — Shipped: rank-only RRF over the present Episode and Fact channel
-lists with absent-channel weight redistribution. Not shipped: the `ppr` list
-as a fusion channel with weight .30 and the identity channel weight; PPR mass
-is computed but ranked outside this fusion.
+lists with absent-channel weight redistribution; for Facts the PPR mass is
+folded in as a ranked list beside bm25 and vector and the sum is normalized
+(#267). Not shipped: the `ppr` list as an Episode fusion channel with weight
+.30 and the identity channel weight.
 
 ```text
   relevance(x) = Σ_L  w_L / (60 + rank_L(x))
@@ -243,9 +272,12 @@ item. All weights are assumptions to calibrate, not measured efficacy.
 
 Status — Shipped: `m(now)` from the HitCache `(s, t_last_hit)` row with the
 retention curve, `U` from the cached utility, and `score = relevance ·
-max(m, ε)^γ · (1 + beta · U)` for Episodes. Not shipped: `A_Fact` as a
-source maximum with `sigma_fact`, `U_Fact` as a source mean, Entity anchor
-`m0`, and mass-gated envelope truncation.
+max(m, ε)^γ · (1 + beta · U)` for Episodes and Facts; for a Fact, relevance
+is the normalized RRF over its channels (bm25, vector, PPR folded in as a
+ranked list), `A_Fact` is the maximum of `R(elapsed_days, S · sigma_fact)`
+over its materialized source Episodes with `sigma_fact = 30`, and `U_Fact`
+is the mean of `U_Episode` over those sources (#267). Not shipped: Entity
+anchor `m0` and mass-gated envelope truncation.
 
 For the candidate union (all lists ∪ envelope top 256; ≤ 274 + 256 = **530**
 elements), first retain returnable Facts/Episodes and at most eight Entity
@@ -285,10 +317,17 @@ a memory excluded there has no PPR opportunity (docs/06).
 ### Filters and ordering
 
 Status — Shipped: Facts and Episodes as results, valid(T) through effective
-INVALIDATES, the current-policy recheck on primaries and peers, and `score
-DESC, relevance DESC, mass DESC, id ASC` with ranks assigned after packing.
-Not shipped: the `entities` anchor block (top 8) and `provenance.supersedes`
-attachment of invalidated Facts.
+INVALIDATES (a Fact with an INVALIDATES link whose `target_id` is the Fact,
+`effective_time_utc <= T` and a non-null link id is never a primary), the
+`provenance.supersedes` attachment of invalidated Facts under the invalidating
+Fact (at most 8, `time_utc DESC, id ASC`; policy-denied content becomes
+`supersedes_redacted` plus a `supersedes_withheld` warning; more than 8 adds
+a `supersedes_incomplete` warning), the same rules the Episode revision path
+uses (#263), the `time` window filter, `order` presentation (§1), the
+`known_by` predicate on Episodes, Facts and INVALIDATES links (§1), the
+current-policy recheck on primaries and peers, and `score DESC, relevance
+DESC, mass DESC, id ASC` with ranks assigned after packing. Not shipped: the
+`entities` anchor block (top 8).
 
 1. **Kind**: results are Facts and Episodes. Entities and Communities are not
    results. Entity anchors alone are returned separately in `entities`
@@ -309,7 +348,9 @@ attachment of invalidated Facts.
 
 Status — Shipped: `id`, `kind`, `schema`, `epistemic`, `content`, `time`,
 `score`, `relevance`, `mass`, `utility`, `rank`, `sources`,
-`provenance.derived_from`, `supersedes`, `contrasts`, `warnings` and
+`provenance.derived_from`, `supersedes` (invalidated Facts under their
+invalidator, with `supersedes_redacted` and the `supersedes_withheld` /
+`supersedes_incomplete` warnings, #263), `contrasts`, `warnings` and
 `channels`. Not shipped: `content_language`, `modality` on Facts, the
 conflict counters, the D49 echo lineage fields and `operator_corrected`.
 
@@ -359,8 +400,9 @@ authority.
 Status — Shipped: CONTRASTS peers selected with LIMIT 4 under a
 current-policy check, delivered as companions. Not shipped: occurrence
 grouping and `occurrence_ids`, the raw-65 probe with the 64-peer inspection,
-`conflict_total`, `conflict_truncated`, `conflict_redacted`, the mandatory
-`warnings` codes, and the eight-target `supersedes` completion.
+`conflict_total`, `conflict_truncated`, `conflict_redacted` and the
+`conflict_*` warning codes. The eight-target `supersedes` completion with its
+`supersedes_withheld` and `supersedes_incomplete` warnings is shipped (#263).
 
 Every original and each occurrence's extracted assertion/provenance is retained
 as a separate immutable Fact, even if semantically duplicate. DERIVED_FROM and

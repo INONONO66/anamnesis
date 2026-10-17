@@ -1395,3 +1395,43 @@ through the BM25, session and exact channels. A wrong gate threshold skips
 material silently, so the gate score is stored per window in
 `extraction-state.json` for audit. Fact vectors are generation-scoped, so a
 generation cutover re-embeds.
+
+## D57 — known_by as a single ingested_at predicate (narrow D4 exception)
+
+**Date**: 2026-10-17
+
+**Decision**: `RpcRecallParams.known_by` (same type as T) restricts a recall
+to what the engine had ingested by that time: only Episodes and Facts with
+`ingested_at <= known_by` are served. INVALIDATES links carry `ingested_at`,
+set to the invalidating element's `ingested_at` (null means always known),
+and a link not yet known at `known_by` does not invalidate its target. That
+is the whole mechanism: one predicate over one stored timestamp, evaluated
+with the existing `visible(T)` and `valid(T)` checks. There are no
+bitemporal intervals, no per-element valid-from/valid-to and no record-time
+axis to recompute on a generation switch or correction. Without `known_by`
+nothing changes. D4 stays normative for everything else.
+
+The same change ships the rest of the recall-serving contract: Fact
+validity and `provenance.supersedes` at assembly (#263), the Fact score
+with `sigma_fact = 30` and the source-mean `U_Fact` (#267), and the `time`
+window with `order` (#269); docs/05 §1 and §6 carry the details.
+
+**Status**: shipped with #263, #267, #269 and #270.
+
+**Alternative**: (a) keep D4 untouched and answer "what did the system know
+then" only from receipts and the audit log; (b) full bitemporal storage with
+a record-time interval on every element and link.
+
+**Reason**: a caller replaying an earlier session needs the memory as it
+stood then, which receipts can't reconstruct for a query that was never
+asked. `ingested_at` is already written once on every Episode and Fact, so
+a `<=` comparison costs one predicate per row and one property per
+INVALIDATES link. (b) buys exactness on the record axis at the price D4
+rejected.
+
+**Trade-off accepted**: `known_by` is a lower bound on knowledge, not a
+replay. Policy is still current policy, the active generation is still the
+current one, and an element re-extracted after `known_by` under a newer
+generation is not projected back. A link whose `ingested_at` is null is
+treated as always known, so links written before this change can't be
+excluded by `known_by`.

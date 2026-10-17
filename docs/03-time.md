@@ -163,6 +163,11 @@ relationship index `(target_id, generation?, effective_time_utc, id)` and the
 marker index `(target_id, generation, effective_time_utc, evidence_id)`, with
 `effective_time_utc <= T`, ordered by time/ID and `LIMIT 1` each. Either match
 invalidates; duplicate edge/marker evidence does not change the predicate.
+
+INVALIDATES links carry `ingested_at`, copied from the invalidating element's
+`ingested_at` (null means always known). Under a recall `known_by`, a link
+with `ingested_at > known_by` is not yet known and does not invalidate its
+target; without `known_by` the predicate above is unchanged (D57).
 Validity never expands an unbounded incoming adjacency list. Complete marker
 coverage is required before serving a reconciled generation.
 
@@ -315,8 +320,15 @@ engine actually asks is "what was the world like then"; "what did the system
 know then" is a debugging question.
 
 Debugging uses `Episode.ingested_at`, generation integers, Hit server time and
-durable RecallReceipt impressions (D45, D47). A structural revision log alone
-cannot reconstruct a result: policy/config versions, selected channels,
+durable RecallReceipt impressions (D45, D47). Serving reads
+`ingested_at` in two places. The recall `known_by` parameter
+([05-recall](05-recall.md) §1) is a single `ingested_at <= known_by`
+predicate over Episodes, Facts and INVALIDATES links, no interval axis and no
+per-element valid-from/valid-to. And for an element with no Hit,
+`ingested_at` is the retention clock origin of its mass (Episode mass and the
+Fact accessibility A_Fact over its source Episodes).
+D57 records it as a narrow exception to D4, not a reversal. A structural
+revision log alone cannot reconstruct a result: policy/config versions, selected channels,
 candidate/index/cache state, degradation decisions, mass/utility reads, `now`
 and exact output budgeting also matter. Receipts capture bounded source/result
 snapshots and ranking evidence, not a complete historical database. Their
@@ -360,10 +372,15 @@ WHERE n.generation = $g_e AND n.visible_from_utc <= $T
 RETURN n.id
 ```
 
-valid(T) is not applied at the candidate or envelope stage — an invalid but
-non-denied Fact may still conduct (the Entities connected through it can
-remain relevant). A denied Fact never conducts, regardless of validity.
-valid is applied **only at result assembly**; invalid Facts drop out of the
-results but allowed invalidated Facts may appear in bounded supersedes
-provenance, never through unbounded recursive traversal
-([05-recall](05-recall.md) §6).
+valid(T), including `known_by`, is applied at the candidate stage: every
+Fact channel (BM25, vector) and every Episode channel filters on it, so a Fact
+with an effective known INVALIDATES at T never enters the derived node set,
+never seeds PPR and cannot conduct. A denied Fact never conducts either.
+valid is checked again at result assembly; a Fact with an effective
+INVALIDATES at T is never a primary, and when its invalidating Fact is served
+the invalidated Fact is attached under that result's `provenance.supersedes`
+(at most 8, `time_utc DESC, id ASC`, policy-denied content redacted), never
+through unbounded recursive traversal ([05-recall](05-recall.md) §6). The
+`time` window and `known_by` are likewise candidate-stage predicates on every
+channel, and the window is re-applied to the ranked list before packing
+(#263, #269, #270).

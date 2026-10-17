@@ -33,6 +33,11 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   DERIVED_FROM row as Fact companion, and CONTRASTS peers (LIMIT 4) under a
   current-policy check, and a bounded same-session Episode window (default
   two before / two after the Fact's DERIVED_FROM source Episode, D56).
+  Shipped in this change: Fact validity at assembly with
+  `provenance.supersedes` under the invalidating Fact (#263), the Fact score
+  with `A_Fact` over `sigma_fact = 30` and the source-mean `U_Fact` (#267),
+  the `time` window and `order` (#269), and `known_by` with `ingested_at`
+  on INVALIDATES links (#270, D57).
 - The Fact embedding lane: vectors on separate `Embedding_<profileId>`
   nodes keyed by `fact_id`, one `vec_fact_<profileId>` index per profile,
   the `embedding-state.json` ledger (version 2, `facts`) and the
@@ -90,6 +95,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 | G2 | done (#244, #246) | embedding lane: `EmbeddingAttempt` and `Outbox` leave the graph; missing-vector scan; `embedding-state.json` ledger | 01 §4, 02 §3, D54 |
 | G3 | done (#249) | extraction lane: the five pipeline ledger labels and their seven constraints leave the graph; coverage-driven scan; `extraction-state.json` journal with sealed-entry pruning; `extraction.*` audit events | 01 §6, §7, 02 §5, D55 |
 | G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
+| G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
 
 ## v0.1 — originals, forgetting, search
 
@@ -215,7 +221,8 @@ envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
   roadmap is retired ([10-decision-log](10-decision-log.md) D0).
 - LLM calls on the recall path. Summarization and re-ranking belong to the
   caller.
-- Transaction time / bitemporal (03 §6).
+- Transaction time / bitemporal (03 §6). The recall `known_by` predicate is
+  one `ingested_at` comparison, not a record-time axis (D57).
 - Recursive INVALIDATES (03 §4).
 - Tick- or schedule-based forgetting updates (04).
 - Per-link weights (D24).
