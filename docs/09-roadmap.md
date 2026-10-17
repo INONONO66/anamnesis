@@ -13,8 +13,8 @@ layer and the Hit ledger are fixed in v0.1 and never change afterwards.
 ## Where the code is today
 
 The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
-`packages/protocol`, `packages/core` and `packages/backfill` plus the
-`app/anamnesis` daemon. What runs:
+`packages/protocol`, `packages/core`, `packages/backfill` and
+`packages/archive` plus the `app/anamnesis` daemon. What runs:
 
 - An originals write path into Neo4j with the version-1 Episode digest and
   D49 lineage properties written in the Episode's own transaction, and a
@@ -62,6 +62,13 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   `extraction-state.json` (D55); `extraction.audit.create` / `run` /
   `status` run the same pipeline on demand. This is the production
   extraction path, not an audit-only one.
+- The raw archive (`packages/archive`): `collect` copies every source file
+  by content hash and writes one record per message, and `archive admit`
+  replays those records into the daemon over the UDS socket with the
+  `remember` RPC, keeping a per-source cursor so an interrupted run resumes
+  after the last acknowledged record (#264). Backfill is no longer the only
+  way into the graph; the archive is the collection SSOT and admission
+  reads from it.
 - Policy RPCs (D43), budget (D44), the Hit ledger with receipts (D45),
   conflict bundles (D46), `backup` / `restore`, the authority snapshot and
   the hit cache.
@@ -103,6 +110,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 | G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
 | G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
 | G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason when the provider is absent or the embed fails; `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
+| G9 | done (#264) | archive admit over the daemon socket with per-source cursor resume; `admit --archive --socket --token [--source]` sends each archive record as one Episode through `remember`, tallies created / duplicate / failed, and keeps `<archive>/admit/<source>.cursor.json` (atomic rewrite after every ack, `in_progress` resumes after `last`, `complete` or absent means a full run that the daemon dedupes) | packages/archive README, D56 |
 
 ## v0.1 — originals, forgetting, search
 

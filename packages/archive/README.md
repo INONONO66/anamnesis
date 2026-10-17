@@ -1,6 +1,6 @@
 # @anamnesis/archive
 
-Lossless, content-addressed archive of every session source anamnesis can read. Backfill turns sources into Episodes and drops what recall does not need; the archive keeps everything so a later extraction pass can re-read the originals without the source machine.
+Lossless, content-addressed archive of every session source anamnesis can read. Backfill turns sources into Episodes and drops what recall does not need; the archive keeps everything so a later extraction pass can re-read the originals without the source machine. `admit` replays archived records into a running daemon, so the archive is a path into the graph that no longer needs the source machine.
 
 ## Layout
 
@@ -28,6 +28,51 @@ bun packages/archive/src/cli.ts collect omo    ~/.omo/agent/sessions --archive ~
 bun packages/archive/src/cli.ts collect claude ~/.claude/projects    --archive ~/anamnesis-archive
 bun packages/archive/src/cli.ts collect codex  ~/.codex/sessions     --archive ~/anamnesis-archive
 ```
+
+### admit
+
+```
+bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>]
+```
+
+Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC on the UDS socket. It uses the daemon's own socket client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
+
+The daemon decides what counts as new. Each `remember` answer is tallied as one of:
+
+- `created`: the Episode was not in the graph;
+- `duplicate`: an Episode with the same origin and revision was already there;
+- `failed`: the daemon rejected the record (the reason goes to stderr).
+
+Stdout carries one JSON object per admitted source (one line when `--source` is given):
+
+```json
+{"source":"omo","records":1234,"created":1200,"duplicates":34,"failed":0,"resumed_from":null}
+```
+
+`resumed_from` is the cursor the run continued after, or `null` for a run that started from the first record.
+
+#### Cursor and resume
+
+Progress is kept per source in `<archive>/admit/<source>.cursor.json`:
+
+```json
+{
+  "status": "in_progress",
+  "last": { "session_id": "...", "index": 41 },
+  "created": 1200,
+  "duplicates": 34,
+  "updated_at": "2026-10-17T09:30:00.000Z"
+}
+```
+
+The file is rewritten after every successful `remember`, through a temp file and an atomic rename, so a crash can't leave a half-written cursor. `last` names the record that was just acknowledged (session id and zero-based index in that session's manifest record order, which spans every file of the session).
+
+On start:
+
+- `status: "in_progress"` means a previous run stopped early. The new run skips everything up to and including `last`, starts at the next record, and reports that cursor as `resumed_from`.
+- `status: "complete"`, or no cursor file at all, means a full run from the first record. Records the daemon already holds come back as duplicates, so re-running a finished source is safe and shows up in the report as `duplicates`.
+
+A run that reaches the end writes the cursor with `status: "complete"`. On SIGTERM or SIGINT the command finishes the `remember` already in flight, writes the cursor, and exits with 143 or 130. The cursor is never lost to a signal. A record the daemon refuses is counted as `failed` and the run continues past it (the reason goes to stderr; a later full run retries it); a transport or retryable error aborts the run with the cursor at the last acknowledged record, so the next run retries from there.
 
 ## Record contract
 
