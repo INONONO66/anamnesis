@@ -65,6 +65,12 @@ export class Manifest {
     ).all(source, sha256).map((row) => row.session_id);
   }
 
+  /** Code-unit order, so a resume cursor compares session ids with the same `<` that produced the order. */
+  sessionIds(source: string): string[] {
+    return this.db.query<{ session_id: string }, [string]>("SELECT DISTINCT session_id FROM file_sessions WHERE source = ?")
+      .all(source).map((row) => row.session_id).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  }
+
   insertSession(session: ArchiveSession, records: readonly ArchiveRecord[]): void {
     this.db.transaction(() => {
       if (this.hasFile(session.source, session.sha256)) {
