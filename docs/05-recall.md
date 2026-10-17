@@ -808,8 +808,8 @@ The bounded TypeScript PPR loop has no deadline.
 ## 10. Durable impressions and feedback (D45)
 
 Status — Shipped: the append-only RecallReceipt persisted before delivery,
-`receipt_ttl_ms` expiry, `commit {recall_id, adopted?, reward?}` with
-`empty_commit`, `unknown_recall` and `receipt_expired`, rank-weighted source
+`receipt_ttl_ms` expiry, the served `commit {operation_id, recall_id, adopted?, reward?}` RPC with
+`invalid_params` on an empty body, `unknown_recall` and `receipt_expired`, rank-weighted source
 attribution into HitCache retention and utility. Not shipped:
 `selection_digest` with echo lineage, auto-mode `exposure` Hits and the
 EmbeddingResolution identities on the receipt.
@@ -844,12 +844,13 @@ Auto mode appends audit-only `exposure` for the top **included** three primary
 results after response delivery, through the same policy-checked commit path.
 Failures are reported operationally; they do not change the delivered response.
 Exposure does not change S or t_last_hit. Receipt mode owns the authenticated
-`commit {recall_id, adopted?, reward?}` report (deferred on the wire; in-process
-`Engine.commitReceipt`); auto-mode explicit commit is rejected.
+`commit {operation_id, recall_id, adopted?, reward?}` report (served by the
+daemon as `Runtime.commit` → `Engine.commitReceipt`); auto-mode explicit commit is rejected.
 Reward must be finite and in [-1,1], not clamped. Missing reward differs from
 zero: zero is an observed outcome and enters the utility denominator.
 
-At least one of adopted or reward must be present; otherwise `empty_commit`.
+At least one of adopted or reward must be present; the wire schema rejects
+an empty body as `invalid_params` before dispatch.
 Adoption IDs must be distinct included primary IDs, not companions or discarded
 items; duplicate IDs and malformed/null fields reject before attribution.
 Adoption is exactly once per recall/source Episode; outcome exactly once per
