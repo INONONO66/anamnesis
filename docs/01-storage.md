@@ -1157,6 +1157,40 @@ refuses ACTIVE, BUILDING and BLOCKED profiles, rollback targets, and shared
 model properties still referenced by any retained index. `RELATES_TO.content`
 is embedded under the same rule.
 
+### Markdown projection (G10, #268)
+
+The projection is a read-only, human-readable view of the extraction stream:
+every Entity of the writable generation that has at least one VALID Fact at
+T, with those Facts listed under it. It never writes to Neo4j. A Fact is
+valid exactly as recall's `FACT_VALID` predicate says (`known_by = T`, no
+effective known INVALIDATES, the Fact not itself invalidated) and timed no
+later than T (`time_utc` null or `<= T`), and it's dropped when any of its DERIVED_FROM source Episodes is selected by an active
+`content` deny policy, using the same selector match as recall
+(`selector.episode_id` against the Episode id, `selector.source` against
+`origin_source`). Facts are ordered by `time_utc` DESC then id ASC; Entities
+by name ASC then id ASC. The daemon serves it as the `projection {T?}` RPC
+(`capabilities.projection: true`) through `ProjectionStore.snapshotTx`.
+
+`anamnesis-ops projection write <dir>` regenerates the files. One markdown
+file per Entity, named `<slug(name)>-<last 12 hex of id>.md` where the
+slug lowercases the name and collapses every run outside `[a-z0-9]` into
+`-`, trimmed; the suffix is the UUIDv7 random tail, which keeps names unique
+(the leading hex of a UUIDv7 is a timestamp shared by ids minted in the same
+minute, so it would not). The body is
+`# <name>`, a blank line, then one `- <content> (<time value or undated>)
+[<fact id>]` line per Fact, then a blank line and the footer
+`<!-- anamnesis projection; generated from graph at T=<T>; do not edit -->`.
+T is the request T (`latest` when none is sent; the command sends none), not
+the wall clock, so two runs over an unchanged graph produce byte-identical
+files; `generated_at` is reported on stdout only. Files in `<dir>` matching
+`*-<12 hex>.md` that no longer correspond to a projected Entity are removed;
+other files are left alone. The command prints two JSON lines:
+`{generated_at}` then `{entities, facts, written, removed, dir}`.
+
+The projection is an output, never an input: the daemon doesn't read the
+directory back, nothing in the graph references it, and editing a file
+changes nothing until the next write overwrites it.
+
 ## 5. Link
 
 Relationships are real Neo4j relationship types, not nodes. The seven roles
