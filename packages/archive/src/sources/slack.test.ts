@@ -54,3 +54,10 @@ test("slack reports physical JSONL lines and discovers channel and thread export
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("slack unwraps a vault-files envelope into its channel session", async () => {
+  const envelope = { schema_version: 1, source: "slack", channel_id: "C9", session_id: "C9", message_id: "deadbeef", raw: slackFixture[1] };
+  const [session] = await slackAdapter.parse("/vault/slack/C9/20260101T000000000Z.bot.deadbeef.json", new TextEncoder().encode(JSON.stringify(envelope)));
+  expect(session?.sessionId).toBe("C9");
+  expect(session?.records.map((record) => [record.origin.record, record.role, record.kind, record.text])).toEqual([[slackFixture[1]?.ts, "operator", "bot_message", slackFixture[1]?.text]]);
+});

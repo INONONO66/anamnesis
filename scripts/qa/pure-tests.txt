@@ -77,6 +77,7 @@ packages/archive/src/sources/pi.test.ts
 packages/archive/src/sources/gjc.test.ts
 packages/archive/src/sources/misc.test.ts
 packages/archive/src/sources/slack.test.ts
+packages/archive/src/sources/kakao.test.ts
 packages/archive/src/sources/notion.test.ts
 packages/archive/src/sources/agentlog.test.ts
 packages/archive/src/sources/claude.test.ts

@@ -19,7 +19,7 @@ A source file is copied once per sha256. A file that appears at two paths (synce
 bun packages/archive/src/cli.ts collect <source> <root> --archive <dir>
 ```
 
-`source` is one of `omo`, `pi`, `gjc`, `misc`, `claude`, `codex`, `slack`, `notion`, `agentlog`. The command prints `source<TAB>sessions<TAB>records` and exits 2 on usage errors or an unknown source.
+`source` is one of `omo`, `bigpi`, `pi`, `gjc`, `misc`, `claude`, `codex`, `slack`, `kakao`, `notion`, `agentlog`. The command prints `source<TAB>sessions<TAB>records` and exits 2 on usage errors or an unknown source.
 
 Examples for this Mac:
 
@@ -27,7 +27,11 @@ Examples for this Mac:
 bun packages/archive/src/cli.ts collect omo    ~/.omo/agent/sessions --archive ~/anamnesis-archive
 bun packages/archive/src/cli.ts collect claude ~/.claude/projects    --archive ~/anamnesis-archive
 bun packages/archive/src/cli.ts collect codex  ~/.codex/sessions     --archive ~/anamnesis-archive
+bun packages/archive/src/cli.ts collect bigpi  ~/.bigpi/agent/sessions --archive ~/anamnesis-archive
+bun packages/archive/src/cli.ts collect kakao  ~/anamnesis-sources/kakao --archive ~/anamnesis-archive
 ```
+
+`slack` reads two layouts under one root: an API export (`channels/<id>.jsonl`, `threads/<id>-<thread_ts>.jsonl`, or `<id>/*.json` arrays) and the vault-files envelope (`<id>/<file>.json` holding one message under `raw`). `kakao` reads rows of the lazykatok `messages` table as JSONL or a `sqlite3 -json` array; one session per `chat_id`, every row kept.
 
 ### admit
 
@@ -86,6 +90,7 @@ Only three things never become records:
 
 - tool-call and tool-result parts with no prose (the raw copy still has them);
 - derived transcripts that re-encode a session already archived (`runtime/transcripts/`, `._*` sidecars, Claude `journal.jsonl`);
-- files under a session root that are not transcripts, such as omo `extensions/goal/*.history.jsonl` goal history (no session header).
+- files under a session root that are not transcripts, such as omo `extensions/goal/*.history.jsonl` goal history (no session header);
+- a vault-files slack envelope whose `raw` has no `ts` (a binary attachment dumped as `_raw_hex`, not a message; the raw copy keeps the file).
 
 Everything else, including thinking blocks, system events, compaction markers, oversized agentlog events and sessions backfill skips, is kept.

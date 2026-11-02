@@ -1,4 +1,4 @@
-import { parseSlackMessage, slackEpisode } from "@anamnesis/backfill";
+import { isRecord, optionalText, parseSlackMessage, slackEpisode } from "@anamnesis/backfill";
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { revisionOf } from "../record.ts";
@@ -21,14 +21,16 @@ export const slackAdapter: SourceAdapter = {
   async parse(path, bytes) {
     const name = basename(path);
     const parent = basename(dirname(path));
-    const channel = name.endsWith(".jsonl")
-      ? parent === "threads" ? name.split("-")[0] ?? "" : basename(name, ".jsonl")
-      : parent;
     const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     const parsed: unknown = name.endsWith(".jsonl") ? undefined : JSON.parse(raw);
+    const envelope = isRecord(parsed) && parsed["source"] === "slack" && isRecord(parsed["raw"]) ? parsed : undefined;
+    const channel = name.endsWith(".jsonl")
+      ? parent === "threads" ? name.split("-")[0] ?? "" : basename(name, ".jsonl")
+      : optionalText(envelope?.["channel_id"]) ?? parent;
     const messages: { value: string; line: number }[] = name.endsWith(".jsonl")
       ? raw.split(/\r?\n/).flatMap((value, index) => value.trim() === "" ? [] : [{ value, line: index + 1 }])
-      : Array.isArray(parsed) ? parsed.map((value: unknown) => ({ value: JSON.stringify(value), line: 0 })) : [];
+      : envelope ? (isRecord(envelope["raw"]) && optionalText(envelope["raw"]["ts"]) !== undefined ? [{ value: JSON.stringify(envelope["raw"]), line: 0 }] : [])
+        : Array.isArray(parsed) ? parsed.map((value: unknown) => ({ value: JSON.stringify(value), line: 0 })) : [];
     const records = messages.map(({ value, line }) => {
       const message = parseSlackMessage(value);
       const input = slackEpisode(message, channel, channel).input;
