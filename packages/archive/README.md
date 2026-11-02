@@ -36,10 +36,10 @@ bun packages/archive/src/cli.ts collect kakao  ~/anamnesis-sources/kakao --archi
 ### admit
 
 ```
-bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>] [--since <iso-datetime>]
+bun packages/archive/src/cli.ts admit --archive <dir> (--socket <uds path> | --tcp <host:port> --tcp-token-file <path>) --token <token> [--source <kind>] [--since <iso-datetime>]
 ```
 
-Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC on the UDS socket. It uses the daemon's own socket client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
+Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC. Choose exactly one transport: `--socket` for a local UDS, or `--tcp host:port` with `--tcp-token-file` naming the listener bearer file; that file must be a regular 0600 file owned by the caller and contain one token of at most 1024 bytes. `--token` remains the installation token for either transport. The command uses the daemon's own client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
 
 With `--since <iso-datetime>` a record whose `occurred_at` is earlier than the bound is skipped: it is not sent, it is counted as `skipped` in the report (which also echoes the bound as `since`), and it never moves the cursor. A record exactly at the bound is admitted. The cursor is positional, so a resumed run re-applies the bound to the records after the acknowledged position; records before it are neither revisited nor counted again.
 
