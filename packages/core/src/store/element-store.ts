@@ -323,17 +323,31 @@ export class ElementStore {
   /** Meta's sequence lock is held until commit, serializing cache splices. */
   private async spliceTopologyTx(tx: ManagedTransaction, episode: { id: string; sessionKey: string }): Promise<void> {
     const { id, sessionKey } = episode;
-    const predecessors = await tx.run<{ id: string }>(
-      `MATCH (e:Element:Episode {id: $id}), (p:Element:Episode)
-       WHERE p.session_key = e.session_key
-         AND (p.time_utc < e.time_utc OR (p.time_utc = e.time_utc AND p.ingest_seq < e.ingest_seq))
-       RETURN p.id AS id ORDER BY p.time_utc DESC, p.ingest_seq DESC LIMIT 1`, { id });
-    const successors = await tx.run<{ id: string; previousRecord: string | null }>(
-      `MATCH (e:Element:Episode {id: $id}), (s:Element:Episode)
-       WHERE s.session_key = e.session_key
-         AND (s.time_utc > e.time_utc OR (s.time_utc = e.time_utc AND s.ingest_seq > e.ingest_seq))
-       RETURN s.id AS id, s.topology_previous_record AS previousRecord
-       ORDER BY s.time_utc, s.ingest_seq LIMIT 1`, { id });
+    const self = await tx.run<{ t: string; seq: unknown; previous: string | null }>(
+      `MATCH (e:Element:Episode {id: $id})
+       RETURN e.time_utc AS t, e.ingest_seq AS seq, e.topology_previous_record AS previous`, { id });
+    const t = self.records[0]!.get("t"), seq = self.records[0]!.get("seq"), previous = self.records[0]!.get("previous");
+    const key = { sk: sessionKey, t, seq };
+    // A disjunction over (time_utc, ingest_seq) makes the planner union a whole-label scan per
+    // remember, so each neighbour is two seeks on episode_session_order: same instant first (it
+    // outranks any other instant), then the nearest other instant. The hint needs a predicate
+    // on every indexed property; ingest_seq is assigned before the splice, so IS NOT NULL is free.
+    const sameInstantBefore = await tx.run<{ id: string }>(
+      `MATCH (p:Element:Episode) USING INDEX p:Episode(session_key, time_utc, ingest_seq)
+       WHERE p.session_key = $sk AND p.time_utc = $t AND p.ingest_seq < $seq
+       RETURN p.id AS id ORDER BY p.ingest_seq DESC LIMIT 1`, key);
+    const predecessors = sameInstantBefore.records.length > 0 ? sameInstantBefore : await tx.run<{ id: string }>(
+      `MATCH (p:Element:Episode) USING INDEX p:Episode(session_key, time_utc, ingest_seq)
+       WHERE p.session_key = $sk AND p.time_utc < $t AND p.ingest_seq IS NOT NULL
+       RETURN p.id AS id ORDER BY p.time_utc DESC, p.ingest_seq DESC LIMIT 1`, key);
+    const sameInstantAfter = await tx.run<{ id: string; previousRecord: string | null }>(
+      `MATCH (s:Element:Episode) USING INDEX s:Episode(session_key, time_utc, ingest_seq)
+       WHERE s.session_key = $sk AND s.time_utc = $t AND s.ingest_seq > $seq
+       RETURN s.id AS id, s.topology_previous_record AS previousRecord ORDER BY s.ingest_seq LIMIT 1`, key);
+    const successors = sameInstantAfter.records.length > 0 ? sameInstantAfter : await tx.run<{ id: string; previousRecord: string | null }>(
+      `MATCH (s:Element:Episode) USING INDEX s:Episode(session_key, time_utc, ingest_seq)
+       WHERE s.session_key = $sk AND s.time_utc > $t AND s.ingest_seq IS NOT NULL
+       RETURN s.id AS id, s.topology_previous_record AS previousRecord ORDER BY s.time_utc, s.ingest_seq LIMIT 1`, key);
     const predecessor = predecessors.records[0]?.get("id") ?? null;
     const successor = successors.records[0];
     if (successor && successor.get("previousRecord") === null) {
@@ -343,14 +357,15 @@ export class ElementStore {
       await this.conducting.deleteTopologyLinksTx(tx, removed.records.map(row => row.get("id")));
       await this.mergeTopologyTx(tx, { from: id, to: successor.get("id"), sessionKey });
     }
-    const parents = await tx.run<{ id: string }>(
-      `MATCH (e:Element:Episode {id: $id}), (p:Element:Episode)
-       WHERE (e.topology_previous_record IS NULL AND p.id = $predecessor)
-         OR (e.topology_previous_record IS NOT NULL AND p.session_key = e.session_key
-             AND p.origin_record = e.topology_previous_record AND p.ingest_seq < e.ingest_seq)
-       RETURN p.id AS id`, { id, predecessor });
-    for (const parent of parents.records) {
-      await this.mergeTopologyTx(tx, { from: parent.get("id"), to: id, sessionKey });
+    // Episodes always carry time, so the time_utc predicate below only completes the index hint.
+    const parents = previous === null
+      ? predecessor === null ? [] : [predecessor]
+      : (await tx.run<{ id: string }>(
+        `MATCH (p:Element:Episode) USING INDEX p:Episode(session_key, time_utc, ingest_seq)
+         WHERE p.session_key = $sk AND p.time_utc IS NOT NULL AND p.ingest_seq < $seq AND p.origin_record = $previous
+         RETURN p.id AS id`, { ...key, previous })).records.map(row => row.get("id"));
+    for (const parent of parents) {
+      await this.mergeTopologyTx(tx, { from: parent, to: id, sessionKey });
     }
   }
   private async mergeTopologyTx(tx: ManagedTransaction, edge: { from: string; to: string; sessionKey: string }): Promise<void> {
