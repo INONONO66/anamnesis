@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionFixture } from "./omo.fixture.ts";
-import { omoAdapter } from "./omo.ts";
+import { bigpiAdapter, omoAdapter } from "./omo.ts";
 import { collect } from "../collect.ts";
 import { Manifest } from "../manifest.ts";
 
@@ -20,6 +20,9 @@ test("omo preserves backfill identity time and revision while admitting filtered
     expect(match?.revision).toBe(episode.input.source_revision);
   }
   expect(parsed.map((session) => session.sessionId)).toEqual(["native-session"]);
+  const bigpi = (await bigpiAdapter.parse("/native.jsonl", new TextEncoder().encode(sessionFixture))).flatMap((session) => session.records);
+  expect(bigpiAdapter.kind).toBe("bigpi");
+  expect(bigpi.map((record) => record.origin)).toEqual(records.map((record) => ({ ...record.origin, source: "bigpi" })));
   expect(records.map((record) => [record.origin.record, record.origin.actor, record.role, record.canonical_kind])).toEqual([
     ["m-user", "user", "user", "message"],
     ["m-tool-text", "toolResult", "tool", "message"],

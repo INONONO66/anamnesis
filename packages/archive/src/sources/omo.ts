@@ -131,7 +131,7 @@ async function* walk(root: string): AsyncGenerator<string> {
  * filename. The runtime/transcripts/<id>/transcript.jsonl copy re-encodes an
  * existing native transcript, losing part boundaries, and is not a source.
  */
-export function sessionAdapter(source: "omo" | "pi" | "gjc", scope: (root: string) => string): SourceAdapter {
+export function sessionAdapter(source: "omo" | "pi" | "gjc" | "bigpi", scope: (root: string) => string): SourceAdapter {
   return {
     kind: source,
     async *files(root) {
@@ -172,3 +172,5 @@ export function sessionAdapter(source: "omo" | "pi" | "gjc", scope: (root: strin
 }
 
 export const omoAdapter = sessionAdapter("omo", (root) => root);
+/** bigpi writes omo-format sessions; it stays its own source kind so the archive never merges two tools under one name. */
+export const bigpiAdapter = sessionAdapter("bigpi", (root) => root);

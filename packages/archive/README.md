@@ -19,7 +19,7 @@ A source file is copied once per sha256. A file that appears at two paths (synce
 bun packages/archive/src/cli.ts collect <source> <root> --archive <dir>
 ```
 
-`source` is one of `omo`, `pi`, `gjc`, `misc`, `claude`, `codex`, `slack`, `notion`, `agentlog`. The command prints `source<TAB>sessions<TAB>records` and exits 2 on usage errors or an unknown source.
+`source` is one of `omo`, `bigpi`, `pi`, `gjc`, `misc`, `claude`, `codex`, `slack`, `kakao`, `notion`, `agentlog`. The command prints `source<TAB>sessions<TAB>records` and exits 2 on usage errors or an unknown source.
 
 Examples for this Mac:
 
@@ -27,15 +27,19 @@ Examples for this Mac:
 bun packages/archive/src/cli.ts collect omo    ~/.omo/agent/sessions --archive ~/anamnesis-archive
 bun packages/archive/src/cli.ts collect claude ~/.claude/projects    --archive ~/anamnesis-archive
 bun packages/archive/src/cli.ts collect codex  ~/.codex/sessions     --archive ~/anamnesis-archive
+bun packages/archive/src/cli.ts collect bigpi  ~/.bigpi/agent/sessions --archive ~/anamnesis-archive
+bun packages/archive/src/cli.ts collect kakao  ~/anamnesis-sources/kakao --archive ~/anamnesis-archive
 ```
+
+`slack` reads two layouts under one root: an API export (`channels/<id>.jsonl`, `threads/<id>-<thread_ts>.jsonl`, or `<id>/*.json` arrays) and the vault-files envelope (`<id>/<file>.json` holding one message under `raw`). `kakao` reads rows of the lazykatok `messages` table as JSONL or a `sqlite3 -json` array; one session per `chat_id`, every row kept.
 
 ### admit
 
 ```
-bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>] [--since <iso-datetime>]
+bun packages/archive/src/cli.ts admit --archive <dir> (--socket <uds path> | --tcp <host:port> --tcp-token-file <path>) --token <token> [--source <kind>] [--since <iso-datetime>]
 ```
 
-Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC on the UDS socket. It uses the daemon's own socket client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
+Walks the archive's records in a fixed order (source, then session id, then the manifest's record order for that session: `occurred_at`, file hash, line, seq) and sends each one to the daemon as a single Episode through the `remember` RPC. Choose exactly one transport: `--socket` for a local UDS, or `--tcp host:port` with `--tcp-token-file` naming the listener bearer file; that file must be a regular 0600 file owned by the caller and contain one token of at most 1024 bytes. `--token` remains the installation token for either transport. The command uses the daemon's own client (`app/anamnesis/client.ts` plus the payload upload from `app/anamnesis/source.ts`) and builds the Episode with backfill's builders for that source kind, so the bodies match; a `payload_hash` is sent only for records whose masked text exceeds the inline limit and is the hash of that masked text. With `--source` only that kind is admitted, otherwise every source present in the manifest.
 
 With `--since <iso-datetime>` a record whose `occurred_at` is earlier than the bound is skipped: it is not sent, it is counted as `skipped` in the report (which also echoes the bound as `since`), and it never moves the cursor. A record exactly at the bound is admitted. The cursor is positional, so a resumed run re-applies the bound to the records after the acknowledged position; records before it are neither revisited nor counted again.
 
@@ -86,6 +90,7 @@ Only three things never become records:
 
 - tool-call and tool-result parts with no prose (the raw copy still has them);
 - derived transcripts that re-encode a session already archived (`runtime/transcripts/`, `._*` sidecars, Claude `journal.jsonl`);
-- files under a session root that are not transcripts, such as omo `extensions/goal/*.history.jsonl` goal history (no session header).
+- files under a session root that are not transcripts, such as omo `extensions/goal/*.history.jsonl` goal history (no session header);
+- a vault-files slack envelope whose `raw` has no `ts` (a binary attachment dumped as `_raw_hex`, not a message; the raw copy keeps the file).
 
 Everything else, including thinking blocks, system events, compaction markers, oversized agentlog events and sessions backfill skips, is kept.

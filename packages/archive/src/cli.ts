@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
+import { lstat, readFile } from "node:fs/promises";
 import { z } from "zod";
-import { RpcClient } from "../../../app/anamnesis/client.ts";
+import { RpcClient, type RpcTcpTarget } from "../../../app/anamnesis/client.ts";
 import { uploadPayload } from "../../../app/anamnesis/source.ts";
 import { admit, type Rememberer } from "./admit.ts";
 import { collect } from "./collect.ts";
@@ -9,7 +10,7 @@ import { adapters } from "./sources/index.ts";
 
 const USAGE = [
   "usage: bun packages/archive/src/cli.ts collect <source> <root> --archive <dir>",
-  "       bun packages/archive/src/cli.ts admit --archive <dir> --socket <uds path> --token <token> [--source <kind>] [--since <iso-datetime>]",
+  "       bun packages/archive/src/cli.ts admit --archive <dir> (--socket <uds path> | --tcp <host:port> --tcp-token-file <path>) --token <token> [--source <kind>] [--since <iso-datetime>]",
 ].join("\n");
 
 function usage(): never {
@@ -24,6 +25,16 @@ function sourcesIn(archiveDir: string): string[] {
   } finally {
     manifest.close();
   }
+}
+
+async function tcpTarget(endpoint: string, tokenFile: string): Promise<RpcTcpTarget> {
+  const at = endpoint.lastIndexOf(":"), host = endpoint.slice(0, at).replace(/^\[|\]$/g, ""), port = Number(endpoint.slice(at + 1));
+  if (at < 1 || !host || !Number.isInteger(port) || port < 1 || port > 65535) usage();
+  const info = await lstat(tokenFile);
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) throw new Error("--tcp-token-file must be a regular file owned by the current user with mode 0600");
+  const bearer = (await readFile(tokenFile, "utf8")).trim();
+  if (!bearer || /[\r\n]/.test(bearer) || Buffer.byteLength(bearer) > 1024) throw new Error("--tcp-token-file must hold one token of at most 1024 bytes");
+  return { host, port, token: bearer };
 }
 
 async function runCollect(argv: string[]): Promise<void> {
@@ -46,16 +57,17 @@ async function runCollect(argv: string[]): Promise<void> {
 }
 
 async function runAdmit(argv: string[]): Promise<void> {
-  let values: { archive?: string; socket?: string; token?: string; source?: string; since?: string };
+  let values: { archive?: string; socket?: string; tcp?: string; "tcp-token-file"?: string; token?: string; source?: string; since?: string };
   try {
     ({ values } = parseArgs({ args: argv, strict: true, allowPositionals: false, options: {
-      archive: { type: "string" }, socket: { type: "string" }, token: { type: "string" }, source: { type: "string" }, since: { type: "string" },
+      archive: { type: "string" }, socket: { type: "string" }, tcp: { type: "string" }, "tcp-token-file": { type: "string" },
+      token: { type: "string" }, source: { type: "string" }, since: { type: "string" },
     } }));
   } catch {
     usage();
   }
-  const { archive, socket, token, source, since } = values;
-  if (archive === undefined || socket === undefined || token === undefined) usage();
+  const { archive, socket, tcp, "tcp-token-file": tcpTokenFile, token, source, since } = values;
+  if (archive === undefined || token === undefined || (socket === undefined) === (tcp === undefined) || (tcp === undefined) !== (tcpTokenFile === undefined)) usage();
   if (since !== undefined && !z.iso.datetime().safeParse(since).success) {
     console.error(`invalid --since: ${since}`);
     process.exit(2);
@@ -68,7 +80,8 @@ async function runAdmit(argv: string[]): Promise<void> {
   let signal: number | undefined;
   process.on("SIGINT", () => { signal ??= 130; });
   process.on("SIGTERM", () => { signal ??= 143; });
-  const client = await RpcClient.connect(socket, token);
+  const target = tcp !== undefined && tcpTokenFile !== undefined ? await tcpTarget(tcp, tcpTokenFile) : socket!;
+  const client = await RpcClient.connect(target, token);
   try {
     const rememberer: Rememberer = {
       async remember(params, payload) {
