@@ -110,52 +110,28 @@ key file) and exits 2 with `{"error":"extraction_provider_required"}` when
 absent. Embeddings remain optional; `embed` reports a disabled no-op when no
 embedding endpoint is configured. `extract`, `embed`, and `recall <query>` are
 explicit foreground operations and print one JSON result.
-## Source snapshots and managed foreground mode
+## Loading a cleaned corpus
 
-`node dist/anamnesis-ops.mjs ingest snapshot.jsonl checkpoint.json` consumes an
-immutable UTF-8 JSONL snapshot of `RpcRememberParams` records, limited to 16 MiB
-and the protocol's per-record bounds. Use explicit source/revision identities.
-Before sending, it durably saves the normalized line and delivery identity in
-`<checkpoint>.pending.json`. Only a matching committed receipt advances the
-checkpoint's snapshot hash, installation incarnation, next line and last receipt;
-pending is retired afterward. A spooled receipt is not source completion.
-Re-running reconciles an existing pending identity through `ingest.status`
-without resending it, unless the daemon disowns it (below). It rejects changed
-snapshots, foreign incarnations,
-unresolved pending work, and receipts that do not match the checkpointed source
-line. It does not tail changing logs or
-replace the existing backfill format adapters. Keep snapshot/checkpoint paths
-private and distinct. `ANAMNESIS_RUNTIME_SOCKET` optionally overrides the socket
-used by ops (including a transport relay).
+`node dist/anamnesis-ops.mjs load <clean-dir> <source> <state-dir>` sends one source of a cleaned corpus
+(`_rooms.jsonl` plus one JSONL file per room, one record per message) as `remember` calls, rooms in parallel
+and each room in file order, with a line cursor per room file under `<state-dir>/<source>/` so a re-run sends
+only what was not sent. Options, the record format and the output lines are in
+[deploy](../../docs/deploy.md#loading-a-cleaned-corpus). `ANAMNESIS_RUNTIME_SOCKET` optionally overrides the
+socket used by ops (including a transport relay).
 
-A lost response is `outcome_unknown` with `retryable: false`; no checkpoint
-advancement or in-process retry occurs. The next run resolves the pending
-identity with `ingest.status`: `committed` advances the checkpoint;
-`spooled`/`blocked`/`quarantined` exit `source_pending_<state>` and leave both
-files unchanged; `unknown` answered by the same `data_incarnation` with
-`storage: available` in that same reply (the daemon's observation while it
-answered, never an earlier `status`) means the daemon never admitted that delivery,
-so the run prints `{"event":"pending_retired","reason":"daemon_unknown"}`,
-retires the pending file and resends the same checkpointed line as a first send
-(`remember` is idempotent on `revision_key`, so a commit that landed late
-reconciles as an identity match). `unknown` while storage is unavailable stays
-`source_pending_unknown`, and a foreign incarnation stays `incarnation_mismatch`;
-neither is resent.
-The source checkpoint has its own exclusive process lease; confirmed-dead source
-processes are reclaimed using the same conservative PID ownership policy.
+## Managed foreground mode
 
 `node dist/anamnesis-ops.mjs managed` runs a foreground supervisor with at most
 three automatic restarts after unexpected child termination. It never signals an
 unrelated PID. SIGINT/SIGTERM stop and await its owned daemon; a clean RPC shutdown
 ends supervision. This is not an installed OS service or an unbounded restart loop.
 
-The five recovery scenarios use owned, isolated Neo4j and real built Node UDS:
+The four recovery scenarios use owned, isolated Neo4j and real built Node UDS:
 
 ```sh
 bun run build:runtime
 bun scripts/qa/runtime-scenarios.ts --case uds-ingest --evidence-root /tmp/g002-evidence
-# Other cases: object-spool-crashes, outage-drain-50, source-resume,
-# managed-ingest-restart. Run database cases serially on small Docker VMs.
+# Other cases: object-spool-crashes, outage-drain-50, managed-ingest-restart. Run database cases serially on small Docker VMs.
 ```
 
 ## Live extraction acceptance (explicit opt-in)
