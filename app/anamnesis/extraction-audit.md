@@ -37,7 +37,11 @@ model call: it scores the whole window, and only when the window's maximum
 score is below `ANAMNESIS_EXTRACTION_GATE_THRESHOLD` (default `0.2`) is every
 member journaled as a `gate_skipped` cancellation and sealed as coverage
 without a provider call; one Episode above the threshold keeps the whole
-window. The gate defaults to `off`.
+window. The gate defaults to `off`. Before the gate, a window outside the
+configured extraction scope (`ANAMNESIS_EXTRACTION_SCOPE_FILE`) is journaled
+as `out_of_scope` cancellations the same way, without reading its text. A claim
+judge over zero claims has exactly one valid answer, no decisions, so it is
+answered locally instead of by the provider.
 
 ## Provider and ABI
 

@@ -230,11 +230,12 @@ async function gatedEmbedder(): Promise<{ server: Server; endpoint: string; call
     release: () => { const held = releases.shift(); held?.(); return held !== undefined; } };
 }
 
-test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is served after at most one provider call", async () => {
+test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is served while a provider call is held", async () => {
   // The daemon's serial owner alternates one background turn with one request. A turn that embedded a whole batch
   // (up to 100 sequential provider calls, each up to the provider timeout) held every RPC for minutes on the
   // production daemon: status over TCP hit the client deadline and reported outcome_unknown while a requeue drained.
-  // Every provider call here is held until the test releases it, so the RPC latency is measured in provider calls.
+  // Provider calls now run outside the owner's turns. Every call here is held until the test releases it, so a status
+  // answered before any release proves no RPC waits for the provider.
   const provider = await gatedEmbedder();
   const driver = neo4j.driver(URI!, neo4j.auth.basic("neo4j", PASSWORD!), { disableLosslessIntegers: true });
   try {
@@ -244,21 +245,10 @@ test.skipIf(!URI || !PASSWORD)("an RPC issued during an embedding backlog is ser
       const client = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
       try {
         await provider.started();
-        // All three Facts precede this daemon. A status queued now is answered after at most the call in flight.
-        // A batch turn would embed every
-        // remaining entry before serving it.
-        const before = provider.completed();
-        let answered = false;
-        const status = client.request("status", {}).then(result => { answered = true; return result; });
-        while (!answered) {
-          const next = provider.started();
-          if (!provider.release()) { await next; continue; }
-          await Promise.race([status, next]);
-        }
-        const observed = await status;
-        expect(provider.completed() - before).toBeLessThanOrEqual(1);
-        expect(observed.workers.embedding.pending).toBe(3 - observed.workers.embedding.drained_total);
-        expect(observed.workers.embedding.quarantined_total).toBe(0);
+        // All three Facts precede this daemon and the first call is held: nothing can commit until it is released.
+        const observed = await client.request("status", {});
+        expect(provider.completed()).toBe(0);
+        expect(observed.workers.embedding).toMatchObject({ pending: 3, drained_total: 0, quarantined_total: 0 });
         // Let the remaining calls through one at a time: wait for a call to be held, answer it, wait for its completion.
         while (provider.completed() < 3) {
           const held = provider.started(), done = provider.finished();

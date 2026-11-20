@@ -321,6 +321,14 @@ export class Engine {
     return this.store.drainEmbeddingOutbox(limit);
   }
 
+  async dueEmbeddings(limit = 100) {
+    return this.store.dueEmbeddings(limit);
+  }
+
+  async embedOutbox(ids: readonly string[]) {
+    return this.store.embedOutbox(ids);
+  }
+
   async requeueQuarantinedEmbeddings(input: RpcEmbeddingRequeueParams, context: InstallationContext) {
     return this.store.requeueQuarantinedEmbeddings(input, context);
   }

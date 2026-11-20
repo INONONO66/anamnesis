@@ -58,6 +58,7 @@
             "policy_denied",
             "cancelled",
             "gate_skipped",
+            "out_of_scope",
             "expired",
             "worker_lost",
             "premises_changed"

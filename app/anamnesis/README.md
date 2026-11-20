@@ -20,6 +20,14 @@ Gateway and skips windows whose best score is below
 private JSON key file from `ANAMNESIS_JEV_GATE_KEY_FILE` (default
 `~/.config/anamnesis/jev-vercel-gateway.key.json`); the model id is fixed and the
 bearer is never logged. The default is `off`.
+
+`ANAMNESIS_EXTRACTION_SCOPE_FILE` limits which Episodes are extracted. The file
+is JSON, `{"sources": ["omo", ...], "rooms": [{"source": "kakao", "room": "<id>"}]}`:
+every Episode of a listed source is extracted, plus the listed rooms of other
+sources (a room also covers its thread sessions `room/thread`). Any other Episode
+is covered without a provider call as an `out_of_scope` cancellation, which is
+final for the generation, so list a room before extraction reaches its Episodes.
+The file is read at startup; without it every Episode is extracted.
 Task identity is a stable SHA-256 of dialect/endpoint/model/prompt configuration,
 not an attestation of upstream weights. The reported model identity is tracked
 separately; a change within a provider instance fails with `provider_mismatch`.
