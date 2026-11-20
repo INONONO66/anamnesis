@@ -12,7 +12,7 @@ import { timingHash, timingLog } from "../../app/anamnesis/timing.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const OWNER_LABEL = "anamnesis.qa.owner";
-const RUNTIME_CASES = new Set(["e2e-real", "uds-ingest", "object-spool-crashes", "outage-drain-50", "source-resume", "managed-ingest-restart", "normalized-agentlog"]);
+const RUNTIME_CASES = new Set(["e2e-real", "uds-ingest", "object-spool-crashes", "outage-drain-50", "managed-ingest-restart"]);
 const AGGREGATE_CASES = new Set(["release-acceptance", "soak-24h"]);
 const BLOCKED_CASES = new Map<string, string>();
 // Storage contracts contain real CAS, ordered-edge and legacy-format assertions.
@@ -139,7 +139,15 @@ export interface ProcessResult {
 }
 export type TestFileResult = ProcessResult & { file: string; cleanup: string };
 
-/** start().done is the child's terminal event; cleanup includes closing its driver. */
+/** The names bun test prints for failed tests, so a failed file reports why without opening its output. */
+function failedTestNames(output: string): string {
+  const names = [...output.matchAll(/^\(fail\) (.+)$/gm)].map(match => match[1]!.replace(/ \[[\d.]+m?s\]$/, "")).slice(0, 5);
+  return names.length ? `: ${names.join(" | ")}` : "";
+}
+
+/** start().done is the child's terminal event; cleanup includes closing its driver. A failed file does not stop the run:
+ * every file runs and the run rejects at the end naming each failed file. A cleanup failure stops it at once, since a
+ * database that was not reset would leak that file's state into every later one. */
 export async function runTestFiles(files: string[], options: {
   start: (file: string) => { done: Promise<ProcessResult> };
   cleanup: () => Promise<void>;
@@ -147,15 +155,15 @@ export async function runTestFiles(files: string[], options: {
   signal?: AbortSignal;
 }): Promise<TestFileResult[]> {
   const results: TestFileResult[] = [];
+  const failures: unknown[] = [];
   for (const file of files) {
     options.signal?.throwIfAborted();
     const result = await options.start(file).done;
     const completed = { ...result, file, cleanup: "not attempted" };
     results.push(completed);
     options.record(results); // Preserve the terminal result before cleanup can fail.
-    const failures: unknown[] = [];
     if (result.code !== 0 || result.timedOut) {
-      failures.push(new Error(`Test file failed: ${file}, exit=${result.code}, timedOut=${result.timedOut}`));
+      failures.push(new Error(`Test file failed: ${file}, exit=${result.code}, timedOut=${result.timedOut}${failedTestNames(result.output)}`));
     }
     try {
       await options.cleanup();
@@ -163,11 +171,12 @@ export async function runTestFiles(files: string[], options: {
     } catch (error) {
       completed.cleanup = `FAILED: ${String(error)}`;
       failures.push(error);
+      throw new AggregateError(failures, failures.map(String).join("; "));
     } finally {
       options.record(results);
     }
-    if (failures.length) throw new AggregateError(failures, failures.map(String).join("; "));
   }
+  if (failures.length) throw new AggregateError(failures, failures.map(String).join("; "));
   return results;
 }
 
@@ -364,6 +373,12 @@ export async function main(args = process.argv.slice(2)): Promise<string> {
             catch (error) { if (Date.now() >= deadline) throw error; await new Promise((resolve) => setTimeout(resolve, 500)); }
           }
           await driver.executeQuery("MATCH (n) DETACH DELETE n");
+          // Constraints and indexes outlive DETACH DELETE; a file that relied on another file's schema (or tripped over
+          // it) would pass or fail by order. Every file starts from the empty database a fresh container gives it.
+          for (const row of (await driver.executeQuery("SHOW CONSTRAINTS YIELD name")).records)
+            await driver.executeQuery(`DROP CONSTRAINT \`${row.get("name")}\``);
+          for (const row of (await driver.executeQuery("SHOW INDEXES YIELD name, type WHERE type <> 'LOOKUP'")).records)
+            await driver.executeQuery(`DROP INDEX \`${row.get("name")}\``);
         } finally { await driver.close(); }
       },
       record: (results) => {

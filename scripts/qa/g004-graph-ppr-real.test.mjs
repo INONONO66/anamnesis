@@ -7,10 +7,10 @@ import { Engine } from '../../packages/core/src/engine.ts';
 import { exportFixedCsr, solveFixedCsr } from '../../packages/core/src/dynamics/ppr.ts';
 const uuid = () => `01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 const hash = v => createHash('sha256').update(v).digest('hex');
-const context = { principal: 'installation', commit_mode: 'receipt' };
+const context = { principal: 'installation', commit_mode: 'receipt', client_binding: uuid() };
 const g = state => ({ id: uuid(), stream: 'extraction', incarnation: hash('g004-real'), state, covered_ingest_seq: 0, created_at: 1, updated_at: 1 });
 
-test('owned Neo4j audit coverage refuses activation and fixed CSR/PPR remains available', async () => {
+test('owned Neo4j activation admits an empty graph, rejects uncovered derived proofs, and keeps fixed CSR/PPR available', async () => {
   const root = await mkdtemp('/tmp/g004-graph-real-');
   const options = { uri: process.env.ANAMNESIS_TEST_NEO4J_URI, password: process.env.ANAMNESIS_TEST_NEO4J_PASSWORD };
   assert.ok(options.uri && options.password, 'owned Neo4j credentials required');
@@ -23,13 +23,17 @@ test('owned Neo4j audit coverage refuses activation and fixed CSR/PPR remains av
     await engine.store.createExtractionGeneration(first, context); await engine.store.createExtractionGeneration(second, context);
     const seedCoverage = async id => { for (const partition of ['episodes', 'active_extraction']) await query('CREATE (:ExtractionCoverage {key:$key,generation_id:$id,body:$body,covered_ingest_seq:0})', { key: `${id}:${partition}`, id, body: JSON.stringify({ generation_id:id, partition, required_ingest_seq:0, covered_ingest_seq:0, omission_digest:hash(''), updated_at:1 }) }); };
     await seedCoverage(first.id); await seedCoverage(second.id);
+    const activated = await engine.store.cutoverExtractionGeneration({generation_id:first.id,expected_generation_id:null,expected_selector_version:0},context);
+    assert.equal(activated.state,'active');
+    assert.equal((await engine.store.readExtractionCoverage(first.id,context)).generation_id,first.id);
+    await assert.rejects(engine.store.rollbackExtractionGeneration({generation_id:first.id,expected_generation_id:first.id,expected_selector_version:1},context), /rollback_requires_retired/);
+    await query('CREATE (:Element:Fact {id:$id,generation:$generation,primary_episode_id:$source})',{id:uuid(),generation:second.id,source:uuid()});
     const before = await query('MATCH (n) RETURN elementId(n) AS id,properties(n) AS properties ORDER BY id');
-    await assert.rejects(engine.store.cutoverExtractionGeneration({generation_id:first.id,expected_generation_id:null,expected_selector_version:0},context),{code:'activation_prerequisite_unavailable'});
+    await assert.rejects(engine.store.cutoverExtractionGeneration({generation_id:second.id,expected_generation_id:first.id,expected_selector_version:1},context),{code:'activation_prerequisite_unavailable'});
     assert.deepEqual(await query('MATCH (n) RETURN elementId(n) AS id,properties(n) AS properties ORDER BY id'),before);
-    await assert.rejects(engine.store.readExtractionCoverage(first.id, context), /generation_not_selected/);
-    await assert.rejects(engine.store.rollbackExtractionGeneration({generation_id:first.id,expected_generation_id:null,expected_selector_version:0},context), /rollback_requires_retired/);
+    await assert.rejects(engine.store.readExtractionCoverage(second.id,context),/generation_not_selected/);
     const csr = exportFixedCsr({ nodes: ['a','b','c'], arcs: [{from:'a',to:'b',role:'X',id:'2'},{from:'a',to:'c',role:'X',id:'1'}] });
     const ppr = solveFixedCsr(csr, new Map([['a', 1]])); assert.equal(csr.offsets.length, 4); assert.equal(ppr.values.length, 3); assert.ok(ppr.mass > 0);
-    console.log(JSON.stringify({ checkpoint:'generation-activation-fail-closed-csr-ppr', selected:null, activation_supported:false, csr, ppr:{ mass:ppr.mass, iterations:ppr.iterations, residualL1:ppr.residualL1 } }));
+    console.log(JSON.stringify({ checkpoint:'generation-activation-empty-and-fail-closed-csr-ppr', selected:first.id, empty_activation:true, uncovered_derived_refused:true, csr, ppr:{ mass:ppr.mass, iterations:ppr.iterations, residualL1:ppr.residualL1 } }));
   } finally { await driver.close(); await engine.close(); await rm(root, { recursive:true, force:true }); }
 });

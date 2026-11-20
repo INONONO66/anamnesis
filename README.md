@@ -59,17 +59,11 @@ normative; code follows them.
 
 ## Status
 
-The September 2026 design (docs 00–10) supersedes earlier drafts. Current
-code includes `packages/protocol`, `packages/core`, and eight backfill
-adapters. Originals use external content-addressed payloads, revision keys,
-transactional ingestion sequences, and fulltext recall. The storage contract
-adds explicit predecessor checks, versioned canonical digests, and
-event-time session insertion; unmarked legacy records are not silently
-rewritten.
-
-Pure dynamics helpers are present but not yet wired into recall. The runtime
-application, receipts, policies, extraction, generations, and graph recall are
-still implementation work, not existing capabilities. The execution boundary
-is one `app/anamnesis`; internal modules do not require separate workspace
-packages. See [runtime storage development](docs/runtime-storage-development.md)
+The September 2026 design (docs 00–10) supersedes earlier drafts. The code is two
+packages, `packages/protocol` (the zod contract and its JSON Schema export) and
+`packages/core` (storage, extraction, embeddings, recall), plus the
+`app/anamnesis` daemon and its operator CLI. What runs today is listed in
+[09-roadmap](docs/09-roadmap.md#where-the-code-is-today); cleaned corpora are
+loaded with `anamnesis-ops load` ([deploy](docs/deploy.md#loading-a-cleaned-corpus)).
+See [runtime storage development](docs/runtime-storage-development.md)
 and the [main roadmap issue](https://github.com/INONONO66/anamnesis/issues/186).

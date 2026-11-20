@@ -7,7 +7,8 @@ import { ExtractionProviderError, type ExtractionProvider } from "../../packages
 import type { InstallationContext } from "../../packages/core/src/store.ts";
 import { Generation, extractionBodyDigest } from "../../packages/protocol/src/extraction.ts";
 
-const context: InstallationContext = { principal: "installation", commit_mode: "auto" };
+const context: InstallationContext = { principal: "installation", commit_mode: "auto", client_binding: uuidv7() };
+const lineage = { metadata: { origin_role: "user" as const, lineage_mode: "direct" as const, parent_recall_ids: [] }, context };
 const uri = process.env["ANAMNESIS_TEST_NEO4J_URI"];
 const password = process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"];
 if (!uri || !password) throw new Error("owned runner credentials required");
@@ -18,8 +19,16 @@ const extractionProvider: ExtractionProvider = {
   async extract(input) {
     if (input.task === "claim") {
       const text = input.text, end = Buffer.byteLength(text, "utf8");
-      return { task: "claim", claims: [{ text, evidence: { start: 0, end, text } }], language: "und", modality: "text" };
+      return { task: "claim", claims: [{ text, evidence: { start: 0, end, text }, confidence: 0.9 }], language: "und", modality: "text" };
     }
+    if (input.task === "claim_window") return { task: "claim_window", episodes: input.episodes.map(({ id, text }) => ({
+      id, claims: [{ text, evidence: { start: 0, end: Buffer.byteLength(text, "utf8"), text }, confidence: 0.9 }], language: "und", modality: "text",
+    })) };
+    if (input.task === "judge_relations") return { task: "judge_relations", relation_context_digest: input.relation_context?.body_digest,
+      judgements: input.relation_context?.candidates.map(candidate => ({
+        candidate_id: candidate.id, relation: "unrelated", confidence: 0.9, reason: "distinct fixture claim",
+      })), language: "und", modality: "text" };
+    if (input.task !== "judge_claims") throw new ExtractionProviderError("provider_rejected");
     const claims = input.claim_context?.claims ?? [];
     return { task: "judge_claims", claim_body_digest: input.claim_context?.body_digest,
       decisions: claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence })), language: "und", modality: "text" };
@@ -42,7 +51,7 @@ async function exercise(embedding: boolean) {
   for (let i = 0; i < 20; i++) {
     const remembered = await engine.remember({ schema: "anamnesis.original-message/1", content: `grounded claim ${i} prefers option ${i % 2}`,
       time: { value: `2026-09-01T00:00:${String(i).padStart(2, "0")}Z`, precision: "second" },
-      origin: { source: "derived-fixture", session: "session", actor: "fixture", record: String(i) }, mass: 1 });
+      origin: { source: "derived-fixture", session: "session", actor: "fixture", record: String(i) }, mass: 1 }, lineage);
     episodes.push(remembered.id);
   }
   const generation = Generation.parse({ id: uuidv7(), stream: "extraction", incarnation: "f".repeat(64), state: "catching_up",
@@ -81,7 +90,7 @@ test("coverage lag is named before activation", async () => {
   await clearDatabase();
   const engine = new Engine({ uri: uri!, user: "neo4j", password: password!, extractionProvider });
   await engine.init(); await engine.claimWriterEpoch();
-  const remembered = await engine.remember({ schema: "anamnesis.original-message/1", content: "coverage lag", time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "coverage", session: "s", actor: "fixture", record: "1" }, mass: 1 });
+  const remembered = await engine.remember({ schema: "anamnesis.original-message/1", content: "coverage lag", time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "coverage", session: "s", actor: "fixture", record: "1" }, mass: 1 }, lineage);
   const generation = Generation.parse({ id: uuidv7(), stream: "extraction", incarnation: "c".repeat(64), state: "catching_up", covered_ingest_seq: 0, created_at: Date.now(), updated_at: Date.now() });
   await engine.store.createExtractionGeneration(generation, context);
   for (const partition of ["episodes", "active_extraction"] as const)
@@ -103,7 +112,7 @@ test("terminal failed judge is a sealed omission, not a Fact or a permanent gene
     await engine.init(); await engine.claimWriterEpoch();
     const sources: string[] = [];
     for (const content of ["grounded claim retained-source", "grounded claim failed-source"])
-      sources.push((await engine.remember({ content, time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "omission", session: "s", actor: "fixture", record: content } })).id);
+      sources.push((await engine.remember({ content, time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "omission", session: "s", actor: "fixture", record: content } }, lineage)).id);
     const generation = Generation.parse({ id: uuidv7(), stream: "extraction", incarnation: "a".repeat(64), state: "catching_up", covered_ingest_seq: 0, created_at: now, updated_at: now });
     await engine.store.createExtractionGeneration(generation, context);
     const good = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: sources[0]! }, context);
@@ -155,7 +164,7 @@ test("failed and cancelled claims and judges seal content-free omissions and fre
     await engine.init(); await engine.claimWriterEpoch();
     const sources: { content: string; id: string }[] = [];
     for (const content of ["retained", "claim-failed", "claim-cancelled", "judge-failed", "judge-cancelled"])
-      sources.push({ content, id: (await engine.remember({ content, time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "terminal-omissions", session: "s", actor: "fixture", record: content } })).id });
+      sources.push({ content, id: (await engine.remember({ content, time: { value: "2026-09-01T00:00:00Z", precision: "second" }, origin: { source: "terminal-omissions", session: "s", actor: "fixture", record: content } }, lineage)).id });
     const generation = Generation.parse({ id: uuidv7(), stream: "extraction", incarnation: "c".repeat(64), state: "catching_up", covered_ingest_seq: 0, created_at: Date.now(), updated_at: Date.now() });
     await engine.store.createExtractionGeneration(generation, context);
     let digest = extractionBodyDigest([]);
@@ -199,7 +208,7 @@ test("two hundred sources can activate multiple retained Facts per source", asyn
     if (input.task !== "claim") return extractionProvider.extract(input);
     const claims = input.text.split(" | ").map(text => {
       const start = Buffer.from(input.text).indexOf(Buffer.from(text));
-      return { text, evidence: { text, start, end: start + Buffer.byteLength(text) } };
+      return { text, evidence: { text, start, end: start + Buffer.byteLength(text) }, confidence: 0.9 };
     });
     return { task: "claim", claims, language: "en", modality: "text" };
   } };
@@ -211,7 +220,7 @@ test("two hundred sources can activate multiple retained Facts per source", asyn
       content: `project ${i} uses SQLite | project ${i} retains local backups`,
       time: { value: new Date(Date.UTC(2026, 8, 1) + i * 1000).toISOString(), precision: "second" },
       origin: { source: "derived-scale", session: "s", actor: "fixture", record: String(i) },
-    })).id);
+    }, lineage)).id);
     const generation = Generation.parse({ id: uuidv7(), stream: "extraction", incarnation: "b".repeat(64), state: "catching_up", covered_ingest_seq: 0, created_at: Date.now(), updated_at: Date.now() });
     await engine.store.createExtractionGeneration(generation, context);
     for (const source_id of sources) {

@@ -106,7 +106,8 @@ try {
   const settled=once(daemon.signals,'drain_settled',{signal:AbortSignal.timeout(120000)});
   await startDatabase();
   await c.request('status',{});await settled;
-  const drained=await c.request('status',{});assert.equal(drained.storage,'available');assert.equal(drained.spool.pending,0);assert.equal(drained.outbox_pending,52);
+  // The embedding outbox holds Facts without a vector (D56); no extraction runs here, so the drained Episodes add none.
+  const drained=await c.request('status',{});assert.equal(drained.storage,'available');assert.equal(drained.spool.pending,0);assert.equal(drained.outbox_pending,0);
   const committed=[];
   for(const item of queued){const result=await c.request('ingest.status',identity(item.receipt));assert.equal(result.state,'committed');committed.push(result);}
   assert.equal(new Set(committed.map(x=>x.ingest_seq)).size,50);checkpoint('DB restarted: all 50 deliveries drained through Engine',{status:drained,committed});

@@ -2,7 +2,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const roots = ["app/anamnesis", "packages/protocol/src", "packages/core/src", "packages/backfill/src"];
+const roots = ["app/anamnesis", "packages/protocol/src", "packages/core/src"];
 
 export function sourceFiles(): string[] {
   const files: string[] = [];

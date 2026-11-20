@@ -20,8 +20,9 @@ only**.
 
 ## Monorepo (bun workspace)
 
-Target layout. Today only `protocol`, `core` and `backfill` (source
-adapters) exist; the rest is created as the roadmap reaches it (docs/09).
+Target layout. Today `protocol` and `core` exist, with the daemon and its
+operator CLI in `app/anamnesis`; the rest is created as the roadmap reaches it
+(docs/09).
 
 ```text
 anamnesis/
