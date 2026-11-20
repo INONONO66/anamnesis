@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
@@ -178,6 +178,7 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   await expect(runtime.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
 
   const identity = identityOf(first, installation.incarnation);
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([identity.revision_key + ".json"]);
   expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
   expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({ state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available" });
   expect(await runtime.ingestStatus({ ...identity, revision_key: "1".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
@@ -318,8 +319,10 @@ dbTest("lineage metadata needs authenticated custody and is re-verified from the
   const committed = asCommitted(await runtime.remember(v2, receiptContext));
   expect(committed).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(v2, receiptContext)).toEqual({ ...committed, created: false });
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
   const identity = identityOf(v2, installation.incarnation);
   expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
+  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
   await query("MATCH (e:Episode {id:$id}) SET e.context_digests = [$digest]", { id: committed.id, digest: "f".repeat(64) });
   await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_mismatch" });
   await query("MATCH (e:Episode {id:$id}) REMOVE e.lineage_mode", { id: committed.id });
