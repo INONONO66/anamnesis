@@ -129,6 +129,11 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
   containers.push(id);
   const port = Number((await execute('docker', ['port', id, '7687/tcp'])).stdout.trim().split(':').at(-1)); ports.push(port);
   const { default: neo4j } = await import('neo4j-driver');
+  const selectorAt = async uri => {
+    const reader = neo4j.driver(uri, neo4j.auth.basic('neo4j', 'g3-isolated-password'), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
+    try { const [row] = (await reader.executeQuery("MATCH (s:Meta {key:'extraction_selector'}) RETURN s.selector_version AS version, s.generation_id AS generation")).records; return { version: Number(row.get('version')), generation: row.get('generation') ?? null }; }
+    finally { await reader.close(); }
+  };
   const driver = neo4j.driver(`bolt://127.0.0.1:${port}`, neo4j.auth.basic('neo4j', 'g3-isolated-password'), { connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0 });
   try {
     const end = Date.now() + 90000;
@@ -156,12 +161,16 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
   await run(['backup', archive], env, 1); // A live daemon must never be dumped.
   await run(['down'], env);
   await run(['backup', archive], env);
+  // No daemon has run on the source since `down`, so this is the extraction selector the dump carries; the configured
+  // scheduler may already have cut a generation over, so the value itself is not fixed.
+  const sourceSelector = await selectorAt(`bolt://127.0.0.1:${Number((await execute('docker', ['port', id, '7687/tcp'])).stdout.trim().split(':').at(-1))}`);
   const target = { ...env, ANAMNESIS_RUNTIME_ROOT: restored };
   delete target.ANAMNESIS_NEO4J_URI; delete target.ANAMNESIS_NEO4J_CONTAINER;
   await mkdir(restored, { mode: 0o700 });
   await run(['restore', archive], target);
   const state = JSON.parse(await readFile(join(restored, 'authority.json'), 'utf8'));
   ports.push(Number(new URL(state.uri).port));
+  assert.deepEqual(await selectorAt(state.uri), sourceSelector);
   assert.deepEqual((await readFile(join(restored, 'objects', objectHash.slice(0, 2), objectHash))).toString(), objectBytes.toString());
   await run(['up'], target);
   const status = await run(['status'], target);
@@ -173,8 +182,6 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
     await restoredDriver.verifyConnectivity();
     const counts = await restoredDriver.executeQuery("MATCH (e:Episode) RETURN count(e) AS episodes");
     assert.equal(Number(counts.records[0].get('episodes')), 3);
-    const selector = await restoredDriver.executeQuery("MATCH (s:Meta {key:'extraction_selector'}) RETURN s.selector_version AS selector_version");
-    assert.equal(Number(selector.records[0].get('selector_version')), 0);
   } finally { await restoredDriver.close(); }
   await run(['verify'], target);
   await run(['down'], target);

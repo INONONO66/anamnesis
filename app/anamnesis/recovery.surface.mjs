@@ -186,10 +186,11 @@ const scenarios={
     assert.equal((await c.request('status',{})).spool.pending,50);await kill();await start();c=await client();
     const after=await c.request('status',{});assert.equal(after.spool.pending,50);assert.equal(after.data_incarnation,before.data_incarnation);assert.notEqual(after.fs_epoch,before.fs_epoch);
     for(const q of queued)assert.deepEqual(await c.request('remember',q.params),q.receipt);
-    const drained=await recoverDrain(c);assert.equal(drained.spool.pending,0);assert.equal(drained.outbox_pending,50);
+    // The embedding outbox holds Facts without a vector (D56); no extraction runs here, so the drained Episodes add none.
+    const drained=await recoverDrain(c);assert.equal(drained.spool.pending,0);assert.equal(drained.outbox_pending,0);
     const committed=[];for(const q of queued){const result=await c.request('ingest.status',identity(q.receipt));assert.equal(result.state,'committed');const retry=await c.request('remember',q.params);assert.equal(retry.id,result.id);assert.equal(retry.ingest_seq,result.ingest_seq);assert.equal(retry.created,false);committed.push(result);}
     const actual=await rows(50);assert.deepEqual(actual.map(r=>r.revision).sort(),queued.map(q=>key(q.params)).sort());
-    assert.equal((await c.request('status',{})).outbox_pending,50);checkpoint('outage-drain-50',{before,after,drained,queued,committed});
+    assert.equal((await c.request('status',{})).outbox_pending,0);checkpoint('outage-drain-50',{before,after,drained,queued,committed});
   },
   async 'managed-ingest-restart'(){
     await start(true);let c=await client();const before=await c.request('status',{});const first=await c.request('remember',input('managed'));
