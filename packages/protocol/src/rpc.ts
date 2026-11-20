@@ -19,13 +19,14 @@ export const RPC_LIMITS = {
   upload_temp_bytes: 1024 * 1024 * 1024,
   queued_requests_per_connection: 16,
   queued_requests: 256,
+  remember_batch: 32,
   spool_bytes: 1024 * 1024 * 1024,
 } as const;
 
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
-  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
+  "object.commit", "remember", "remember.batch", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
 ] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
@@ -92,6 +93,8 @@ export const RpcRememberParams = z.strictObject({
 });
 export type RpcRememberParams = z.infer<typeof RpcRememberParams>;
 export type RpcRememberParamsInput = z.input<typeof RpcRememberParams>;
+/** Deliveries of one source session, admitted in order as `remember` admits each one, in one serial turn. */
+const RpcRememberBatchParams = z.strictObject({ deliveries: z.array(RpcRememberParams).min(1).max(RPC_LIMITS.remember_batch) });
 
 /** Reserved budget vocabulary; token installation is a runtime admission check. */
 export const RpcOutputBudget = z.discriminatedUnion("unit", [
@@ -266,6 +269,7 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("object.chunk", z.strictObject({ upload_id: z.uuid(), seq: counter, bytes_b64: chunkBytes })),
   request("object.commit", z.strictObject({ upload_id: z.uuid() })),
   request("remember", RpcRememberParams),
+  request("remember.batch", RpcRememberBatchParams),
   request("ingest.status", RpcIngestStatusParams),
   request("extraction.audit.create", CreateExtractionPipeline),
   request("extraction.audit.run", RunExtractionPipeline),
@@ -339,6 +343,10 @@ export const RpcSpooledResult = z.strictObject({
 export type RpcSpooledResult = z.infer<typeof RpcSpooledResult>;
 export const RpcRememberResult = z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult]);
 export type RpcRememberResult = z.infer<typeof RpcRememberResult>;
+/** One answer per delivery, in order: its remember result, or the non-retryable refusal that answered it alone. */
+export const RpcRememberBatchResult = z.strictObject({ results: z.array(z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult,
+  z.strictObject({ state: z.literal("refused"), code: RpcErrorCode, message: boundedString(1024) })])).min(1).max(RPC_LIMITS.remember_batch) });
+export type RpcRememberBatchResult = z.infer<typeof RpcRememberBatchResult>;
 export const RpcStorageState = z.enum(["available", "unavailable"]);
 export type RpcStorageState = z.infer<typeof RpcStorageState>;
 export const RpcIngestStatusResult = z.discriminatedUnion("state", [
@@ -454,6 +462,7 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("object.chunk", z.strictObject({ upload_id: z.uuid(), next_seq: positiveCounter })),
   success("object.commit", RpcObjectMetadata),
   success("remember", RpcRememberResult),
+  success("remember.batch", RpcRememberBatchResult),
   success("ingest.status", RpcIngestStatusResult),
   success("hit-cache.verify", z.strictObject({ state: z.literal("verified"), hits: counter, issues: z.array(z.strictObject({ code: boundedString(128), id: boundedString(128) })).max(1024) })),
   success("hit-cache.rebuild", z.strictObject({ state: z.literal("rebuilt"), hits: counter, created: counter, removed: counter })),

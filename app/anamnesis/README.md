@@ -114,8 +114,8 @@ explicit foreground operations and print one JSON result.
 ## Loading a cleaned corpus
 
 `node dist/anamnesis-ops.mjs load <clean-dir> <source> <state-dir>` sends one source of a cleaned corpus
-(`_rooms.jsonl` plus one JSONL file per room, one record per message) as `remember` calls, rooms in parallel
-and each room in file order, with a line cursor per room file under `<state-dir>/<source>/` so a re-run sends
+(`_rooms.jsonl` plus one JSONL file per room, one record per message) as `remember.batch` calls of up to 32
+records, rooms in parallel and each room in file order, with a line cursor per room file under `<state-dir>/<source>/` so a re-run sends
 only what was not sent. Options, the record format and the output lines are in
 [deploy](../../docs/deploy.md#loading-a-cleaned-corpus). `ANAMNESIS_RUNTIME_SOCKET` optionally overrides the
 socket used by ops (including a transport relay).

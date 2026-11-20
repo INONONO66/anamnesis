@@ -13,7 +13,7 @@ import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
 import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
@@ -306,6 +306,21 @@ export class Runtime {
     if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
     if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); } // Direct and spool-drained commits alike enqueue worker work.
     return committed;
+  }
+  /** `remember` for each delivery in order, in one serial turn. A non-retryable refusal answers its delivery alone and the
+   * batch goes on; any other failure ends the batch and fails the request, so no later delivery is admitted before an
+   * earlier one. Deliveries admitted before it stay admitted and answer as stored when sent again. */
+  async rememberBatch(deliveries: RpcRememberParams[], context?: InstallationContext): Promise<RpcRememberBatchResult> {
+    const results: RpcRememberBatchResult["results"] = [];
+    for (const params of deliveries) {
+      try { results.push(await this.remember(params, context)); }
+      catch (error) {
+        const failure = fault(error);
+        if (failure.retryable || failure.code === "ownership_lost" || failure.code === "internal_error") throw error;
+        results.push({ state: "refused", code: failure.code, message: failure.message });
+      }
+    }
+    return { results };
   }
   async remember(params: RpcRememberParams, context?: InstallationContext) {
     await this.installation.assertOwned();

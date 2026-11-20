@@ -15,7 +15,8 @@ export interface CleanRecord {
 interface Room { file: string; first: string; my_share?: number }
 interface Cursor { next: number; created: number; duplicates: number; refused: number }
 type Outcome = "created" | "duplicate" | { refused: string };
-type Built = { params: RpcRememberParams; payload?: Buffer } | { refused: string };
+type Sendable = { params: RpcRememberParams; payload?: Buffer };
+type Built = Sendable | { refused: string };
 export interface LoadOptions {
   clean: string; source: string; state: string;
   concurrency: number; limit: number; rooms: readonly string[]; dryRun: boolean;
@@ -29,6 +30,8 @@ interface Run {
 const ROLES: ReadonlySet<string> = new Set(OriginRole.options);
 const CONTENT_LIMIT = 4000;
 const CURSOR_EVERY = 200;
+/** Half a frame of params per `remember.batch`, so the request envelope always fits. */
+const BATCH_BYTES = RPC_LIMITS.frame_bytes / 2;
 const PROGRESS_MS = 10_000;
 const MINE_SHARE = 0.15;
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -107,22 +110,46 @@ async function uploadPayload(client: RpcClient, params: RpcRememberParams, bytes
   if (object.hash !== params.payload_hash || object.size !== bytes.length || object.media_type !== media_type) throw new Error("payload_mismatch");
 }
 
-/** A daemon refusal is the record's outcome; anything else (transport, retryable, local) stops the run. */
-async function deliver(client: RpcClient | null, record: CleanRecord): Promise<Outcome> {
-  const built = toRemember(record);
-  if ("refused" in built) return built;
-  if (client === null) return "created";
-  try {
-    if (built.payload !== undefined) await uploadPayload(client, built.params, built.payload);
-    const result = await client.request("remember", built.params);
-    if (result.state !== "committed") throw new Error(`remember_${result.state}`);
-    return result.created ? "created" : "duplicate";
-  } catch (error) {
-    if (!(error instanceof Error) || !("retryable" in error) || error.retryable !== false || !("code" in error)) throw error;
-    const code = RpcErrorCode.safeParse(error.code);
-    if (!code.success) throw error;
-    return { refused: code.data };
+/** The code of a daemon refusal (non-retryable); undefined for anything that must stop the run. */
+function refusal(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !("retryable" in error) || error.retryable !== false || !("code" in error)) return undefined;
+  const code = RpcErrorCode.safeParse(error.code);
+  return code.success ? code.data : undefined;
+}
+
+/** Uploads the payloads the batch references; a refused upload answers its record, which is then not sent. */
+async function uploadPayloads(client: RpcClient, built: readonly Built[], outcomes: Outcome[]): Promise<{ index: number; params: RpcRememberParams }[]> {
+  const sent: { index: number; params: RpcRememberParams }[] = [];
+  for (const [index, item] of built.entries()) {
+    if ("refused" in item) continue;
+    if (item.payload !== undefined) {
+      try { await uploadPayload(client, item.params, item.payload); }
+      catch (error) {
+        const code = refusal(error);
+        if (code === undefined) throw error;
+        outcomes[index] = { refused: code };
+        continue;
+      }
+    }
+    sent.push({ index, params: item.params });
   }
+  return sent;
+}
+
+/** Sends a room's next records as one `remember.batch`, after the payloads they reference. A daemon refusal is its
+ * record's outcome; anything else (transport, retryable, local) stops the run. */
+async function deliver(client: RpcClient | null, built: readonly Built[]): Promise<Outcome[]> {
+  const outcomes: Outcome[] = built.map(item => "refused" in item ? item : "created");
+  if (client === null) return outcomes;
+  const sent = await uploadPayloads(client, built, outcomes);
+  if (sent.length === 0) return outcomes;
+  const { results } = await client.request("remember.batch", { deliveries: sent.map(item => item.params) });
+  if (results.length !== sent.length) throw new Error("remember_batch_answer_count");
+  for (const [position, result] of results.entries()) {
+    if (result.state === "spooled") throw new Error("remember_spooled");
+    outcomes[sent[position]!.index] = result.state === "refused" ? { refused: result.code } : result.created ? "created" : "duplicate";
+  }
+  return outcomes;
 }
 
 /** Splits on LF only. readline also breaks on U+2028 / U+2029, which JSON strings may hold unescaped. */
@@ -169,23 +196,19 @@ async function roomsOf(directory: string, only: readonly string[]): Promise<Room
   return selected;
 }
 
-/** A room is sent strictly in file order: same-second messages keep their order only through ingest order. The cursor
- * is the line index, so a re-run sends only lines after it and a room file that only grew resumes where it stopped. */
+/** A room is sent strictly in file order, in batches of up to `remember_batch` records: same-second messages keep their
+ * order only through ingest order. The cursor is the line index of the last answered record, so a re-run sends only
+ * lines after it and a room file that only grew resumes where it stopped. */
 async function loadRoom(run: Run, client: RpcClient | null, room: Room): Promise<void> {
   const { options, total } = run;
   const cursorPath = join(run.stateDirectory, `${room.file}.cursor.json`);
   const cursor = options.dryRun ? { next: 0, created: 0, duplicates: 0, refused: 0 } : await readCursor(cursorPath);
-  let index = 0, sinceWrite = 0;
-  try {
-    for await (const line of linesOf(join(run.directory, room.file))) {
-      if (index++ < cursor.next || line === "") continue;
-      if (run.stop !== undefined) return;
-      if (run.remaining <= 0) { run.stop ??= "limit"; return; }
-      run.remaining--;
-      const at = `${room.file}:${index}`;
-      const record = parseRecord(line, at);
-      if (record.source !== options.source) throw new Error(`clean_record_invalid: ${at}: source`);
-      const outcome = await deliver(client, record);
+  let index = 0, sinceWrite = 0, bytes = 0, stopped = false;
+  let batch: { at: string; line: number; record: CleanRecord; built: Built }[] = [];
+  const flush = async (): Promise<void> => {
+    const outcomes = await deliver(client, batch.map(item => item.built));
+    for (const [position, { at, line, record }] of batch.entries()) {
+      const outcome = outcomes[position]!;
       total.records++;
       if (outcome === "created") { cursor.created++; total.created++; }
       else if (outcome === "duplicate") { cursor.duplicates++; total.duplicates++; }
@@ -193,10 +216,28 @@ async function loadRoom(run: Run, client: RpcClient | null, room: Room): Promise
         cursor.refused++; total.refused++;
         await appendFile(join(run.stateDirectory, "_refused.jsonl"), `${JSON.stringify({ at, room: record.room, thread: record.thread, message: record.message, reason: outcome.refused })}\n`);
       }
-      cursor.next = index;
-      if (!options.dryRun && ++sinceWrite >= CURSOR_EVERY) { await writeCursor(cursorPath, cursor); sinceWrite = 0; }
+      cursor.next = line;
     }
-    total.rooms_done++;
+    sinceWrite += batch.length;
+    batch = []; bytes = 0;
+    if (!options.dryRun && sinceWrite >= CURSOR_EVERY) { await writeCursor(cursorPath, cursor); sinceWrite = 0; }
+  };
+  try {
+    for await (const line of linesOf(join(run.directory, room.file))) {
+      if (index++ < cursor.next || line === "") continue;
+      if (run.stop !== undefined) { stopped = true; break; }
+      if (run.remaining <= 0) { run.stop ??= "limit"; stopped = true; break; }
+      run.remaining--;
+      const at = `${room.file}:${index}`;
+      const record = parseRecord(line, at);
+      if (record.source !== options.source) throw new Error(`clean_record_invalid: ${at}: source`);
+      const built = toRemember(record);
+      const size = "refused" in built ? 0 : Buffer.byteLength(JSON.stringify(built.params));
+      if (batch.length === RPC_LIMITS.remember_batch || (batch.length > 0 && bytes + size > BATCH_BYTES)) await flush();
+      batch.push({ at, line: index, record, built }); bytes += size;
+    }
+    if (batch.length > 0) await flush();
+    if (!stopped) total.rooms_done++;
   } finally {
     if (!options.dryRun && sinceWrite > 0) await writeCursor(cursorPath, cursor);
   }

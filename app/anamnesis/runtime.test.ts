@@ -348,6 +348,27 @@ dbTest("lineage metadata needs authenticated custody and is re-verified from the
   await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_unavailable" });
 });
 
+dbTest("remember.batch answers each delivery in order: a refusal answers its delivery alone and a retryable failure fails the rest", async () => {
+  const installation = installationAt(await freshRoot());
+  const live = await boot(installation);
+  const first = delivery({ record: "batch-1" }), second = delivery({ record: "batch-2" });
+  const lineage = { ...delivery({ record: "batch-lineage" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
+  const { results } = await live.runtime.rememberBatch([first, second, delivery({ record: "batch-1", content: "a different body" }), lineage, first], receiptContext);
+  expect(results.map(result => result.state)).toEqual(["committed", "committed", "refused", "committed", "committed"]);
+  expect(results[2]).toMatchObject({ state: "refused", code: "revision_conflict" });
+  const [stored] = results;
+  if (stored?.state !== "committed") throw new Error("the first delivery did not commit");
+  expect(results[4]).toEqual({ ...stored, created: false });
+  await shutdown(live.runtime);
+
+  const offline = await boot(installation, DEAD_URI);
+  const third = delivery({ record: "batch-3" }), fourth = delivery({ record: "batch-4" });
+  const offlineLineage = { ...delivery({ record: "batch-lineage-2" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
+  await expect(offline.runtime.rememberBatch([third, offlineLineage, fourth], receiptContext)).rejects.toMatchObject({ code: "storage_unavailable", retryable: true });
+  expect(await offline.runtime.ingestStatus(identityOf(third, installation.incarnation))).toMatchObject({ state: "spooled" });
+  expect(await offline.runtime.ingestStatus(identityOf(fourth, installation.incarnation))).toMatchObject({ state: "unknown", storage: "unavailable" });
+});
+
 dbTest("stored rows that no longer verify are reported as digest faults instead of commits", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime } = await boot(installation);
