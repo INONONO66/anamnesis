@@ -18,6 +18,7 @@ import { ingestMiscRaw } from "./miscraw.ts";
 import { managed } from "./managed.ts";
 import { fileURLToPath } from "node:url";
 import { applyAuthorityEnvironment, offlineBackup, offlineRestore } from "./offline-ops.ts";
+import { spacesCommand } from "./spaces.ts";
 
 const ingestCommands = ["ingest", "ingest-agentlog", "ingest-slack", "ingest-notion", "ingest-claude-raw", "ingest-codex-raw", "ingest-gjc-raw", "ingest-omo-raw", "ingest-misc-raw"];
 const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|embed-requeue [--limit N]|recall <query>|projection write <dir>|foreground|managed|status|verify|ingest <snapshot.jsonl> <checkpoint.json>";
@@ -136,6 +137,8 @@ async function projection({ root, extra }: Context): Promise<void> {
 }
 const ingest = (command: string): Command => ({ arity: extra => extra.length === 2, run: ({ root, extra }) => withClient(root, client => ingestHandlers[command]!(extra[0]!, extra[1]!, client)) });
 const commands: Record<string, Command> = {
+  spaces: { arity: extra => extra.length > 0, run: ({ root, extra }) => withClient(root, client => spacesCommand(client, "spaces", extra)) },
+  replies: { arity: extra => extra.length > 0, run: ({ root, extra }) => withClient(root, client => spacesCommand(client, "replies", extra)) },
   up: { arity: none, run: up },
   down: { arity: none, run: down },
   backup: { arity: one, run: backup },

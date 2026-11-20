@@ -25,6 +25,8 @@ import { MaterializationStore } from "./store/materialization-store.ts";
 import { RecallStore } from "./store/recall-store.ts";
 import { ProjectionStore } from "./store/projection-store.ts";
 import { IntegrityStore } from "./store/integrity-store.ts";
+import { EpisodeDerivedStore } from "./store/episode-derived.ts";
+import type { RpcSpacesImportParams, RpcSpacesListParams, RpcEpisodeRebuildParams } from "@anamnesis/protocol";
 import { ActivationStore } from "./store/activation-store.ts";
 import type { AuthoritySnapshot } from "./store/conducting-store.ts";
 import type { PutResult } from "./store/element-store.ts";
@@ -51,12 +53,14 @@ export class Store {
   private readonly projections: ProjectionStore;
   private readonly integrity: IntegrityStore;
   private readonly activation: ActivationStore;
+  private readonly episodeDerived: EpisodeDerivedStore;
 
   constructor(opts: StoreOptions, driver?: Driver) {
     this.core = new StoreCore(opts, driver);
     this.receipts = new ReceiptStore(this.core);
     this.conducting = new ConductingStore(this.core);
-    this.elements = new ElementStore(this.core, this.receipts, this.conducting);
+    this.episodeDerived = new EpisodeDerivedStore(this.core);
+    this.elements = new ElementStore(this.core, this.receipts, this.conducting, this.episodeDerived);
     this.embeddings = new EmbeddingStore(this.core);
     this.extraction = new ExtractionStore(this.core, this.conducting);
     this.materialization = new MaterializationStore(this.core, this.receipts, this.extraction, this.elements);
@@ -191,6 +195,18 @@ export class Store {
 
   rebuildHitCache(): Promise<HitCacheRebuild> {
     return this.receipts.rebuildHitCache();
+  }
+
+  importRoomAssignments(input: RpcSpacesImportParams) {
+    return this.episodeDerived.importAssignments(input);
+  }
+
+  listSpaces(input: RpcSpacesListParams) {
+    return this.episodeDerived.listSpaces(input);
+  }
+
+  rebuildEpisodeDerived(input: RpcEpisodeRebuildParams, kind: "labels" | "replies") {
+    return this.episodeDerived.rebuild(input, kind);
   }
 
   putElement(input: MemoryElementInput, opts?: ElementWriteOptions): Promise<PutResult> {
