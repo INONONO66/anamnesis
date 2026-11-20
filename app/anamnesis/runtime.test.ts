@@ -173,7 +173,7 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   const first = delivery({ record: "first" });
   const committed = asCommitted(await runtime.remember(first));
   expect(committed).toMatchObject({ state: "committed", created: true, ...identityOf(first, installation.incarnation) });
-  expect(lanes).toEqual(["spool", "spool"]);
+  expect(lanes).toEqual(["spool"]);
   expect(await runtime.remember(first)).toEqual({ ...committed, created: false });
   await expect(runtime.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
 
@@ -230,6 +230,24 @@ dbTest("a spooled successor whose predecessor never arrives stays blocked and a 
   await expect(runtime.remember(orphan)).rejects.toMatchObject({ code: "stale_revision" });
 });
 
+dbTest("a live commit of the revision a blocked entry waits for wakes the drain, which then commits the entry", async () => {
+  const installation = installationAt(await freshRoot());
+  const parent = delivery({ record: "late" });
+  const child = delivery({ record: "late", revision: "v2", predecessor: revisionKeyOf(parent) });
+  await spoolOffline(installation, child);
+  const { runtime, lanes } = await boot(installation);
+  await drainToRest(runtime);
+  expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
+  const woken = lanes.length;
+  expect(await runtime.remember(delivery({ record: "unrelated" }))).toMatchObject({ state: "committed", created: true });
+  expect(lanes).toHaveLength(woken);
+  expect(await runtime.remember(parent)).toMatchObject({ state: "committed", created: true });
+  expect(lanes).toHaveLength(woken + 1);
+  await drainToRest(runtime);
+  expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "committed", created: false });
+  expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
+});
+
 dbTest("mutually dependent spool entries are blocked as a dependency cycle and a tail entering the cycle as a missing predecessor", async () => {
   const installation = installationAt(await freshRoot());
   const keyA = revisionKeyOf(delivery({ record: "cycle", revision: "a" }));
@@ -257,10 +275,11 @@ dbTest("drain blocks a stale successor, a body conflicting with a committed revi
   // A lost delivery binding lets a different body for the same revision reach the store first; the spooled body
   // then meets the committed one at drain time instead of at admission.
   await rm(join(installation.root, "deliveries", `${revisionKeyOf(conflicting)}.json`));
-  const { runtime } = await boot(installation);
+  const { runtime, lanes } = await boot(installation);
   expect(await runtime.remember(base)).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(delivery({ record: "stale", revision: "v1b", predecessor: revisionKeyOf(base) }))).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(liveBody)).toMatchObject({ state: "committed", created: true });
+  expect(lanes).toEqual(["spool"]);
   await drainToRest(runtime);
   expect(await runtime.ingestStatus(identityOf(stale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "stale_revision" });
   expect(await runtime.ingestStatus(identityOf(behindStale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
@@ -394,7 +413,7 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   expect(await runtime.extractionTurn()).toBe("waiting");
 
   const committed = asCommitted(await runtime.remember(delivery({ record: "embedded" })));
-  expect(lanes.slice(3).sort()).toEqual(["embedding", "extraction", "spool"]);
+  expect(lanes.slice(3).sort()).toEqual(["embedding", "extraction"]);
   const deferred = await runtime.status(0, false);
   expect(deferred.workers.embedding).toMatchObject({ pending: 1, drained_total: 0, quarantined_total: 0 });
   expect(deferred.workers.embedding.last_error).toContain("deferred");

@@ -194,6 +194,7 @@ export class DurableSpool {
   private readonly journal: string; private readonly done: string; private readonly durable: string;
   private readonly maxBytes: number; private readonly maxFrameBytes: number;
   private queue: Promise<void> = Promise.resolve();
+  private verified: { files: string; status: SpoolStatus } | undefined;
   constructor(private readonly root: string, options: SpoolOptions = {}) {
     this.journal = join(root, "spool.journal"); this.done = join(root, "spool.done"); this.durable = join(root, "spool.durable");
     this.maxBytes = options.maxBytes ?? 1024 * 1024 * 1024; this.maxFrameBytes = options.maxFrameBytes ?? 1024 * 1024;
@@ -274,8 +275,25 @@ export class DurableSpool {
       await this.publishCompletion(sequence, state.completion);
     });
   }
+  /** A status scan re-verifies every admitted frame, so its cost grows with the journal, which is never reclaimed.
+   * While no spool file has changed (inode, size, mtime and ctime alike, and ctime moves on every write) the last
+   * verified answer still holds; a scan whose files changed under it is not reused. */
   async status(): Promise<SpoolStatus> {
-    return this.serial(async () => { const state = await this.load(); return { pending: state.count - state.completion.frontier, nextSequence: state.count + 1, quarantined: state.quarantined }; });
+    return this.serial(async () => {
+      const files = await this.files();
+      if (this.verified?.files === files) return this.verified.status;
+      const state = await this.load();
+      const status = { pending: state.count - state.completion.frontier, nextSequence: state.count + 1, quarantined: state.quarantined };
+      this.verified = files === await this.files() ? { files, status } : undefined;
+      return status;
+    });
+  }
+  private async files(): Promise<string> {
+    const paths = [this.journal, this.done, this.durable, this.durable + ".sha256", join(this.root, "spool.quarantine")];
+    return (await Promise.all(paths.map(async path => {
+      try { const info = await stat(path, { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
+      catch (error) { if (this.isMissing(error)) return "-"; throw error; }
+    }))).join("|");
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.queue.then(operation);

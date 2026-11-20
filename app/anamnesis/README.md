@@ -201,7 +201,9 @@ version mismatch, split/oversized frames, invalid UTF-8, uploads, and shutdown.
 
 Spool completion advances only through the contiguous committed prefix; later
 completed records remain replay-visible behind a gap. Runtime lookups and drain
-use finite pages. Marker publication uses synced temporary files, rename and
+use finite pages. `status`, which every `remember` asks, reuses its last full
+verification while no spool file has changed, and a live commit wakes the drain
+only when a blocked entry waits for that revision. Marker publication uses synced temporary files, rename and
 directory sync, rather than overwriting published markers in place. These
 guarantees do not establish a bound on total scan work, request latency, or
 runtime status-map memory. The evidence proves process restart and database

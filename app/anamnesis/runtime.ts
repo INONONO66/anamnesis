@@ -116,6 +116,8 @@ export class Runtime {
   private available = false;
   private readonly blocked = new Map<number, "missing_predecessor" | "dependency_cycle" | "stale_revision" | "revision_conflict">();
   private readonly quarantined = new Map<number, "spool_corrupt" | "incarnation_mismatch">();
+  /** Revision keys that entries blocked as missing_predecessor wait for: a live commit of one is the only live write that can release spooled work. */
+  private readonly awaited = new Set<string>();
   private drainJob: AsyncGenerator<void, void, void> | undefined;
   private drainRequested = false;
   private drainStopped = false;
@@ -334,13 +336,12 @@ export class Runtime {
     if (!previous && !lineageMetadata(candidate.params)) await atomicJson(join(this.bindings, key + ".json"), candidate);
     return previous ? { ...existing, ...this.identity(previous) } : existing;
   }
-  /** The admission gates in order: body conflict, incarnation, referenced object, spool health, lineage authority. */
+  /** The admission gates in order: body conflict, incarnation, referenced object, lineage authority (spool health is checked on entry). */
   private async admitBinding(params: RpcRememberParams, previous: Binding | null, candidate: Binding, context?: InstallationContext): Promise<Binding> {
     if (previous && previous.body_digest !== candidate.body_digest) throw new RpcFault("revision_conflict", "revision already binds a different delivery body");
     const binding = previous ?? candidate;
     if (binding.incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
     if (params.payload_hash && !await this.uploads.metadata(params.payload_hash)) throw new RpcFault("object_not_found", "remember references an uncommitted object");
-    if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
     const metadata = lineageMetadata(params);
     if (metadata) {
       if (!context?.client_binding) throw new RpcFault("lineage_binding_mismatch", "authenticated connection required");
@@ -349,11 +350,12 @@ export class Runtime {
     }
     return binding;
   }
-  /** Live write; a non-storage failure removes the binding this delivery just wrote and rethrows, storage loss marks unavailable and falls through to the spool. */
+  /** Live write; a non-storage failure removes the binding this delivery just wrote and rethrows, storage loss marks unavailable and falls through to the spool.
+   * A created Episode wakes the drain only when a blocked entry waits for it. */
   private async tryWrite(binding: Binding, key: string, bound: boolean, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
     try {
       const result = await this.write(binding, context);
-      if (result.created) this.wakeDrain();
+      if (result.created && this.awaited.has(key)) this.wakeDrain();
       return result;
     }
     catch (error) {
@@ -512,7 +514,7 @@ export class Runtime {
     return start.revision === entry.revision ? "dependency_cycle" : "missing_predecessor";
   }
   private async *drain(): AsyncGenerator<void, void, void> {
-    this.blocked.clear(); this.quarantined.clear();
+    this.blocked.clear(); this.quarantined.clear(); this.awaited.clear();
     const spool = await this.spool.status();
     if (spool.quarantined) return;
     const cohort = spool.nextSequence - 1;
@@ -540,7 +542,10 @@ export class Runtime {
             // Retained suffix visibility is not evidence that a predecessor
             // still needs execution. Check the DB before deferring to it.
             if (!predecessor[0]?.found) {
-              if (!(yield* runtime.findPending(entry.predecessor, cohort))) runtime.blocked.set(entry.sequence, "missing_predecessor");
+              if (!(yield* runtime.findPending(entry.predecessor, cohort))) {
+                runtime.blocked.set(entry.sequence, "missing_predecessor");
+                runtime.awaited.add(entry.predecessor);
+              }
               return;
             }
           }
