@@ -246,7 +246,7 @@ export class Runtime {
   /** The retained lineage of a v2 Episode, verified against its stored digests, as the remember metadata it implies. */
   private async retainedLineage(row: StoredEpisode, binding: Binding): Promise<{ origin_role: StoredEpisode["origin_role"]; lineage_mode: EchoLineage["lineage_mode"]; parent_recall_ids: EchoLineage["parent_recall_ids"] }> {
     const retained = (await this.read<{ props: Record<string, unknown> }>(
-      "MATCH (e:Episode {id:$id}) RETURN properties(e) AS props", { id: row.id }))[0];
+      "MATCH (e:Element:Episode {id:$id}) RETURN properties(e) AS props", { id: row.id }))[0];
     if (!retained) throw new RpcFault("lineage_unavailable", "retained lineage missing");
     const lineage = verifyEpisodeLineage(row.id, row.lineage_digest ?? null, retained.props);
     verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);

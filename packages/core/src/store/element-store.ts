@@ -152,7 +152,7 @@ export class ElementStore {
         });
         if (lineage) {
           const { episode_id, complete, ...properties } = lineage;
-          await tx.run(`MATCH (e:Episode {id:$id}) SET e += $props`, {
+          await tx.run(`MATCH (e:Element:Episode {id:$id}) SET e += $props`, {
             id: episode_id, props: { ...properties, lineage_complete: complete },
           });
         }
@@ -339,7 +339,7 @@ export class ElementStore {
     const predecessors = sameInstantBefore.records.length > 0 ? sameInstantBefore : await tx.run<{ id: string }>(
       `MATCH (p:Element:Episode) USING INDEX p:Episode(session_key, time_utc, ingest_seq)
        WHERE p.session_key = $sk AND p.time_utc < $t AND p.ingest_seq IS NOT NULL
-       RETURN p.id AS id ORDER BY p.time_utc DESC, p.ingest_seq DESC LIMIT 1`, key);
+       RETURN p.id AS id ORDER BY p.session_key DESC, p.time_utc DESC, p.ingest_seq DESC LIMIT 1`, key);
     const sameInstantAfter = await tx.run<{ id: string; previousRecord: string | null }>(
       `MATCH (s:Element:Episode) USING INDEX s:Episode(session_key, time_utc, ingest_seq)
        WHERE s.session_key = $sk AND s.time_utc = $t AND s.ingest_seq > $seq
@@ -347,7 +347,7 @@ export class ElementStore {
     const successors = sameInstantAfter.records.length > 0 ? sameInstantAfter : await tx.run<{ id: string; previousRecord: string | null }>(
       `MATCH (s:Element:Episode) USING INDEX s:Episode(session_key, time_utc, ingest_seq)
        WHERE s.session_key = $sk AND s.time_utc > $t AND s.ingest_seq IS NOT NULL
-       RETURN s.id AS id, s.topology_previous_record AS previousRecord ORDER BY s.time_utc, s.ingest_seq LIMIT 1`, key);
+       RETURN s.id AS id, s.topology_previous_record AS previousRecord ORDER BY s.session_key, s.time_utc, s.ingest_seq LIMIT 1`, key);
     const predecessor = predecessors.records[0]?.get("id") ?? null;
     const successor = successors.records[0];
     if (successor && successor.get("previousRecord") === null) {
