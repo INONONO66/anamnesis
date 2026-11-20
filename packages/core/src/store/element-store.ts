@@ -261,7 +261,7 @@ export class ElementStore {
   ): Promise<void> {
     if (payload) await this.mergePayloadTx(tx, payload);
     await tx.run(
-      `${opts.existingFact ? "MATCH (e:Fact {id:$id}) SET e:Element" : `CREATE (e:${labelClause(el.schema)})`}
+      `${opts.existingFact ? "MATCH (e:Element:Fact {id:$id})" : `CREATE (e:${labelClause(el.schema)})`}
        SET e += $columns`,
       { id: el.id, columns: elementColumns(el, payload?.hash ?? null, opts.previous, revision) },
     );

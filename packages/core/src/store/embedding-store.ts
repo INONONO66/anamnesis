@@ -71,7 +71,7 @@ export class EmbeddingStore {
 
   private async authorizeFactTx(tx: ManagedTransaction, factId: string, policy: PolicyState): Promise<void> {
     const sources = await tx.run<{ id: string }>(
-      `MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) RETURN DISTINCT e.id AS id`, { id: factId });
+      `MATCH (f:Element:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) RETURN DISTINCT e.id AS id`, { id: factId });
     if (!sources.records.length) throw new ReceiptError("invalid_selection");
     await this.core.authorizeEpisodesTx(tx, sources.records.map(row => row.get("id")), policy);
   }
