@@ -375,7 +375,7 @@ export class ExtractionStore {
       return body(tx, policy, task, request);
     });
   }
-  async cancelModelTask(input: ModelTaskCAS & { reason?: "cancelled" | "policy_denied" | "gate_skipped"; gate?: ExtractionJournalEntry["gate"] }, context: InstallationContext): Promise<ModelTask> {
+  async cancelModelTask(input: ModelTaskCAS & { reason?: "cancelled" | "policy_denied" | "gate_skipped" | "out_of_scope"; gate?: ExtractionJournalEntry["gate"] }, context: InstallationContext): Promise<ModelTask> {
     const { reason = "cancelled", gate, ...cas } = input;
     return this.modelTaskTransition(cas, context, ["queued", "leased", "expired", "worker_lost"], async (tx, policy, task, request) => {
       // Open work is cancelled in place. An expired or lost lease is unresolved work, not an outcome (extractionPipelineOmission);

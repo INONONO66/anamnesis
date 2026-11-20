@@ -603,6 +603,11 @@
                               "minimum": 0,
                               "maximum": 9007199254740991
                             },
+                            "out_of_scope_total": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
                             "last_error": {
                               "anyOf": [
                                 {
@@ -662,6 +667,7 @@
                             "completed_total",
                             "failed_total",
                             "gated_total",
+                            "out_of_scope_total",
                             "last_error",
                             "pacing"
                           ],
@@ -4280,6 +4286,7 @@
                                     "policy_denied",
                                     "cancelled",
                                     "gate_skipped",
+                                    "out_of_scope",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -4770,6 +4777,7 @@
                                     "policy_denied",
                                     "cancelled",
                                     "gate_skipped",
+                                    "out_of_scope",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -5462,6 +5470,7 @@
                                     "policy_denied",
                                     "cancelled",
                                     "gate_skipped",
+                                    "out_of_scope",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"
@@ -5952,6 +5961,7 @@
                                     "policy_denied",
                                     "cancelled",
                                     "gate_skipped",
+                                    "out_of_scope",
                                     "expired",
                                     "worker_lost",
                                     "premises_changed"

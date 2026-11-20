@@ -627,7 +627,16 @@ Episodes with the same `session_key` as context; context is read-only and is
 never a claim source. One
 `claim_window` call produces per-Episode claims, while each Episode retains
 its own custody entry, extraction attempt, pipeline and `DERIVED_FROM` edges.
-The judge and relation stages remain per Episode.
+The judge and relation stages remain per Episode. A judge over zero claims is
+answered locally with no decisions, the only valid answer, without a provider
+call.
+
+With an extraction scope configured (`ANAMNESIS_EXTRACTION_SCOPE_FILE`: listed
+sources in full, plus listed rooms of other sources and their thread sessions),
+a window outside it is cancelled member by member with `out_of_scope` before
+the gate runs, without reading text. These omissions increase
+`out_of_scope_total`. Coverage is one-way, so a room listed after extraction
+passed its Episodes is not extracted in that generation.
 
 When configured, the Jev pre-gate scores one window. If its maximum score is
 below the threshold, each member is cancelled with `gate_skipped` and the

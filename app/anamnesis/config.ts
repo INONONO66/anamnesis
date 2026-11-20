@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtractionDialect } from "@anamnesis/core";
+import type { ExtractionDialect, ExtractionScope } from "@anamnesis/core";
 import { RpcEmbeddingAttempt, RpcExtractionPacing, RpcIngestStatusParams } from "@anamnesis/protocol";
 
 // Reuse the protocol's Zod schemas; the app has no independent Zod dependency.
@@ -36,10 +36,25 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_EXTRACTION_GATE: providerName.refine(value => value === "off" || value === "jev").default("off"),
   ANAMNESIS_JEV_GATE_KEY_FILE: providerPath.default(join(homedir(), ".config/anamnesis/jev-vercel-gateway.key.json")),
   ANAMNESIS_EXTRACTION_GATE_THRESHOLD: RpcExtractionPacing.shape.jitter_fraction.default(0.2),
+  ANAMNESIS_EXTRACTION_SCOPE_FILE: providerPath.optional(),
   ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: RpcExtractionPacing.shape.max_in_flight.default(EXTRACTION_PACING_DEFAULTS.maxInFlight),
   ANAMNESIS_LLM_MIN_INTERVAL_MS: RpcExtractionPacing.shape.min_interval_ms.default(EXTRACTION_PACING_DEFAULTS.minIntervalMs),
   ANAMNESIS_LLM_JITTER_FRACTION: RpcExtractionPacing.shape.jitter_fraction.default(EXTRACTION_PACING_DEFAULTS.jitterFraction),
 });
+
+/** `{"sources": [...], "rooms": [{"source", "room"}]}`: every Episode of a listed source, plus the listed rooms. */
+const ExtractionScopeFile = RpcEmbeddingAttempt.pick({}).strict().extend({
+  sources: providerName.array().max(64),
+  rooms: RpcEmbeddingAttempt.pick({}).strict().extend({ source: providerName, room: providerName }).array().max(100000),
+});
+async function readExtractionScope(path: string): Promise<ExtractionScope> {
+  let value: unknown;
+  try { value = JSON.parse(await fs.readFile(path, "utf8")); }
+  catch { throw new Error("unable to read ANAMNESIS_EXTRACTION_SCOPE_FILE as JSON"); }
+  const parsed = ExtractionScopeFile.safeParse(value);
+  if (!parsed.success) throw new Error(`invalid ANAMNESIS_EXTRACTION_SCOPE_FILE: ${parsed.error.issues.map(issue => issue.path.join(".")).join(", ")}`);
+  return parsed.data;
+}
 
 /** Load once at provider startup. Absent base URLs leave legacy provider selection unchanged.
  * Secrets are never included in validation errors; callers must not log this result. */
@@ -71,6 +86,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   const relationPromptFile = resolve(config.ANAMNESIS_RELATION_PROMPT_FILE);
   const relationPrompt = await fs.readFile(relationPromptFile, "utf8");
   if (!relationPrompt.trim()) throw new Error("empty ANAMNESIS_RELATION_PROMPT_FILE");
+  const scope = config.ANAMNESIS_EXTRACTION_SCOPE_FILE === undefined ? undefined : await readExtractionScope(config.ANAMNESIS_EXTRACTION_SCOPE_FILE);
   const gate = config.ANAMNESIS_EXTRACTION_GATE === "jev"
     ? { kind: "jev" as const, keyFile: config.ANAMNESIS_JEV_GATE_KEY_FILE, threshold: config.ANAMNESIS_EXTRACTION_GATE_THRESHOLD }
     : { kind: "off" as const };
@@ -85,7 +101,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
     promptFile, systemPrompt, relationPromptFile, relationPrompt,
-    gate,
+    gate, scope,
     extractionPacing: { maxInFlight: config.ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT, minIntervalMs: config.ANAMNESIS_LLM_MIN_INTERVAL_MS, jitterFraction: config.ANAMNESIS_LLM_JITTER_FRACTION } satisfies ExtractionPacingConfig,
   };
 }
