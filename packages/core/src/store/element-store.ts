@@ -12,6 +12,7 @@ import { type ElementNode, type LinkRelationship, type ElementWriteOptions, reco
 import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ConductingStore } from "./conducting-store.ts";
+import type { EpisodeDerivedStore } from "./episode-derived.ts";
 
 export interface PutResult {
   id: string;
@@ -47,7 +48,7 @@ function revisionColumns(revision: ElementRevision | undefined, el: MemoryElemen
 }
 
 export class ElementStore {
-  constructor(private readonly core: StoreCore, private readonly receipts: ReceiptStore, private readonly conducting: ConductingStore) {}
+  constructor(private readonly core: StoreCore, private readonly receipts: ReceiptStore, private readonly conducting: ConductingStore, private readonly episodeDerived: EpisodeDerivedStore) {}
 
   async putElement(
     input: MemoryElementInput,
@@ -179,6 +180,7 @@ export class ElementStore {
           { id: el.id },
         );
         await this.spliceTopologyTx(tx, { id: el.id, sessionKey: sessionKey(el.origin) });
+        await this.episodeDerived.admitTx(tx, el);
         if (lineage) await tx.run(`MATCH (m:Meta {key:'meta'}) SET m.structure_revision=coalesce(m.structure_revision,0)+1`);
         return {
           id: el.id,
@@ -332,6 +334,8 @@ export class ElementStore {
     // remember, so each neighbour is two seeks on episode_session_order: same instant first (it
     // outranks any other instant), then the nearest other instant. The hint needs a predicate
     // on every indexed property; ingest_seq is assigned before the splice, so IS NOT NULL is free.
+    // The range seeks order by every index property: only then does Neo4j read the index in order and stop at one row;
+    // ordering by (time_utc, ingest_seq) alone reads every earlier Episode of the session and takes the top.
     const sameInstantBefore = await tx.run<{ id: string }>(
       `MATCH (p:Element:Episode) USING INDEX p:Episode(session_key, time_utc, ingest_seq)
        WHERE p.session_key = $sk AND p.time_utc = $t AND p.ingest_seq < $seq
@@ -445,7 +449,7 @@ export class ElementStore {
         to: link.to,
         fromLabels: [...lattice.from],
         toLabels: [...lattice.to],
-        originalsLayer: link.role === "INVALIDATES",
+        originalsLayer: link.role === "INVALIDATES" || link.role === "REPLIES_TO",
         originalsIdemKey: linkIdemKey(link, true),
         derivedIdemKey: linkIdemKey(link, false),
         id: link.id,
