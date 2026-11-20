@@ -12,7 +12,7 @@ import { timingHash, timingLog } from "../../app/anamnesis/timing.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const OWNER_LABEL = "anamnesis.qa.owner";
-const RUNTIME_CASES = new Set(["e2e-real", "uds-ingest", "object-spool-crashes", "outage-drain-50", "source-resume", "managed-ingest-restart", "normalized-agentlog"]);
+const RUNTIME_CASES = new Set(["e2e-real", "uds-ingest", "object-spool-crashes", "outage-drain-50", "managed-ingest-restart"]);
 const AGGREGATE_CASES = new Set(["release-acceptance", "soak-24h"]);
 const BLOCKED_CASES = new Map<string, string>();
 // Storage contracts contain real CAS, ordered-edge and legacy-format assertions.

@@ -8,14 +8,9 @@ set -eu
 stamp=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 dest=/var/lib/anamnesis/backups/$stamp
 result=/var/lib/anamnesis/backups/$stamp.result.json
-# Ingest oneshots carry Requires=anamnesis.service: a queued ingest job re-pulls the daemon and turns
-# "systemctl stop anamnesis" into "Job canceled". Quiesce the timers and any running ingest first.
-timers=$(systemctl list-units --type=timer --state=active --plain --no-legend 'anamnesis-ingest@*' | awk '{print $1}')
-# Armed before the first stop: an early failure must never strand the timers or the daemon.
-restore() { systemctl start anamnesis; for t in $timers; do systemctl start "$t"; done; }
+# Armed before the stop: an early failure must never strand the daemon.
+restore() { systemctl start anamnesis; }
 trap restore EXIT
-for t in $timers; do systemctl stop "$t"; done
-systemctl stop 'anamnesis-ingest@*.service'
 systemctl stop anamnesis
 runuser -u anamnesis -- node /opt/anamnesis/dist/anamnesis-ops.mjs backup "$dest" > "$result"
 cat "$result"

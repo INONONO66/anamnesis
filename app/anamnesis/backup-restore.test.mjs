@@ -139,9 +139,11 @@ test('CLI backup and restore into an empty root then verify', { timeout: 240000 
   // does not call extraction, and no fixture endpoint is presented as live LLM QA.
   const credential = join(parent, 'provider.json'); await writeFile(credential, JSON.stringify({ bearer: 'inert-g3-fixture' }), { mode: 0o600 }); env.ANAMNESIS_LLM_API_KEY_FILE = credential;
   await run(['up'], env);
-  const lines = [0, 1, 2].map(n => ({ episode: { schema: 'anamnesis.original-message/1', time: { value: '2026-09-19T00:00:00Z', precision: 'second' }, content: `G3 archived episode ${n}`, origin: { source: 'g3', session: 'isolated', actor: 'qa', record: `${n}` }, mass: 1, properties: {} }, source_revision: 'r1', expected_previous_revision_key: null }));
-  const input = join(parent, 'episodes.jsonl'); await writeFile(input, lines.map(JSON.stringify).join('\n') + '\n', { mode: 0o600 });
-  await run(['ingest', input, join(parent, 'checkpoint.json')], env);
+  const lines = [0, 1, 2].map(n => ({ source: 'g3', room: 'isolated', thread: null, message: `${n}`, speaker: 'qa', role: 'user', time: '2026-09-19T00:00:00Z', reply: null, text: `G3 archived episode ${n}`, evidence: {} }));
+  const corpus = join(parent, 'clean', 'g3'); await mkdir(corpus, { recursive: true, mode: 0o700 });
+  await writeFile(join(corpus, '_rooms.jsonl'), JSON.stringify({ file: 'isolated.jsonl', first: '2026-09-19T00:00:00Z' }) + '\n', { mode: 0o600 });
+  await writeFile(join(corpus, 'isolated.jsonl'), lines.map(JSON.stringify).join('\n') + '\n', { mode: 0o600 });
+  await run(['load', join(parent, 'clean'), 'g3', join(parent, 'load-state')], env);
   const objectBytes = Buffer.from('G3 real object payload\n'), objectHash = createHash('sha256').update(objectBytes).digest('hex');
   const objectDir = join(root, 'objects', objectHash.slice(0, 2)); await mkdir(objectDir, { recursive: true, mode: 0o700 });
   await writeFile(join(objectDir, objectHash), objectBytes, { mode: 0o600 });
