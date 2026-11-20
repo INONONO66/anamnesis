@@ -54,9 +54,10 @@ export async function foreground(): Promise<void> {
       daemonTiming?.({ layer: "daemon", event: "embedding_start" });
       const outcome = await runtime!.embeddingTurn();
       daemonTiming?.({ layer: "daemon", event: "embedding_complete" });
-      embeddingReady = outcome === "more";
-      // Busy -> nothing left. A stalled worker (storage gone) is not idle; recovery wakes it.
-      if (outcome === "idle") { embeddingIdle = true; reportIdle(); }
+      // A batch that ended mid-turn already re-armed the lane; never overwrite that wake or call it idle.
+      if (outcome === "more") embeddingReady = true;
+      // Busy -> nothing left. A stalled worker (storage gone) is not idle; recovery wakes it. "waiting": the batch's end wakes it.
+      if (outcome === "idle" && !embeddingReady) { embeddingIdle = true; reportIdle(); }
     } catch (error) {
       logError(error);
       if (fault(error).code === "ownership_lost") lostOwnership();

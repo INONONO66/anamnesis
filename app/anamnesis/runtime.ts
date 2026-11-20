@@ -68,8 +68,11 @@ export interface RuntimeAuthorityOptions {
 }
 /** Background lanes the daemon's single writer interleaves with requests. */
 export type BackgroundLane = "spool" | "embedding" | "extraction";
-/** Outcome of one bounded embedding batch. "stalled" keeps the wake pending for the next storage recovery. */
-export type EmbeddingTurn = "more" | "idle" | "stalled";
+/** Outcome of one embedding turn. "stalled" keeps the wake pending for the next storage recovery; "waiting": a batch is
+ * embedding off the serial slot and its end wakes the lane again. */
+export type EmbeddingTurn = "more" | "idle" | "stalled" | "waiting";
+/** Facts per embedding batch: one discovery scan inside the serial turn, then provider calls and commits outside it. */
+const EMBEDDING_BATCH = 32;
 
 export class Runtime {
   readonly capabilities: RpcCapabilities;
@@ -122,6 +125,9 @@ export class Runtime {
   private drainRequested = false;
   private drainStopped = false;
   private readonly embedding = { requested: false, drained_total: 0, quarantined_total: 0, last_error: null as string | null };
+  /** The batch embedding off the serial slot, and a failure it hands back to the next turn so the lane reports it. */
+  private embeddingBatch: Promise<void> | undefined;
+  private embeddingFailure: unknown;
   /** Present only with an extraction provider; the lane is otherwise never scheduled and reports unconfigured. */
   private readonly extraction: ExtractionScheduler | undefined;
   /** Wraps the configured provider so every model call (scheduler and audit RPCs alike) is metered; present with `extraction`. */
@@ -377,12 +383,14 @@ export class Runtime {
     this.embedding.requested = true;
     if (this.available && !this.drainStopped) this.scheduleDrain("embedding");
   }
-  /** One Episode per turn; called only by the daemon's serial owner, never from a second writer. The owner
-   * alternates a background turn with a queued request, so the turn's length is the bound on RPC latency during a
-   * backlog: one provider call, not a batch of up to 100 (a requeue on the production daemon held `status` past the
-   * client deadline). */
+  /** Called only by the daemon's serial owner, never from a second writer. The owner alternates a background turn with
+   * a queued request, so the turn's length bounds RPC latency during a backlog: the turn only finds the next batch of
+   * Facts, and their provider calls run outside it (a turn that awaited the provider held `status` past the client
+   * deadline). A failed batch is rethrown by the next turn, so the daemon logs it and handles ownership loss. */
   async embeddingTurn(): Promise<EmbeddingTurn> {
+    if (this.embeddingFailure !== undefined) { const failure = this.embeddingFailure; this.embeddingFailure = undefined; throw failure; }
     if (this.drainStopped || !this.available) return "stalled";
+    if (this.embeddingBatch) return "waiting";
     if (!this.embedding.requested) return "idle";
     // Consume the request before working: a remember committing mid-turn re-arms the lane, and that wake must survive
     // this turn's outcome. Clearing the flag at the end instead dropped such a wake once turns embedded one entry
@@ -392,16 +400,11 @@ export class Runtime {
       await this.installation.assertOwned();
       const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
-      const batch = await runtimeTimed("engine.drainEmbeddingOutbox", () => this.engine.drainEmbeddingOutbox(1));
-      this.embedding.drained_total += batch.drained;
-      if ("reason" in batch) return "idle";
-      this.embedding.quarantined_total += batch.quarantined;
-      // A deferred Fact is a provider-side failure recorded in the embedding ledger with a retry_after in the
-      // future, so the next turn moves on to the other Facts lacking a vector and the deferred one is retried on a
-      // later wake, never in a loop of its own. The turn is "more" either way: the lane only rests once nothing is due.
-      this.embedding.last_error = batch.deferred ? `${batch.deferred} embeddings deferred: ${batch.deferral_reason}` : null;
-      if (batch.drained > 0 || batch.deferred > 0) { this.embedding.requested = true; return "more"; }
-      return this.embedding.requested ? "more" : "idle";
+      const due = await runtimeTimed("engine.dueEmbeddings", () => this.engine.dueEmbeddings(EMBEDDING_BATCH));
+      if (due === null) return "idle";
+      if (due.length === 0) { this.embedding.last_error = null; return this.embedding.requested ? "more" : "idle"; }
+      this.embeddingBatch = this.embedBatch(due);
+      return "waiting";
     } catch (error) {
       if (storageUnavailable(error)) { this.markUnavailable(); this.embedding.requested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.embedding.last_error = String(error).slice(0, 512);
@@ -441,6 +444,31 @@ export class Runtime {
     const { calls_total, waited_total_ms } = pacer.stats();
     const { maxInFlight: max_in_flight, minIntervalMs: min_interval_ms, jitterFraction: jitter_fraction } = this.pacing;
     return { max_in_flight, min_interval_ms, jitter_fraction, calls_total, waited_total_ms };
+  }
+  /** A deferred Fact is a provider-side failure recorded in the embedding ledger with a retry_after in the future, so
+   * the rescan after a batch moves on to the other Facts lacking a vector and the deferred one is retried on a later
+   * wake, never in a loop of its own: the lane only rests once a rescan finds nothing due. A stop ends the batch
+   * between Facts, so no continuation writes after it. */
+  private async embedBatch(ids: string[]): Promise<void> {
+    try {
+      let deferred = 0, reason: string | null = null;
+      for (const id of ids) {
+        if (this.drainStopped) break;
+        const step = await runtimeTimed("engine.embedOutbox", () => this.engine.embedOutbox([id]));
+        this.embedding.drained_total += step.drained;
+        this.embedding.quarantined_total += step.quarantined;
+        deferred += step.deferred; reason = step.deferral_reason ?? reason;
+      }
+      this.embedding.last_error = deferred ? `${deferred} embeddings deferred: ${reason}` : null;
+      this.embeddingBatch = undefined;
+      this.wakeEmbedding();
+    } catch (error) {
+      this.embeddingBatch = undefined;
+      if (storageUnavailable(error)) { this.markUnavailable(); this.embedding.requested = true; return; } // Recovery re-schedules the pending wake.
+      this.embedding.last_error = String(error).slice(0, 512);
+      this.embeddingFailure = error;
+      if (!this.drainStopped) this.scheduleDrain("embedding");
+    }
   }
   /** Called only by the daemon's serial owner, never from a second writer. */
   async drainTurn(): Promise<boolean> {
@@ -723,6 +751,7 @@ export class Runtime {
     this.cancelDrain();
     await this.drainJob?.return(); this.drainJob = undefined;
     await this.extraction?.close(); // In-flight pipelines settle before the writer goes away.
+    await this.embeddingBatch;
     await this.uploads.close(); await this.engine.close(); await this.reader.close();
   }
 }

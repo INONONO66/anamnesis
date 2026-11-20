@@ -23,6 +23,7 @@ const VECTOR_RETURN = `RETURN v.operation_id AS operation_id,v.fact_id AS fact_i
   v.input_revision AS input_revision,v.input_digest AS input_digest,v.model AS model,
   v.incarnation AS model_incarnation,v.dimensions AS dimensions,v.created_at AS created_at,v.completed_at AS completed_at`;
 type FactInput = { content: string; revision: string; digest: string };
+export type EmbeddingDrain = { drained: number; quarantined: number; deferred: number; deferral_reason: string | null };
 type ProviderOutcome = { vector: number[] | null; reason: RpcEmbeddingAttempt["reason"]; detail: string | null };
 
 export class EmbeddingStore {
@@ -232,10 +233,17 @@ export class EmbeddingStore {
   }
 
   async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }):
-    Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
+    Promise<EmbeddingDrain | { drained: 0; reason: "embeddings_disabled" }> {
+    const due = await this.dueEmbeddings(limit);
+    return due === null ? { drained: 0, reason: "embeddings_disabled" } : this.embedOutbox(due, context);
+  }
+
+  /** The Facts owing this profile a vector, at most `limit`: fresh ones first, then recorded failures whose retry is
+   * due. Null when embeddings are not configured. Reads only; no provider call. */
+  async dueEmbeddings(limit = 100): Promise<string[] | null> {
     const bounded = z.number().int().min(1).max(1000).parse(limit);
     const provider = this.core.embeddingProvider;
-    if (!provider) return { drained: 0, reason: "embeddings_disabled" };
+    if (!provider) return null;
     const profileId = embeddingProfileId(provider.profile);
     const entries = await this.core.embeddingLedger.list();
     // An entry whose Fact already holds the vector of the entry's own profile is stale: a process loss between
@@ -263,9 +271,17 @@ export class EmbeddingStore {
        RETURN f.id AS id ORDER BY f.id LIMIT $limit`,
       { profile: profileId, excluded, limit: neo4j.int(bounded) });
     const due = (await this.core.embeddingLedger.due(profileId, this.core.clock())).slice(0, bounded - fresh.length);
+    return [...fresh.map(row => row.id), ...due.map(([fact]) => fact)];
+  }
+
+  /** One provider call per listed Fact that still lacks this profile's vector, each committed on its own. */
+  async embedOutbox(ids: readonly string[], context: InstallationContext = { principal: "installation", commit_mode: "auto" }): Promise<EmbeddingDrain> {
+    const provider = this.core.embeddingProvider;
+    if (!provider) throw new RecallError("embedding_not_configured");
+    const profileId = embeddingProfileId(provider.profile);
     let drained = 0, quarantined = 0, deferred = 0;
     let deferralReason: string | null = null;
-    for (const id of [...fresh.map(row => row.id), ...due.map(([fact]) => fact)]) {
+    for (const id of ids) {
       const vector = await this.core.run<{ present: boolean }>(
         `RETURN EXISTS { MATCH (:EmbeddingVector {fact_id:$id,profile_id:$profile}) } AS present`,
         { id, profile: profileId });

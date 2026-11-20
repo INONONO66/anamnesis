@@ -500,7 +500,10 @@ Meta writer fence, not a separate CAS cache.
 remember calls no LLM. It does not embed either — ingestion must succeed even
 when the embedding service is down. The extraction scheduler materializes Facts;
 the embedding worker scans all generations for Facts without a vector of the
-configured profile, one bounded provider call per turn. Its attempt and
+configured profile. A turn on the daemon's serial owner only finds the next
+batch of up to 32 Facts; their provider calls and commits run outside the turn,
+so no RPC waits for the provider, and the batch's end wakes the worker to scan
+again. Its attempt and
 quarantine state is in `embedding-state.json` (version 2, keyed by Fact ID),
 not graph Outbox rows. It sends Fact content, checks its digest and revision,
 and authorizes its source Episodes through `DERIVED_FROM`. A transient failure
