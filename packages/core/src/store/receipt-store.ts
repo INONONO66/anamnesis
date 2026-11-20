@@ -89,7 +89,7 @@ export class ReceiptStore {
   }
   async lineageTx(tx: ManagedTransaction, episodeId: string, digest: string | null): Promise<EchoLineage> {
     const rows = await tx.run<{ props: Record<string, unknown> }>(
-      `MATCH (e:Episode {id:$id}) RETURN properties(e) AS props`, { id: episodeId });
+      `MATCH (e:Element:Episode {id:$id}) RETURN properties(e) AS props`, { id: episodeId });
     const row = rows.records[0];
     if (!row) throw new EpisodeLineageError("lineage_unavailable");
     return verifyEpisodeLineage(episodeId, digest, row.get("props"));
@@ -153,7 +153,7 @@ export class ReceiptStore {
   }
   async semanticEpisodeTx(tx: ManagedTransaction, sourceId: string, policy: PolicyState): Promise<Omit<SemanticSourceContext["episode"], "content_language">> {
     await this.core.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy);
-    const rows = await tx.run<{ e: ElementNode }>(`MATCH (e:Episode {id:$id}) RETURN e`, { id: sourceId });
+    const rows = await tx.run<{ e: ElementNode }>(`MATCH (e:Element:Episode {id:$id}) RETURN e`, { id: sourceId });
     const p = nodeProps(rows.records[0]!.get("e")), element = p["digest_format"] == null ? decodeHistoricalElement(p) : toElement(p);
     const version = p["episode_digest_version"] ?? null;
     if (version !== null && version !== 2) throw new EpisodeLineageError("unsupported_digest_version");
