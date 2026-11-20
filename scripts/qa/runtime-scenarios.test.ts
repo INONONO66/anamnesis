@@ -312,23 +312,26 @@ const failedChildren: ProcessResult[] = [
 ];
 
 for (const failed of failedChildren) {
-  test(`orchestration stops later children and persists cleanup after exit=${failed.code}, timedOut=${failed.timedOut}`, async () => {
+  test(`orchestration runs later children after exit=${failed.code}, timedOut=${failed.timedOut} and rejects naming the failed file`, async () => {
     await withRecordedResults(async (record, read) => {
       const starts: string[] = [];
       let cleanups = 0;
+      const failedWithReason = { ...failed, output: `${failed.output}\n(fail) suite > the broken case [12.34ms]\n` };
       await rejects(runTestFiles(["before", "failed", "later"], {
         start: (file) => {
           starts.push(file);
-          return { done: Promise.resolve(file === "before" ? result("before output") : failed) };
+          return { done: Promise.resolve(file === "failed" ? failedWithReason : result(`${file} output`)) };
         },
         cleanup: async () => { cleanups++; },
         record,
-      }));
-      expect(starts).toEqual(["before", "failed"]);
-      expect(cleanups).toBe(2);
+      }), (error: unknown) => error instanceof AggregateError && error.errors.length === 1
+        && String(error.errors[0]) === `Error: Test file failed: failed, exit=${failed.code}, timedOut=${failed.timedOut}: suite > the broken case`);
+      expect(starts).toEqual(["before", "failed", "later"]);
+      expect(cleanups).toBe(3);
       expect(read()).toEqual([
         { ...result("before output"), file: "before", cleanup: "database cleared" },
-        { ...failed, file: "failed", cleanup: "database cleared" },
+        { ...failedWithReason, file: "failed", cleanup: "database cleared" },
+        { ...result("later output"), file: "later", cleanup: "database cleared" },
       ]);
     });
   }, 2000);
