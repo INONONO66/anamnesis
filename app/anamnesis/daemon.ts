@@ -288,7 +288,7 @@ export async function foreground(): Promise<void> {
   const server = createServer(accept("uds"));
   const tcpServer = listen ? createServer(accept("tcp")) : undefined;
   const listeners = tcpServer ? [server, tcpServer] : [server];
-  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" }>): unknown {
+  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" | "spaces.import" | "spaces.list" | "spaces.rebuild" | "replies.rebuild" }>): unknown {
     switch (request.method) {
       case "object.begin": return runtime.uploads.begin(connection, { hash: request.params.sha256, size: request.params.size, media_type: request.params.media_type });
       case "object.chunk": return runtime.uploads.chunk(connection, request.params.upload_id, request.params.seq, Buffer.from(request.params.bytes_b64, "base64"));
@@ -305,6 +305,10 @@ export async function foreground(): Promise<void> {
       case "restore.status": return runtime.restoreStatus(request.params.operation_id);
       case "hit-cache.verify": return runtime.verifyHitCache();
       case "hit-cache.rebuild": return runtime.rebuildHitCache();
+      case "spaces.import": return runtime.importRoomAssignments(request.params);
+      case "spaces.list": return runtime.listSpaces(request.params);
+      case "spaces.rebuild": return runtime.rebuildEpisodeDerived(request.params, "labels");
+      case "replies.rebuild": return runtime.rebuildEpisodeDerived(request.params, "replies");
     }
   }
   /** The hello handshake: constant-time token check, then the connection is bound and the runtime's capabilities and limits are announced. */

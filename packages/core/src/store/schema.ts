@@ -4,6 +4,10 @@ const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
 export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
 
 export const SCHEMA_STATEMENTS = [
+  `CREATE CONSTRAINT room_assignment IF NOT EXISTS FOR (r:RoomAssignment) REQUIRE (r.source, r.room) IS UNIQUE`,
+  `CREATE INDEX episode_room_order IF NOT EXISTS FOR (e:Episode) ON (e.origin_source, e.room, e.ingest_seq)`,
+  `CREATE INDEX episode_reply_address IF NOT EXISTS FOR (e:Episode) ON (e.origin_source, e.origin_session, e.origin_record, e.ingest_seq)`,
+  `CREATE INDEX episode_space IF NOT EXISTS FOR (e:Episode) ON (e.space)`,
   `CREATE CONSTRAINT embedding_vector_key IF NOT EXISTS FOR (v:EmbeddingVector) REQUIRE v.key IS UNIQUE`,
   `CREATE INDEX embedding_vector_fact_profile IF NOT EXISTS FOR (v:EmbeddingVector) ON (v.fact_id, v.profile_id)`,
   `CREATE CONSTRAINT embedding_profile_id IF NOT EXISTS FOR (p:EmbeddingProfile) REQUIRE p.id IS UNIQUE`,

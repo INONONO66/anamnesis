@@ -1435,3 +1435,42 @@ current one, and an element re-extracted after `known_by` under a newer
 generation is not projected back. A link whose `ingested_at` is null is
 treated as always known, so links written before this change can't be
 excluded by `known_by`.
+
+## D58 — Episode room/space labels and reply links are independent caches
+
+**Date**: 2026-11-19
+
+**Decision**: add `Episode.room` and `Episode.space` outside the immutable
+`properties` JSON and digest. Resolve rooms from `properties.room`, falling
+back to session, and spaces from an explicit daemon-managed Neo4j
+`RoomAssignment(source, room, space, name?)` table; default `unknown:<source>`.
+The table is mutable operator control, retained by the ordinary database dump.
+One shared writer applies labels at admission and during indexed, paged rebuild.
+
+Extend D21's closed lattice with `REPLIES_TO`, Episode to Episode, a
+generation-free, nonconducting cache alongside session topology. Its key hashes
+only endpoint IDs and role. Explicit reply addresses and Slack thread-parent
+addresses resolve to the latest admitted Episode at that address. Missing
+targets are counted and retried by an operator rebuild. No original, lineage,
+NEXT_EPISODE edge, conducting cache, serving revision or recall result changes.
+
+**Status**: implemented with `spaces.import/list/rebuild` and `replies.rebuild`
+RPCs and corresponding operator commands. See docs/01 §5 for cursor, import,
+resolution and backup contracts.
+
+**Alternative**: filesystem roots/aliases inferred from `cwd`; immutable space
+inside Episode properties; reply edges folded into NEXT_EPISODE or PPR.
+
+**Reason**: existing Episodes already contain complete immutable evidence.
+Explicit assignments can change independently, need atomic admission lookup,
+and must survive backup. Graph storage reuses the writer fence and dump rather
+than adding a second authority file. Room and ingest indexes bound each rebuild
+transaction and make one-room reassignment independent of corpus size.
+
+**Trade-off accepted**: the first labels backfill scans the corpus once before
+room-scoped rebuilds can see historical rooms. Reply passes scan indexed Episode
+pages; targets arriving later require another pass. Address collisions select
+the greatest ingest sequence because the loader address contains neither actor
+nor revision. The operation is deterministic for the current stored corpus,
+not a historical reply-version assertion. Recall scope and Fact labels remain
+outside this decision.

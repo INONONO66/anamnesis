@@ -54,6 +54,8 @@ export {
   RpcHelloParams,
   RpcIngestStatusParams,
   RpcHitCacheParams,
+  RoomAssignment, RpcSpacesImportParams, RpcSpacesListParams, RpcSpacesListResult,
+  RpcEpisodeRebuildParams, RpcEpisodeRebuildResult,
   RpcRequest,
   RpcTcpAuth,
   RpcErrorCode,

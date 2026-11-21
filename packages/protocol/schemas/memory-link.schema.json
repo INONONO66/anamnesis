@@ -23,6 +23,7 @@
         "MENTIONS",
         "RELATES_TO",
         "NEXT_EPISODE",
+        "REPLIES_TO",
         "HAS_MEMBER",
         "DERIVED_FROM",
         "INVALIDATES",

@@ -24,6 +24,7 @@ import type { TrustedAuthorityAdapter } from "./backup-restore-orchestrator.ts";
 import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { fencedAdapter, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { logEvent } from "./log.ts";
+import type { RpcSpacesImportParams, RpcSpacesListParams, RpcEpisodeRebuildParams } from "@anamnesis/protocol";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -750,6 +751,18 @@ export class Runtime {
   async rebuildHitCache() {
     await this.requireStorage();
     return this.engine.rebuildHitCache();
+  }
+  async importRoomAssignments(params: RpcSpacesImportParams) {
+    await this.requireStorage();
+    return this.engine.store.importRoomAssignments(params);
+  }
+  async listSpaces(params: RpcSpacesListParams) {
+    await this.requireStorage();
+    return this.engine.store.listSpaces(params);
+  }
+  async rebuildEpisodeDerived(params: RpcEpisodeRebuildParams, kind: "labels" | "replies") {
+    await this.requireStorage();
+    return this.engine.store.rebuildEpisodeDerived(params, kind);
   }
   async close(): Promise<void> {
     this.recovery.stop();
