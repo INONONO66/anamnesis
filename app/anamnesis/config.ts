@@ -13,6 +13,7 @@ const providerSecret = RpcEmbeddingAttempt.shape.model.refine(value => !/[\r\n]/
 const providerPath = RpcEmbeddingAttempt.shape.model;
 export const DEFAULT_EXTRACTION_PROMPT_FILE = fileURLToPath(new URL("./prompts/extract-claims.v3.md", import.meta.url));
 export const DEFAULT_RELATION_PROMPT_FILE = fileURLToPath(new URL("./prompts/judge-relations.v1.md", import.meta.url));
+const DEFAULT_IDENTITY_PROMPT_FILE = fileURLToPath(new URL("./prompts/judge-identity.v1.md", import.meta.url));
 /** How the daemon meters its extraction provider: bounded in-flight pipelines plus a jittered minimum call interval. */
 export interface ExtractionPacingConfig { readonly maxInFlight: number; readonly minIntervalMs: number; readonly jitterFraction: number }
 export const EXTRACTION_PACING_DEFAULTS: ExtractionPacingConfig = Object.freeze({ maxInFlight: 4, minIntervalMs: 0, jitterFraction: 0.5 });
@@ -34,6 +35,7 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
   ANAMNESIS_RELATION_PROMPT_FILE: providerPath.default(DEFAULT_RELATION_PROMPT_FILE),
   ANAMNESIS_EXTRACTION_LANE: providerName.refine(value => value === "on" || value === "off").default("on"),
+  ANAMNESIS_IDENTITY_PROMPT_FILE: providerPath.default(DEFAULT_IDENTITY_PROMPT_FILE),
   ANAMNESIS_EXTRACTION_GATE: providerName.refine(value => value === "off" || value === "jev").default("off"),
   ANAMNESIS_JEV_GATE_KEY_FILE: providerPath.default(join(homedir(), ".config/anamnesis/jev-vercel-gateway.key.json")),
   ANAMNESIS_EXTRACTION_GATE_THRESHOLD: RpcExtractionPacing.shape.jitter_fraction.default(0.2),
@@ -42,6 +44,22 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_LLM_MIN_INTERVAL_MS: RpcExtractionPacing.shape.min_interval_ms.default(EXTRACTION_PACING_DEFAULTS.minIntervalMs),
   ANAMNESIS_LLM_JITTER_FRACTION: RpcExtractionPacing.shape.jitter_fraction.default(EXTRACTION_PACING_DEFAULTS.jitterFraction),
 });
+
+async function readPrompt(file: string, variable: string): Promise<string> {
+  const text = await fs.readFile(file, "utf8");
+  if (!text.trim()) throw new Error(`empty ${variable}`);
+  return text;
+}
+
+export function identityOwners(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env["ANAMNESIS_IDENTITY_OWNER_ACCOUNTS"];
+  if (raw === undefined || raw.trim() === "") return [];
+  return raw.split(",").map(entry => {
+    const account = entry.trim(), colon = account.indexOf(":");
+    if (colon <= 0 || colon === account.length - 1) throw new Error("ANAMNESIS_IDENTITY_OWNER_ACCOUNTS entries must be source:actor");
+    return account;
+  });
+}
 
 /** `{"sources": [...], "rooms": [{"source", "room"}]}`: every Episode of a listed source, plus the listed rooms. */
 const ExtractionScopeFile = RpcEmbeddingAttempt.pick({}).strict().extend({
@@ -82,11 +100,10 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     apiKey = key.data.bearer;
   }
   const promptFile = resolve(config.ANAMNESIS_EXTRACTION_PROMPT_FILE);
-  const systemPrompt = await fs.readFile(promptFile, "utf8");
-  if (!systemPrompt.trim()) throw new Error("empty ANAMNESIS_EXTRACTION_PROMPT_FILE");
+  const systemPrompt = await readPrompt(promptFile, "ANAMNESIS_EXTRACTION_PROMPT_FILE");
   const relationPromptFile = resolve(config.ANAMNESIS_RELATION_PROMPT_FILE);
-  const relationPrompt = await fs.readFile(relationPromptFile, "utf8");
-  if (!relationPrompt.trim()) throw new Error("empty ANAMNESIS_RELATION_PROMPT_FILE");
+  const relationPrompt = await readPrompt(relationPromptFile, "ANAMNESIS_RELATION_PROMPT_FILE");
+  const identityPrompt = await readPrompt(resolve(config.ANAMNESIS_IDENTITY_PROMPT_FILE), "ANAMNESIS_IDENTITY_PROMPT_FILE");
   const scope = config.ANAMNESIS_EXTRACTION_SCOPE_FILE === undefined ? undefined : await readExtractionScope(config.ANAMNESIS_EXTRACTION_SCOPE_FILE);
   const gate = config.ANAMNESIS_EXTRACTION_GATE === "jev"
     ? { kind: "jev" as const, keyFile: config.ANAMNESIS_JEV_GATE_KEY_FILE, threshold: config.ANAMNESIS_EXTRACTION_GATE_THRESHOLD }
@@ -101,7 +118,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
     llm: { baseUrl: config.ANAMNESIS_LLM_BASE_URL, model: config.ANAMNESIS_LLM_MODEL,
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
-    promptFile, systemPrompt, relationPromptFile, relationPrompt,
+    promptFile, systemPrompt, relationPromptFile, relationPrompt, identityPrompt,
     extractionLane: config.ANAMNESIS_EXTRACTION_LANE, gate, scope,
     extractionPacing: { maxInFlight: config.ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT, minIntervalMs: config.ANAMNESIS_LLM_MIN_INTERVAL_MS, jitterFraction: config.ANAMNESIS_LLM_JITTER_FRACTION } satisfies ExtractionPacingConfig,
   };

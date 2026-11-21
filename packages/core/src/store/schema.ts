@@ -4,6 +4,13 @@ const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
 export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
 
 export const SCHEMA_STATEMENTS = [
+  `CREATE CONSTRAINT identity_account_key IF NOT EXISTS FOR (a:Account) REQUIRE a.key IS UNIQUE`,
+  `CREATE CONSTRAINT identity_account_session IF NOT EXISTS FOR (s:AccountSession) REQUIRE (s.account_key, s.session_key) IS UNIQUE`,
+  `CREATE INDEX identity_account_session_account IF NOT EXISTS FOR (s:AccountSession) ON (s.account_key)`,
+  `CREATE CONSTRAINT identity_directory_entry IF NOT EXISTS FOR (d:DirectoryEntry) REQUIRE (d.source, d.actor) IS UNIQUE`,
+  `CREATE CONSTRAINT identity_decision_id IF NOT EXISTS FOR (d:IdentityDecision) REQUIRE d.id IS UNIQUE`,
+  `CREATE CONSTRAINT identity_state_key IF NOT EXISTS FOR (s:IdentityState) REQUIRE s.key IS UNIQUE`,
+  `CREATE INDEX identity_person IF NOT EXISTS FOR (p:Person) ON (p.generation, p.id)`,
   `CREATE CONSTRAINT room_assignment IF NOT EXISTS FOR (r:RoomAssignment) REQUIRE (r.source, r.room) IS UNIQUE`,
   `CREATE INDEX episode_room_order IF NOT EXISTS FOR (e:Episode) ON (e.origin_source, e.room, e.ingest_seq)`,
   `CREATE INDEX episode_reply_address IF NOT EXISTS FOR (e:Episode) ON (e.origin_source, e.origin_session, e.origin_record, e.ingest_seq)`,

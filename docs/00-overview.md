@@ -182,6 +182,7 @@ exists yet, and the gates that will produce one are in
 |---|---|
 | Element | A Neo4j node that is a memory element. `:Element` common label plus exactly one kind label |
 | Episode / Fact / Entity / Community | Element kinds: original, derived statement, anchor, topic set |
+| Account / Person | Identity layer, not Elements: one `(origin_source, origin_actor)` speaker / a group of accounts judged to be one person (D59) |
 | Link | A relationship between Elements. Eight roles, real Neo4j relationship types; `REPLIES_TO` is a nonconducting Episode cache (D58) |
 | Hit | A ledger record that a memory was actually used. Attached to an Episode. Kinds: `recall_hit` (adoption, the only one that moves `S`), `exposure`, `re_mention`, `promotion`, `outcome` |
 | RecallReceipt | Append-only control record of one recall: delivered primary and companion IDs, source snapshots, versions, channels, ranking state, budget and result digests. Exactly one adoption per source and one outcome per recall; expires by explicit TTL. Not a semantic Episode |

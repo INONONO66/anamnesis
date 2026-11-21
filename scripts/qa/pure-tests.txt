@@ -55,3 +55,4 @@ packages/core/src/store/helpers-pure.test.ts
 packages/core/src/journal-pure.test.ts
 packages/core/src/store/extraction-journal.test.ts
 app/anamnesis/load.test.ts
+packages/core/src/identity.test.ts

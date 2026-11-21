@@ -32,6 +32,8 @@ export { RecallTransportInput, CommitReceiptInput } from "./store/receipts.ts";
 export { ObjectStore } from "./objects.ts";
 export { RecallError, type Tokenizers } from "./recall.ts";
 export { ExtractionScheduler, type ExtractionScope, type ExtractionTurn } from "./extraction-scheduler.ts";
+export { IdentityScheduler, type IdentityTurn } from "./identity-scheduler.ts";
+export type { IdentityDecision } from "./identity.ts";
 export { ExtractionGateError, type ExtractionGate } from "./extraction-gate.ts";
 export { PacedExtractionProvider } from "./paced-extraction-provider.ts";
 export { EmptyClaimJudgeProvider } from "./empty-claim-judge-provider.ts";

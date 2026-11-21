@@ -14,7 +14,7 @@ import type { InstallationContext, RecallTransportInput } from "@anamnesis/core"
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
-import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
+import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, identityOwners, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
@@ -25,6 +25,8 @@ import { backupOwned, restoreOwned } from "./backup-restore-orchestrator.ts";
 import { fencedAdapter, manifestTemplate, objectInventory } from "./runtime-authority.ts";
 import { logEvent } from "./log.ts";
 import type { RpcSpacesImportParams, RpcSpacesListParams, RpcEpisodeRebuildParams } from "@anamnesis/protocol";
+import type { RpcIdentityCorrectParams, RpcIdentityDirectoryParams, RpcIdentityRebuildParams, RpcPeopleListParams, RpcPeopleShowParams } from "@anamnesis/protocol";
+import { IdentityRuntime } from "./identity-runtime.ts";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
 function canonical(value: unknown): string {
@@ -68,7 +70,7 @@ export interface RuntimeAuthorityOptions {
   authorityAdapter?: TrustedAuthorityAdapter;
 }
 /** Background lanes the daemon's single writer interleaves with requests. */
-export type BackgroundLane = "spool" | "embedding" | "extraction";
+export type BackgroundLane = "spool" | "embedding" | "extraction" | "identity";
 /** Outcome of one embedding turn. "stalled" keeps the wake pending for the next storage recovery; "waiting": a batch is
  * embedding off the serial slot and its end wakes the lane again. */
 export type EmbeddingTurn = "more" | "idle" | "stalled" | "waiting";
@@ -96,7 +98,8 @@ export class Runtime {
       if (config.llm.baseUrl !== undefined) {
         if (!config.llm.apiKey) throw new Error("ANAMNESIS_LLM_API_KEY_FILE required");
         providers.extractionProvider = new OpenAiChatExtractionProvider({
-          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt, relationPrompt: config.relationPrompt, timeoutMs: 30000,
+          ...config.llm, baseUrl: config.llm.baseUrl, apiKey: config.llm.apiKey, systemPrompt: config.systemPrompt,
+          relationPrompt: config.relationPrompt, identityPrompt: config.identityPrompt, timeoutMs: 30000,
         });
       }
       if (config.gate.kind === "jev" && providers.extractionProvider) gate = await JevGate.create({ keyFile: config.gate.keyFile });
@@ -139,6 +142,7 @@ export class Runtime {
   /** Wraps the configured provider so every model call (scheduler and audit RPCs alike) is metered; present with `extraction`. */
   private readonly pacer: PacedExtractionProvider | undefined;
   private extractionRequested = false;
+  private readonly identityRuntime: IdentityRuntime;
   /** While storage is unavailable, ticks re-enter the spool lane so drainTurn retries refresh() on the daemon's serial queue. */
   private readonly recovery = new RecoveryProbe(() => { if (!this.drainStopped) this.scheduleDrain("spool"); }, RECOVERY_PROBE_MS, nodeTimers);
   constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS, private readonly gate?: JevGate, private readonly gateThreshold = 0.2, private readonly scope?: ExtractionScope, private readonly extractionEnabled = true) {
@@ -161,6 +165,9 @@ export class Runtime {
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       // A settled pipeline may have materialized Facts, and Facts are the embedding lane's input (D56): wake both lanes.
       read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } }) : undefined;
+    this.identityRuntime = new IdentityRuntime({ engine: this.engine, provider: config.extractionProvider, owners: identityOwners(),
+      requireStorage: () => this.requireStorage(),
+      schedule: () => { if (this.available && !this.drainStopped) this.scheduleDrain("identity"); } });
     this.database = config.database ?? "neo4j";
     this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
@@ -196,7 +203,7 @@ export class Runtime {
       const recovered = !this.available;
       this.available = true;
       this.recovery.disarm();
-      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
+      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); this.identityRuntime.wake(); }
       return rows[0]?.e ?? undefined;
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
@@ -316,7 +323,7 @@ export class Runtime {
       ? { state: "committed" as const, ...this.identity(binding), id: result.id, created: true, ingest_seq: result.ingest_seq }
       : await this.committed(binding, result.created);
     if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
-    if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); } // Direct and spool-drained commits alike enqueue worker work.
+    if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); this.identityRuntime.wake(); } // Direct and spool-drained commits alike enqueue worker work.
     return committed;
   }
   /** `remember` for each delivery in order, in one serial turn. A non-retryable refusal answers its delivery alone and the
@@ -464,6 +471,18 @@ export class Runtime {
     } catch (error) {
       if (storageUnavailable(error)) { this.markUnavailable(); this.extractionRequested = true; return "stalled"; } // Recovery re-schedules the pending wake.
       this.extraction.recordError(error);
+      throw error;
+    }
+  }
+  async identityTurn(): Promise<import("@anamnesis/core").IdentityTurn | "stalled"> {
+    if (this.drainStopped || !this.available) return "stalled";
+    try {
+      await this.installation.assertOwned();
+      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
+      return await runtimeTimed("engine.identityTurn", () => this.identityRuntime.turn());
+    } catch (error) {
+      if (storageUnavailable(error)) { this.markUnavailable(); this.identityRuntime.wake(); return "stalled"; }
       throw error;
     }
   }
@@ -799,6 +818,12 @@ export class Runtime {
     await this.requireStorage();
     return this.engine.store.rebuildEpisodeDerived(params, kind);
   }
+  identityStatus() { return this.identityRuntime.status(); }
+  rebuildIdentity(params: RpcIdentityRebuildParams) { return this.identityRuntime.rebuild(params); }
+  correctIdentity(params: RpcIdentityCorrectParams) { return this.identityRuntime.correct(params); }
+  importIdentityDirectory(params: RpcIdentityDirectoryParams) { return this.identityRuntime.directory(params); }
+  listPeople(params: RpcPeopleListParams) { return this.identityRuntime.list(params); }
+  showPerson(params: RpcPeopleShowParams) { return this.identityRuntime.show(params); }
   async close(): Promise<void> {
     this.recovery.stop();
     this.cancelDrain();

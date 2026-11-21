@@ -1474,3 +1474,36 @@ the greatest ingest sequence because the loader address contains neither actor
 nor revision. The operation is deterministic for the current stored corpus,
 not a historical reply-version assertion. Recall scope and Fact labels remain
 outside this decision.
+
+## D59 — Identity: accounts from Episodes, persons from judged merges, one rebuildable generation
+
+**Date**: 2026-11-21
+
+**Decision**: derive one `Account` per `(origin_source, origin_actor)` from
+Episodes, and group accounts into `Person`s owned by one identity generation.
+Rules decide owner accounts, shared directory emails and overlapping accounts
+in one conversation; an LLM judge decides the rest; an operator decision
+overrides both. Rule outcomes are recomputed and never stored. Stored decisions
+are CREATE-only with authority `judge` or `operator`. Grouping is a pure
+function rebuilt into a new generation and switched in one transaction. A
+judge merge needs confidence 0.85; `unsure` stays separate. The layer is
+operator data outside Element kinds and the Link lattice; recall does not read
+it yet.
+
+**Status**: implemented with the identity lane, `identity.*` and `people.*`
+RPCs, operator commands, directory import and provider-backed judging. See
+docs/01 §4 and docs/02 §5.5.
+
+**Alternative**: merge Entities in place, require human confirmation for every
+merge, or run LLM entity resolution during extraction.
+
+**Reason**: Facts already carry account-level speaker identity, so grouping is
+a rebuildable view over immutable Episodes. A wrong merge is repaired by a new
+generation without rewriting Facts. Rules and co-presence remove obvious pairs
+before a model call.
+
+**Trade-off accepted**: co-presence is interval overlap within a session, so
+two accounts of one person active in one room at the same time stay apart.
+The scan ignores policy because accounts are operator data; text sent to the
+judge passes extraction policy. Entity links and Person-aware extraction and
+recall remain later work.

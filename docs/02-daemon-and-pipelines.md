@@ -1080,6 +1080,28 @@ claim, and it never erases an occurrence.
 `known_conflict(f,g)` is exactly one active-generation `CONTRASTS`
 relationship with canonical endpoints: irreflexive, symmetric, not transitive.
 
+### 5.5 Identity lane (D59)
+
+The identity lane maintains the identity layer (docs/01 §4). It is ready only
+while no foreground request is queued, so bulk load admission has priority.
+One turn performs the first applicable action:
+
+```text
+  1. store settled judge verdicts as IdentityDecision records
+  2. scan one page (<= 500 Episodes) above covered_ingest_seq
+  3. plan with recomputed rules and build a Person generation when stale
+  4. start the first pending judge call, at most one in flight
+```
+
+A plan runs after a scan, stored verdict, directory import, operator correction
+or rebuild. The `judge_identity` call uses the configured extraction provider,
+the same pacer as extraction, and `prompts/judge-identity.v1.md`. It runs
+outside the serial slot; a later turn stores its verdict. A settled verdict
+therefore makes the scheduler return `more` until storage completes. Provider
+errors leave the pair pending for a later retry. Without a judge the lane still
+scans, recomputes rules and builds generations; pending judged pairs remain
+separate and appear in `identity.status`.
+
 ### Idempotency and a blocked sequence head
 
 Because Fact, Entity and link identities include `generation` and all

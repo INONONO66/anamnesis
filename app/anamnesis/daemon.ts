@@ -25,8 +25,9 @@ export async function foreground(): Promise<void> {
   const budget = new RpcByteBudget();
   let serial: Promise<void> = Promise.resolve();
   const requests: Array<() => Promise<void>> = [];
-  let running = false, started = false, drainReady = false, embeddingReady = false, extractionReady = false, preferDrain = false, nextLane = 0;
-  const backgroundReady = () => (drainReady || embeddingReady || extractionReady) && !stopping;
+  let running = false, started = false, drainReady = false, embeddingReady = false, extractionReady = false, identityReady = false, preferDrain = false, nextLane = 0;
+  const identityDue = () => identityReady && requests.length === 0;
+  const backgroundReady = () => (drainReady || embeddingReady || extractionReady || identityDue()) && !stopping;
   // Worker lanes start idle; an unconfigured lane is never woken, so it stays idle for the emitter.
   let embeddingIdle = true, extractionIdle = true;
   const reportIdle = () => { if (embeddingIdle && extractionIdle) logEvent("info", "workers_idle"); };
@@ -78,10 +79,16 @@ export async function foreground(): Promise<void> {
       if (fault(error).code === "ownership_lost") lostOwnership();
     }
   };
+  const identityTurn = async () => {
+    identityReady = false;
+    try { if (await runtime!.identityTurn() === "more") identityReady = true; }
+    catch (error) { logError(error); if (fault(error).code === "ownership_lost") lostOwnership(); }
+  };
   const lanes = [
     { ready: () => drainReady, turn: drainTurn },
     { ready: () => embeddingReady, turn: embeddingTurn },
     { ready: () => extractionReady, turn: extractionTurn },
+    { ready: identityDue, turn: identityTurn },
   ];
   // Background has its own coalesced admission slot. Alternate dispatch lanes
   // so neither a saturated foreground nor a large drain cohort can starve one.
@@ -312,6 +319,16 @@ export async function foreground(): Promise<void> {
       case "replies.rebuild": return runtime.rebuildEpisodeDerived(request.params, "replies");
     }
   }
+  function identity(runtime: Runtime, request: Extract<RpcRequest, { method: "identity.status" | "identity.rebuild" | "identity.correct" | "identity.directory" | "people.list" | "people.show" }>): unknown {
+    switch (request.method) {
+      case "identity.status": return runtime.identityStatus();
+      case "identity.rebuild": return runtime.rebuildIdentity(request.params);
+      case "identity.correct": return runtime.correctIdentity(request.params);
+      case "identity.directory": return runtime.importIdentityDirectory(request.params);
+      case "people.list": return runtime.listPeople(request.params);
+      case "people.show": return runtime.showPerson(request.params);
+    }
+  }
   /** The hello handshake: constant-time token check, then the connection is bound and the runtime's capabilities and limits are announced. */
   function hello(connection: Connection, params: Extract<RpcRequest, { method: "hello" }>["params"]) {
     if (connection.authenticated) throw new RpcFault("already_authenticated", "hello already completed");
@@ -343,6 +360,12 @@ export async function foreground(): Promise<void> {
       case "policy.revoke":
         await cancelPublications();
         return runtime.revokePolicy(request.params, connection.context!);
+      case "identity.status":
+      case "identity.rebuild":
+      case "identity.correct":
+      case "identity.directory":
+      case "people.list":
+      case "people.show": return identity(runtime, request);
       case "shutdown":
         stopping = true;
         setImmediate(() => { void stop().catch(logError); });
@@ -352,7 +375,7 @@ export async function foreground(): Promise<void> {
   }
   const stop = (): Promise<void> => shutdown ??= (async () => {
     stopping = true;
-    drainReady = false; embeddingReady = false; extractionReady = false;
+    drainReady = false; embeddingReady = false; extractionReady = false; identityReady = false;
     runtime?.cancelDrain();
     const closed = Promise.all(listeners.map(listener => new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()))));
     const deadline = setTimeout(() => {
@@ -383,6 +406,7 @@ export async function foreground(): Promise<void> {
     runtime = await Runtime.create(installation, lane => {
       if (lane === "embedding") { embeddingReady = true; embeddingIdle = false; }
       else if (lane === "extraction") { extractionReady = true; extractionIdle = false; }
+      else if (lane === "identity") identityReady = true;
       else drainReady = true;
       kick();
     }, {

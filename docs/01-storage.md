@@ -1193,6 +1193,86 @@ The projection is an output, never an input: the daemon doesn't read the
 directory back, nothing in the graph references it, and editing a file
 changes nothing until the next write overwrites it.
 
+### Identity layer (D59)
+
+The identity layer answers which speaker accounts are the same person. It is
+not extraction output and adds no Element kind. Its nodes never conduct PPR,
+recall does not read them in this version, and `OF_PERSON` is not a Link role.
+
+```text
+  Account          {key, source, actor, names, mine, episodes, tool_episodes,
+                    sample_first, sample_last}                         cache, unique key
+  AccountSession   {account_key, session_key, session, episodes, first_utc, last_utc}
+                                                                      cache, unique pair
+  DirectoryEntry   {source, actor, names, handles, emails}             operator table
+  IdentityDecision {id, a, b, verdict, confidence, authority, reason,
+                    model, evidence_digest, decided_at}                CREATE-only control
+  IdentityState    {key:'identity', covered_ingest_seq, generation, built_digest}
+  Person           {id, generation, name, owner, aliases, sources}     one generation
+  (:Account)-[:OF_PERSON {generation}]->(:Person)
+```
+
+`Account.key = tupleHash([origin_source, origin_actor])`. The identity lane
+(docs/02 §5.5) reads Episodes above `covered_ingest_seq` in ingest order, at
+most 500 per page, and folds them into Accounts and AccountSessions in the
+transaction that advances coverage. Names are distinct
+`properties.speaker_name` strings (NFC, at most 256 UTF-8 bytes, first 32
+kept). `mine` records `properties.mine === true`. `sample_first` and
+`sample_last` keep the first four and latest four Episodes whose content has
+more than five characters. At every plan an account is the owner's when
+`mine` holds, actor is `user`, or `source:actor` appears in
+`ANAMNESIS_IDENTITY_OWNER_ACCOUNTS`; it is a bot when actor is `assistant` or
+more than half its Episodes have `origin_role = tool`.
+
+Candidates share an in-memory blocking key from a name, directory name or
+handle (NFKC, lower case, whitespace, punctuation and symbols removed), or an
+exact lower-cased directory email. Bracketed and outside name parts are keys
+of their own; keys shorter than two characters are dropped. A key shared by
+more than 12 accounts is skipped. Bots never pair.
+
+Rules are recomputed at every plan and never stored: two owner accounts are
+`same`; a shared directory email is `same`; two accounts with overlapping
+activity intervals in one session are `different`. Other pairs go to the
+judge when configured. Stored decisions are CREATE-only and have authority
+`judge` or `operator` only. Their `evidence_digest` is SHA-256 over sorted
+names, session keys and directory rows. A pair is judged again only when its
+latest verdict is `unsure` and that digest changed. The latest operator
+decision overrides rules and judge decisions.
+
+Grouping applies cannot-links before merge edges. Operator decisions have
+highest precedence, then rules, then judge decisions. Judge `same` needs
+confidence at least 0.85; judge `different` needs at least 0.5. An edge joins
+two groups only when no cannot-link connects them. Person id is UUIDv5 of the
+smallest member key; its name is the name with the greatest Episode-weighted
+use, ties by code point order.
+
+A build writes every Person and `OF_PERSON` of generation `g + 1` and moves
+`IdentityState.generation` in the same transaction; a following transaction
+deletes old generations. `built_digest` is SHA-256 of the planned persons
+(ids, names, members, aliases and sources). Account and Episode counts are
+read through `OF_PERSON`, not stored on Person.
+
+The scan reads Episodes regardless of policy because accounts and decisions
+are operator data. Episode text leaves the database for judging only after
+the current extraction policy check; denied samples are dropped. Account,
+AccountSession and Person regenerate from Episodes. `IdentityDecision` and
+`DirectoryEntry` remain as regeneration authority.
+
+Operator surface:
+
+```sh
+node dist/anamnesis-ops.mjs identity status
+node dist/anamnesis-ops.mjs identity rebuild [--accounts]
+node dist/anamnesis-ops.mjs identity correct slack:U1 kakao:42 same|different [--reason TEXT]
+node dist/anamnesis-ops.mjs identity directory users.jsonl
+node dist/anamnesis-ops.mjs people list [--query TEXT]
+node dist/anamnesis-ops.mjs people show <person-id|source:actor>
+```
+
+Directory JSONL rows hold `source`, `actor` and optional `names`, `handles`
+and `emails`; a row replaces that account's entry. Linking extracted Entities
+to Persons, adding Person names to extraction, and Person recall are later work.
+
 ## 5. Link
 
 Relationships are real Neo4j relationship types, not nodes. The eight roles
