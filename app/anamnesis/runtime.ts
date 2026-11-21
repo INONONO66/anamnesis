@@ -720,12 +720,12 @@ export class Runtime {
 
   async createExtractionPipeline(params: CreateExtractionPipeline, context: InstallationContext) {
     await this.requireStorage();
-    if (!this.extraction) throw new ExtractionAuditError("extraction_not_configured");
+    if (!this.extractionEnabled) throw new ExtractionAuditError("extraction_not_configured");
     return this.engine.createExtractionPipeline(params,context);
   }
   async runExtractionPipeline(params: RunExtractionPipeline, context: InstallationContext) {
     await this.requireStorage();
-    if (!this.extraction) throw new ExtractionAuditError("extraction_not_configured");
+    if (!this.extractionEnabled) throw new ExtractionAuditError("extraction_not_configured");
     return this.engine.runExtractionPipeline(params,context);
   }
   async extractionPipelineStatus(id: string, context: InstallationContext) {
