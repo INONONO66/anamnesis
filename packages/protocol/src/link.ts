@@ -6,6 +6,7 @@ export const LinkRole = z.enum([
   "MENTIONS",
   "RELATES_TO",
   "NEXT_EPISODE",
+  "REPLIES_TO",
   "HAS_MEMBER",
   "DERIVED_FROM",
   "INVALIDATES",
@@ -19,6 +20,7 @@ export const LINK_LATTICE: Record<
   { from: readonly Celestial[]; to: readonly Celestial[] }
 > = {
   NEXT_EPISODE: { from: ["Episode"], to: ["Episode"] },
+  REPLIES_TO: { from: ["Episode"], to: ["Episode"] },
   MENTIONS: { from: ["Episode", "Fact"], to: ["Entity"] },
   RELATES_TO: { from: ["Fact", "Entity"], to: ["Fact", "Entity"] },
   HAS_MEMBER: { from: ["Community"], to: ["Entity", "Fact"] },

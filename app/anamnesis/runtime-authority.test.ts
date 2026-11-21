@@ -133,18 +133,21 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
   try {
     await engine.init();
     await engine.claimWriterEpoch();
+    await engine.store.importRoomAssignments({ assignments: [{ source: root, room: root, space: "project:backup", name: "Backup room" }] });
     const episode = await engine.remember({ content: "fenced before the dump", time: { value: "2026-09-01T00:00:00Z", precision: "day" }, origin: { source: root, session: root, actor: "user", record: "one" }, source_revision: "v1", expected_previous_revision_key: null },
       { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context: installationContext });
+    const reply = await engine.remember({ content: "reply retained in dump", time: { value: "2026-09-01T00:00:01Z", precision: "second" },
+      origin: { source: root, session: root, actor: "user", record: "two" }, properties: { room: root, reply: `${root}:${root}#one` } });
     await withAuthorityEnv({ ANAMNESIS_NEO4J_CONTAINER: OWNED.container, ANAMNESIS_QA_OWNER: OWNED.owner, ANAMNESIS_NEO4J_URI: OWNED.uri, ANAMNESIS_NEO4J_PASSWORD: OWNED.password }, async () => {
       const adapter = await createRuntimeAuthority(engine, installation, installationContext);
       await expect(adapter.authoritySnapshot("1")).rejects.toThrow("writer_fence_required");
       await expect(adapter.restoredAuthoritySnapshot()).rejects.toThrow("restore_not_started");
       const fenced = await adapter.revokeWriters();
       expect(fenced.epoch).toMatch(/^\d+$/);
-      expect(fenced.cutoff).toMatchObject({ ingest_seq: 1, policy_revision: 0 });
+      expect(fenced.cutoff).toMatchObject({ ingest_seq: 2, policy_revision: 0 });
       expect(await dockerOutput(["inspect", "--format", "{{.State.Running}}", OWNED.container])).toBe("false");
       const authority = await adapter.authoritySnapshot(fenced.epoch);
-      expect(authority.members).toEqual({ count: 1, sha256: sha256(JSON.stringify([episode.id])) });
+      expect(authority.members).toEqual({ count: 2, sha256: sha256(JSON.stringify([episode.id, reply.id].sort())) });
       expect(authority.coverage).toEqual(fenced.cutoff);
       const dumpPath = join(archive, "database", "neo4j.dump");
       const dump = await adapter.dumpOffline(dumpPath, fenced.epoch);
@@ -184,7 +187,11 @@ ownedTest("the runtime authority fences the owned container, dumps and reloads i
         // The restored snapshot is the dump-time authority, not the diverged source.
         expect(await adapter.restoredAuthoritySnapshot()).toEqual(authority);
         const restored = neo4j.driver(bound.uri, neo4j.auth.basic("neo4j", OWNED.password), { disableLosslessIntegers: true });
-        try { expect(await count(restored, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(1); }
+        try {
+          expect(await count(restored, "MATCH (e:Episode {id:$id,room:$room,space:'project:backup'}) RETURN count(e) AS n", { id: episode.id, room: root })).toBe(1);
+          expect(await count(restored, "MATCH (:Episode {id:$reply})-[:REPLIES_TO]->(:Episode {id:$parent}) RETURN count(*) AS n", { reply: reply.id, parent: episode.id })).toBe(1);
+          expect(await count(restored, "MATCH (:RoomAssignment {source:$source,room:$source,space:'project:backup',name:'Backup room'}) RETURN count(*) AS n", { source: root })).toBe(1);
+        }
         finally { await restored.close(); }
         expect(await count(source, "MATCH (e:Episode {id:$id}) RETURN count(e) AS n", { id: episode.id })).toBe(0);
         // Quarantine removes the container that served the rejected tree and forgets the binding.
