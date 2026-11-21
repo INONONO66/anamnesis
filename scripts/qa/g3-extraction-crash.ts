@@ -127,7 +127,8 @@ export async function runG3ExtractionCrash(uri: string, password: string, eviden
       ANAMNESIS_LLM_BASE_URL: `http://127.0.0.1:${address.port}`, ANAMNESIS_LLM_API_KEY_FILE: key,
       ANAMNESIS_LLM_DIALECT: "openai_chat", ANAMNESIS_LLM_MODEL: model, ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT: "1",
       ANAMNESIS_EXTRACTION_PROMPT_FILE: join(workspace, "app/anamnesis/prompts/extract-claims.v3.md"),
-      ANAMNESIS_RELATION_PROMPT_FILE: join(workspace, "app/anamnesis/prompts/judge-relations.v1.md") });
+      ANAMNESIS_RELATION_PROMPT_FILE: join(workspace, "app/anamnesis/prompts/judge-relations.v1.md"),
+      ANAMNESIS_IDENTITY_PROMPT_FILE: join(workspace, "app/anamnesis/prompts/judge-identity.v1.md") });
     // One connection per request: the daemon destroys an RPC socket idle for 30 s (daemon.ts socket.setTimeout) and the
     // waits below (lease expiry is 90 s) outlive that.
     const withClient = async <T>(work: (client: RpcClient) => Promise<T>): Promise<T> => {
