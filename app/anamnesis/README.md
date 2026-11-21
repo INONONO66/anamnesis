@@ -11,6 +11,8 @@ containing a `bearer` string) to enable extraction. The default model is
 `claude-haiku-4-5`. `ANAMNESIS_LLM_DIALECT` is `anthropic_messages` for models
 starting with `claude`, otherwise `openai_chat`; either can be explicitly selected.
 `ANAMNESIS_EXTRACTION_PROMPT_FILE` overrides the bundled extraction prompt.
+`ANAMNESIS_IDENTITY_PROMPT_FILE` overrides the bundled identity-judge prompt.
+`ANAMNESIS_IDENTITY_OWNER_ACCOUNTS` lists owner accounts as comma-separated `source:actor` entries.
 See [extraction audit](extraction-audit.md) for the provider and ABI semantics.
 
 `ANAMNESIS_EXTRACTION_LANE=off` keeps the LLM provider configured for other
