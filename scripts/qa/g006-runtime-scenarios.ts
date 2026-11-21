@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { startProcess } from "./runtime-scenarios.ts";
 
 export const SOAK_TARGET_MS = 24 * 60 * 60 * 1000;
-export const RELEASE_CASES = ["uds-ingest", "object-spool-crashes", "outage-drain-50", "source-resume", "managed-ingest-restart", "v01-acceptance"] as const;
+export const RELEASE_CASES = ["uds-ingest", "object-spool-crashes", "outage-drain-50", "managed-ingest-restart", "v01-acceptance"] as const;
 export const SOAK_CASES = ["uds-ingest", "managed-ingest-restart"] as const;
 export const G006_CASES = new Set(["release-acceptance", "soak-24h"]);
 export interface SoakContract { durationMs: number; maxIterations: number }

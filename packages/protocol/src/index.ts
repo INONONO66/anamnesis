@@ -64,6 +64,7 @@ export {
   RpcCommittedResult,
   RpcSpooledResult,
   RpcRememberResult,
+  RpcRememberBatchResult,
   RpcStorageState,
   RpcIngestStatusResult,
   RpcCapabilities,

@@ -224,7 +224,7 @@ export async function foreground(): Promise<void> {
       catch (error) { send(connection, errorResponse(error instanceof FrameFault ? error.id : null, fault(error)), reservation); return true; }
       const receivedAt = performance.now();
       const context = { method: request.method, id: request.id, connection: connectionId };
-      const timing = daemonTiming && ["status", "remember", "ingest.status"].includes(request.method)
+      const timing = daemonTiming && ["status", "remember", "remember.batch", "ingest.status"].includes(request.method)
         ? (event: string) => daemonTiming?.({ layer: "daemon", event, ...context, elapsedMs: performance.now() - receivedAt }) : undefined;
       timing?.("request_received");
       // Eight global/two connection slots remain available to authenticated
@@ -330,6 +330,7 @@ export async function foreground(): Promise<void> {
     switch (request.method) {
       case "status": return runtime.status(pending, stopping);
       case "remember": return runtime.remember(request.params, connection.context!);
+      case "remember.batch": return runtime.rememberBatch(request.params.deliveries, connection.context!);
       case "ingest.status": return runtime.ingestStatus(request.params);
       case "recall": return runtime.recall(request.params, connection.context!);
       case "projection": return runtime.projection(request.params, connection.context!);

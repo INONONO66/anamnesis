@@ -19,7 +19,7 @@ const options={uri:process.env.ANAMNESIS_TEST_NEO4J_URI,password:process.env.ANA
 const dispositions=['retain','suppress','correct','unknown'];
 const claims=text=>({task:'claim',claims:dispositions.map(()=>({text:'fixture assertion',evidence:{start:0,end:Buffer.byteLength(text),text}})),language:'und',modality:'text'});
 const judgment=input=>({task:'judge_claims',claim_body_digest:input.claim_context.body_digest,decisions:input.claim_context.claims.map((claim,claim_index)=>({claim_index,disposition:dispositions[claim_index],evidence:claim.evidence})),language:'und',modality:'text'});
-const output=input=>input.task==='claim'?claims(input.text):judgment(input);
+const output=input=>input.task==='claim'?claims(input.text):input.task==='claim_window'?{task:'claim_window',episodes:input.episodes.map(({id,text})=>{const body=claims(text);return{id,claims:body.claims,language:body.language,modality:body.modality};})}:judgment(input);
 async function setup(handler=async input=>output(input)) {
  const root=await mkdtemp('/tmp/g004-pipeline-');let now=100;const requests=[],errors=[];
  const events=new EventEmitter();
@@ -170,7 +170,7 @@ function peer(path){const socket=connect(path);let buffer=Buffer.alloc(0),id=0;c
 test('real daemon UDS authenticates audit boundaries and recovers UNKNOWN without semantic authority',async()=>{
  let corruption=null;
  const f=await setup(async(input,events)=>{
-  const body=output(input);if(input.task==='claim')return body;
+  const body=output(input);if(input.task==='claim'||input.task==='claim_window')return body;
   if(corruption===null){const release=once(events,'release',{signal:AbortSignal.timeout(10000)});events.emit('entered');await release;}
   if(corruption==='partial')body.decisions.pop();
   if(corruption==='duplicate')body.decisions[1].claim_index=0;

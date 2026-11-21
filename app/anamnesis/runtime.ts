@@ -8,12 +8,12 @@ import { ExtractionScheduler, type ExtractionTurn } from "@anamnesis/core";
 import { PacedExtractionProvider } from "@anamnesis/core";
 import { OpenAiEmbeddingProvider } from "@anamnesis/core";
 import { elementDigest, verifyLineageRetry, verifyEpisodeLineage } from "@anamnesis/core";
-import { EchoLineage, parseEpisodeLineage } from "@anamnesis/protocol";
+import { parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
 import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
@@ -117,6 +117,8 @@ export class Runtime {
   private available = false;
   private readonly blocked = new Map<number, "missing_predecessor" | "dependency_cycle" | "stale_revision" | "revision_conflict">();
   private readonly quarantined = new Map<number, "spool_corrupt" | "incarnation_mismatch">();
+  /** Revision keys that entries blocked as missing_predecessor wait for: a live commit of one is the only live write that can release spooled work. */
+  private readonly awaited = new Set<string>();
   private drainJob: AsyncGenerator<void, void, void> | undefined;
   private drainRequested = false;
   private drainStopped = false;
@@ -169,22 +171,26 @@ export class Runtime {
     try { return (await runtimeTimed("neo4j.read", () => session.run<Row>(query, params, { timeout: 5000 }), daemonTiming ? timingHash(query) : undefined)).records.map(record => record.toObject()); }
     finally { await runtimeTimed("neo4j.session.close", () => session.close()); }
   }
-  /** Reconnect runs on demand (status/remember/startup) and, while unavailable, on the recovery probe's bounded timer. */
-  async refresh(): Promise<void> {
+  /** Reconnect runs on demand (status/remember/startup) and, while unavailable, on the recovery probe's bounded timer.
+   * Given a revision key it also returns that revision's stored Episode row, read in the same round trip as the
+   * writer-epoch check; nothing is returned while storage is unavailable. */
+  async refresh(revision?: string): Promise<StoredEpisode | undefined> {
     await this.installation.assertOwned();
     try {
       // Once initialized, the writer-epoch read below doubles as the connectivity probe.
       if (!this.initialized) { await this.read("RETURN 1 AS connected"); await runtimeTimed("engine.init", () => this.engine.init()); this.initialized = true; }
       if (this.epoch === undefined) this.epoch = await runtimeTimed("engine.claimWriterEpoch", () => this.engine.claimWriterEpoch());
-      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
+      const rows = await this.read<{ epoch: number; e: StoredEpisode | null }>("MATCH (m:Meta {key:'meta'}) OPTIONAL MATCH (e:Element:Episode {revision_key:$revision}) RETURN m.writer_epoch AS epoch, properties(e) AS e", { revision: revision ?? null });
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
       const recovered = !this.available;
       this.available = true;
       this.recovery.disarm();
       if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); }
+      return rows[0]?.e ?? undefined;
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
       this.markUnavailable();
+      return undefined;
     }
   }
   /** Every outage observation goes through here so the recovery probe is armed regardless of which lane or RPC saw it first. */
@@ -244,26 +250,32 @@ export class Runtime {
     }
     return binding;
   }
-  /** The retained lineage of a v2 Episode row, verified against its stored digests, as the remember metadata it implies. */
-  private retainedLineage(row: StoredEpisode, binding: Binding): { origin_role: StoredEpisode["origin_role"]; lineage_mode: EchoLineage["lineage_mode"]; parent_recall_ids: EchoLineage["parent_recall_ids"] } {
-    const lineage = verifyEpisodeLineage(row.id, row.lineage_digest ?? null, row);
-    verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);
-    return { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids };
+  private async storedEpisode(key: string): Promise<StoredEpisode | undefined> {
+    return (await this.read<{ e: StoredEpisode }>("MATCH (e:Element:Episode {revision_key:$key}) RETURN properties(e) AS e", { key }))[0]?.e;
   }
-  private async committed(binding: Binding, created = false): Promise<RpcCommittedResult | null> {
-    const row = (await this.read<{ e: StoredEpisode }>("MATCH (e:Element:Episode {revision_key:$key}) RETURN properties(e) AS e", { key: revisionKey(binding.params) }))[0]?.e;
-    if (!row) return null;
+  /** The remember params a stored row implies: its digest version checked and a v2 row's retained lineage verified
+   * against its stored digests, and against the delivery's own lineage when one is given. */
+  private storedParams(row: StoredEpisode, delivered?: RpcRememberParams): RpcRememberParams {
     if (row.episode_digest_version !== undefined && row.episode_digest_version !== 2)
       throw new RpcFault("unsupported_digest_version", "stored Episode version is unsupported");
     if (row.episode_digest_version !== 2 && row.digest_format !== undefined && row.digest_format !== "rfc8785-v1")
       throw new RpcFault("unsupported_digest_version", "stored digest format is unsupported");
-    const metadata = row.episode_digest_version === 2 ? this.retainedLineage(row, binding) : undefined;
-    const params = RpcRememberParams.parse({ episode: {
+    const lineage = row.episode_digest_version === 2 ? verifyEpisodeLineage(row.id, row.lineage_digest ?? null, row) : undefined;
+    if (lineage && delivered) verifyLineageRetry(lineageMetadata(delivered), row.origin_role ?? null, lineage);
+    return RpcRememberParams.parse({ episode: {
       schema: row.schema, time: { value: row.time_value, precision: row.time_precision },
       content: row.content, mass: row.mass, properties: JSON.parse(row.properties),
       origin: { source: row.origin_source, session: row.origin_session, actor: row.origin_actor, record: row.origin_record },
     }, source_revision: row.source_revision, expected_previous_revision_key: row.previous_revision_key ?? null,
-    ...(row.payload_hash ? { payload_hash: row.payload_hash } : {}), ...metadata });
+    ...(row.payload_hash ? { payload_hash: row.payload_hash } : {}),
+    ...(lineage ? { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids } : {}) });
+  }
+  private async committed(binding: Binding, created = false): Promise<RpcCommittedResult | null> {
+    const row = await this.storedEpisode(revisionKey(binding.params));
+    return row ? this.verified(row, binding, created) : null;
+  }
+  /** A stored row answers a delivery only when it re-derives the delivery's complete envelope and its own core digest. */
+  private verified(row: StoredEpisode, binding: Binding, created = false, params = this.storedParams(row, binding.params)): RpcCommittedResult {
     const candidate = row.episode_digest_version === 2
       ? { ...binding.params, ...parseEpisodeLineage(lineageMetadata(binding.params)) } : compatibilityParams(binding.params);
     if (digest(params) !== digest(candidate)) throw new RpcFault("revision_conflict", "stored revision has a different delivery body");
@@ -296,41 +308,56 @@ export class Runtime {
     if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); } // Direct and spool-drained commits alike enqueue worker work.
     return committed;
   }
+  /** `remember` for each delivery in order, in one serial turn. A non-retryable refusal answers its delivery alone and the
+   * batch goes on; any other failure ends the batch and fails the request, so no later delivery is admitted before an
+   * earlier one. Deliveries admitted before it stay admitted and answer as stored when sent again. */
+  async rememberBatch(deliveries: RpcRememberParams[], context?: InstallationContext): Promise<RpcRememberBatchResult> {
+    const results: RpcRememberBatchResult["results"] = [];
+    for (const params of deliveries) {
+      try { results.push(await this.remember(params, context)); }
+      catch (error) {
+        const failure = fault(error);
+        if (failure.retryable || failure.code === "ownership_lost" || failure.code === "internal_error") throw error;
+        results.push({ state: "refused", code: failure.code, message: failure.message });
+      }
+    }
+    return { results };
+  }
   async remember(params: RpcRememberParams, context?: InstallationContext) {
     await this.installation.assertOwned();
     if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
     const key = revisionKey(params);
     const previous = await this.binding(key);
     const candidate: Binding = { digest_version: 1, params, body_digest: digest(params), incarnation: this.installation.incarnation, fs_epoch: this.installation.epoch };
-    await this.refresh();
-    const existing = this.available ? await this.rememberExisting(key, previous, candidate) : null;
-    if (existing) return existing;
+    // One read answers both the writer-epoch check and whether the store already holds this revision.
+    const stored = await this.refresh(key);
+    if (stored) return this.rememberExisting(key, previous, candidate, stored);
     const binding = await this.admitBinding(params, previous, candidate, context);
     const metadata = lineageMetadata(params);
-    if (!previous) await atomicJson(join(this.bindings, key + ".json"), binding);
+    // A lineage admission is never spooled, so its stored row is its only record: it writes no delivery binding.
+    const bound = !previous && !metadata;
+    if (bound) await atomicJson(join(this.bindings, key + ".json"), binding);
     if (this.available) {
-      const written = await this.tryWrite(binding, key, previous, context);
+      const written = await this.tryWrite(binding, key, bound, context);
       if (written) return written;
     }
     if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
     return this.spoolBinding(params, key, binding);
   }
-  /** A revision the store already committed: bind the delivery if this is its first sighting and answer from the store. */
-  private async rememberExisting(key: string, previous: Binding | null, candidate: Binding): Promise<RpcCommittedResult | null> {
-    const existing = await this.committed(candidate);
-    if (!existing) return null;
+  /** A revision the store already committed: bind a lineage-free delivery on its first sighting and answer from the store. */
+  private async rememberExisting(key: string, previous: Binding | null, candidate: Binding, row: StoredEpisode): Promise<RpcCommittedResult> {
+    const existing = this.verified(row, candidate);
     if (previous?.incarnation !== undefined && previous.incarnation !== this.installation.incarnation)
       throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
-    if (!previous) await atomicJson(join(this.bindings, key + ".json"), candidate);
+    if (!previous && !lineageMetadata(candidate.params)) await atomicJson(join(this.bindings, key + ".json"), candidate);
     return previous ? { ...existing, ...this.identity(previous) } : existing;
   }
-  /** The admission gates in order: body conflict, incarnation, referenced object, spool health, lineage authority. */
+  /** The admission gates in order: body conflict, incarnation, referenced object, lineage authority (spool health is checked on entry). */
   private async admitBinding(params: RpcRememberParams, previous: Binding | null, candidate: Binding, context?: InstallationContext): Promise<Binding> {
     if (previous && previous.body_digest !== candidate.body_digest) throw new RpcFault("revision_conflict", "revision already binds a different delivery body");
     const binding = previous ?? candidate;
     if (binding.incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
     if (params.payload_hash && !await this.uploads.metadata(params.payload_hash)) throw new RpcFault("object_not_found", "remember references an uncommitted object");
-    if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
     const metadata = lineageMetadata(params);
     if (metadata) {
       if (!context?.client_binding) throw new RpcFault("lineage_binding_mismatch", "authenticated connection required");
@@ -339,16 +366,17 @@ export class Runtime {
     }
     return binding;
   }
-  /** Live write; a non-storage failure unbinds a fresh delivery and rethrows, storage loss marks unavailable and falls through to the spool. */
-  private async tryWrite(binding: Binding, key: string, previous: Binding | null, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
+  /** Live write; a non-storage failure removes the binding this delivery just wrote and rethrows, storage loss marks unavailable and falls through to the spool.
+   * A created Episode wakes the drain only when a blocked entry waits for it. */
+  private async tryWrite(binding: Binding, key: string, bound: boolean, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
     try {
       const result = await this.write(binding, context);
-      if (result.created) this.wakeDrain();
+      if (result.created && this.awaited.has(key)) this.wakeDrain();
       return result;
     }
     catch (error) {
       if (!storageUnavailable(error)) {
-        if (!previous) await rm(join(this.bindings, key + ".json"));
+        if (bound) await rm(join(this.bindings, key + ".json"));
         throw error;
       }
       this.markUnavailable();
@@ -502,7 +530,7 @@ export class Runtime {
     return start.revision === entry.revision ? "dependency_cycle" : "missing_predecessor";
   }
   private async *drain(): AsyncGenerator<void, void, void> {
-    this.blocked.clear(); this.quarantined.clear();
+    this.blocked.clear(); this.quarantined.clear(); this.awaited.clear();
     const spool = await this.spool.status();
     if (spool.quarantined) return;
     const cohort = spool.nextSequence - 1;
@@ -530,7 +558,10 @@ export class Runtime {
             // Retained suffix visibility is not evidence that a predecessor
             // still needs execution. Check the DB before deferring to it.
             if (!predecessor[0]?.found) {
-              if (!(yield* runtime.findPending(entry.predecessor, cohort))) runtime.blocked.set(entry.sequence, "missing_predecessor");
+              if (!(yield* runtime.findPending(entry.predecessor, cohort))) {
+                runtime.blocked.set(entry.sequence, "missing_predecessor");
+                runtime.awaited.add(entry.predecessor);
+              }
               return;
             }
           }
@@ -563,16 +594,20 @@ export class Runtime {
   }
   async ingestStatus(identity: RpcIngestStatusParams): Promise<RpcIngestStatusResult> {
     if (identity.data_incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
-    await this.refresh();
+    const stored = await this.refresh(identity.revision_key);
     // `unknown` carries the storage state this very call observed: without storage a committed delivery whose spool
     // entry is gone looks unknown too, and only the daemon can say which observation the verdict rests on.
     const unknown = () => ({ state: "unknown" as const, ...identity, storage: this.available ? "available" as const : "unavailable" as const });
     const binding = await this.binding(identity.revision_key);
-    if (!binding || binding.body_digest !== identity.body_digest) return unknown();
-    if (this.available) {
-      const committed = await this.committed(binding);
-      if (committed) return committed;
+    if (!binding) {
+      // Lineage admissions keep no delivery binding (they are never spooled): the stored row is their only record,
+      // and it answers only a delivery whose exact envelope it re-derives.
+      const params = stored && this.storedParams(stored);
+      if (!stored || !params || digest(params) !== identity.body_digest) return unknown();
+      return this.verified(stored, { digest_version: 1, params, body_digest: identity.body_digest, incarnation: identity.data_incarnation, fs_epoch: this.installation.epoch }, false, params);
     }
+    if (binding.body_digest !== identity.body_digest) return unknown();
+    if (stored) return this.verified(stored, binding);
     const spoolStatus = await this.spool.status();
     if (spoolStatus.quarantined) return { state: "quarantined", ...identity, reason: "spool_corrupt" };
     const entry = await this.pendingEntry(identity.revision_key);

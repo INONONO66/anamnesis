@@ -46,6 +46,7 @@ describe("strict versioned RPC requests", () => {
       request("object.chunk", { upload_id: uuid, seq: 0, bytes_b64: "YQ==" }),
       request("object.commit", { upload_id: uuid }),
       request("remember", remember),
+      request("remember.batch", { deliveries: [remember, { ...remember, source_revision: "revision-2" }] }),
       request("ingest.status", { revision_key: hash, body_digest: hash, data_incarnation: uuid }),
     ];
     for (const input of inputs) expect(RpcRequest.safeParse(input).success).toBe(true);
@@ -74,6 +75,9 @@ describe("strict versioned RPC requests", () => {
       request("remember", { ...remember, extra: true }),
       request("remember", { ...remember, episode: { ...episode, id: uuid } }),
       request("remember", { ...remember, episode: { ...episode, origin: { ...episode.origin, extra: true } } }),
+      request("remember.batch", { deliveries: [] }),
+      request("remember.batch", { deliveries: Array.from({ length: RPC_LIMITS.remember_batch + 1 }, () => remember) }),
+      request("remember.batch", { deliveries: [{ ...remember, extra: true }] }),
     ]) expect(RpcRequest.safeParse(invalid).success).toBe(false);
   });
 
@@ -248,6 +252,11 @@ describe("strict RPC responses", () => {
     expect(RpcResponse.safeParse(response("ingest.status", { state: "unknown", ...identity })).success).toBe(false);
     expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, storage: "degraded" })).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember", unknown)).success).toBe(false);
+    const refused = { state: "refused", code: "revision_conflict", message: "revision already binds a different delivery body" };
+    expect(RpcResponse.safeParse(response("remember.batch", { results: [committed, spooled, refused] })).success).toBe(true);
+    expect(RpcResponse.safeParse(response("remember", refused)).success).toBe(false);
+    expect(RpcResponse.safeParse(response("remember.batch", { results: [unknown] })).success).toBe(false);
+    expect(RpcResponse.safeParse(response("remember.batch", { results: [{ ...refused, code: "not_a_code" }] })).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember", { ...spooled, created: true })).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember", { ...spooled, id: uuid })).success).toBe(false);
     expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, id: uuid })).success).toBe(false);

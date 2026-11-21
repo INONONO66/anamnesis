@@ -5,7 +5,6 @@
     "": {
       "name": "anamnesis-monorepo",
       "dependencies": {
-        "@anamnesis/backfill": "workspace:*",
         "@anamnesis/core": "workspace:*",
         "@anamnesis/protocol": "workspace:*",
       },
@@ -21,22 +20,6 @@
         "typescript": "^5.9.2",
         "typescript-eslint": "^8.71.0",
         "uuid": "^11.1.0",
-      },
-    },
-    "packages/archive": {
-      "name": "@anamnesis/archive",
-      "version": "0.1.0",
-      "dependencies": {
-        "zod": "^4.1.5",
-      },
-    },
-    "packages/backfill": {
-      "name": "@anamnesis/backfill",
-      "version": "0.1.0",
-      "dependencies": {
-        "@anamnesis/core": "workspace:*",
-        "@anamnesis/protocol": "workspace:*",
-        "@noble/hashes": "2.4.0",
       },
     },
     "packages/core": {
@@ -58,10 +41,6 @@
     },
   },
   "packages": {
-    "@anamnesis/archive": ["@anamnesis/archive@workspace:packages/archive"],
-
-    "@anamnesis/backfill": ["@anamnesis/backfill@workspace:packages/backfill"],
-
     "@anamnesis/core": ["@anamnesis/core@workspace:packages/core"],
 
     "@anamnesis/protocol": ["@anamnesis/protocol@workspace:packages/protocol"],
@@ -121,8 +100,6 @@
     "@keyv/serialize": ["@keyv/serialize@1.1.1", "", {}, "sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.4", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.4", "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.4" } }, "sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g=="],
-
-    "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
 
     "@oxc-parser/binding-android-arm-eabi": ["@oxc-parser/binding-android-arm-eabi@0.150.0", "", { "os": "android", "cpu": "arm" }, "sha512-oQef2Zu4Prz1KLKznz3HqZzU9uVoA5PMoDZuuLmqms7hKmKSAPzlaMnLllJq3t+rgKmfJJ2siPrpZfFrW06btw=="],
 
