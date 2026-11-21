@@ -33,6 +33,7 @@ const ProviderEnvironment = RpcEmbeddingAttempt.pick({}).strip().extend({
   ANAMNESIS_LLM_DIALECT: providerName.refine(value => value === "openai_chat" || value === "anthropic_messages").transform(value => value as ExtractionDialect).optional(),
   ANAMNESIS_EXTRACTION_PROMPT_FILE: providerPath.default(DEFAULT_EXTRACTION_PROMPT_FILE),
   ANAMNESIS_RELATION_PROMPT_FILE: providerPath.default(DEFAULT_RELATION_PROMPT_FILE),
+  ANAMNESIS_EXTRACTION_LANE: providerName.refine(value => value === "on" || value === "off").default("on"),
   ANAMNESIS_EXTRACTION_GATE: providerName.refine(value => value === "off" || value === "jev").default("off"),
   ANAMNESIS_JEV_GATE_KEY_FILE: providerPath.default(join(homedir(), ".config/anamnesis/jev-vercel-gateway.key.json")),
   ANAMNESIS_EXTRACTION_GATE_THRESHOLD: RpcExtractionPacing.shape.jitter_fraction.default(0.2),
@@ -101,7 +102,7 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
       dialect: config.ANAMNESIS_LLM_DIALECT ?? (config.ANAMNESIS_LLM_MODEL.startsWith("claude") ? "anthropic_messages" : "openai_chat"),
       ...(apiKey === undefined ? {} : { apiKey }) },
     promptFile, systemPrompt, relationPromptFile, relationPrompt,
-    gate, scope,
+    extractionLane: config.ANAMNESIS_EXTRACTION_LANE, gate, scope,
     extractionPacing: { maxInFlight: config.ANAMNESIS_EXTRACTION_MAX_IN_FLIGHT, minIntervalMs: config.ANAMNESIS_LLM_MIN_INTERVAL_MS, jitterFraction: config.ANAMNESIS_LLM_JITTER_FRACTION } satisfies ExtractionPacingConfig,
   };
 }

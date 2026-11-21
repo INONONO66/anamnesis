@@ -8,7 +8,7 @@ import { ExtractionScheduler, type ExtractionScope, type ExtractionTurn } from "
 import { EmptyClaimJudgeProvider, PacedExtractionProvider } from "@anamnesis/core";
 import { OpenAiEmbeddingProvider } from "@anamnesis/core";
 import { elementDigest, verifyLineageRetry, verifyEpisodeLineage } from "@anamnesis/core";
-import { parseEpisodeLineage } from "@anamnesis/protocol";
+import { ExtractionAuditError, parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
@@ -84,9 +84,12 @@ export class Runtime {
     let gateThreshold = 0.2;
     let scope: ExtractionScope | undefined;
     let pacing = EXTRACTION_PACING_DEFAULTS;
+    let extractionEnabled = true;
     if (process.env["ANAMNESIS_LLM_BASE_URL"] !== undefined || process.env["ANAMNESIS_EMBEDDING_BASE_URL"] !== undefined ||
+      process.env["ANAMNESIS_EXTRACTION_LANE"] !== undefined ||
       process.env["ANAMNESIS_EXTRACTION_GATE"] === "jev") {
       const config = await loadProviderConfig();
+      extractionEnabled = config.extractionLane === "on";
       pacing = config.extractionPacing;
       gateThreshold = config.gate.kind === "jev" ? config.gate.threshold : 0.2;
       scope = config.scope;
@@ -105,7 +108,7 @@ export class Runtime {
         providers.embeddingProvider = new OpenAiEmbeddingProvider({ ...config.embedding, profile, timeoutMs: 30000 });
       }
     }
-    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers, pacing, gate, gateThreshold, scope);
+    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers, pacing, gate, gateThreshold, scope, extractionEnabled);
   }
   readonly uploads: Uploads;
   private readonly engine: Engine;
@@ -138,12 +141,12 @@ export class Runtime {
   private extractionRequested = false;
   /** While storage is unavailable, ticks re-enter the spool lane so drainTurn retries refresh() on the daemon's serial queue. */
   private readonly recovery = new RecoveryProbe(() => { if (!this.drainStopped) this.scheduleDrain("spool"); }, RECOVERY_PROBE_MS, nodeTimers);
-  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS, private readonly gate?: JevGate, private readonly gateThreshold = 0.2, private readonly scope?: ExtractionScope) {
+  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS, private readonly gate?: JevGate, private readonly gateThreshold = 0.2, private readonly scope?: ExtractionScope, private readonly extractionEnabled = true) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const unpaced = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
     this.pacer = unpaced.extractionProvider && new PacedExtractionProvider(unpaced.extractionProvider, { minIntervalMs: pacing.minIntervalMs, jitterFraction: pacing.jitterFraction });
     const config = this.pacer ? { ...unpaced, extractionProvider: new EmptyClaimJudgeProvider(this.pacer) } : unpaced;
-    this.capabilities = { ...capabilities, extraction: !!config.extractionProvider, embeddings: !!config.embeddingProvider };
+    this.capabilities = { ...capabilities, extraction: extractionEnabled && !!config.extractionProvider, embeddings: !!config.embeddingProvider };
     // Same bounded deadlines as the reader: with defaults (30 s connect, 60 s acquisition) a background lane meeting a
     // dead Bolt endpoint held the serial dispatch slot past the 30 s socket idle deadline and dropped queued RPCs.
     const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
@@ -153,11 +156,11 @@ export class Runtime {
     this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json"),
       extractionJournalPath: join(installation.root, "extraction-state.json"),
       materializationStatePath: join(installation.root, "materialization-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
-    this.extraction = config.extractionProvider && new ExtractionScheduler(this.engine, { provider: config.extractionProvider, gate: this.gate,
+    this.extraction = extractionEnabled && config.extractionProvider ? new ExtractionScheduler(this.engine, { provider: config.extractionProvider, gate: this.gate,
       gateThreshold: this.gate ? this.gateThreshold : undefined, scope: this.scope, maxInFlight: pacing.maxInFlight,
       context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
       // A settled pipeline may have materialized Facts, and Facts are the embedding lane's input (D56): wake both lanes.
-      read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } });
+      read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } }) : undefined;
     this.database = config.database ?? "neo4j";
     this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
@@ -717,10 +720,12 @@ export class Runtime {
 
   async createExtractionPipeline(params: CreateExtractionPipeline, context: InstallationContext) {
     await this.requireStorage();
+    if (!this.extraction) throw new ExtractionAuditError("extraction_not_configured");
     return this.engine.createExtractionPipeline(params,context);
   }
   async runExtractionPipeline(params: RunExtractionPipeline, context: InstallationContext) {
     await this.requireStorage();
+    if (!this.extraction) throw new ExtractionAuditError("extraction_not_configured");
     return this.engine.runExtractionPipeline(params,context);
   }
   async extractionPipelineStatus(id: string, context: InstallationContext) {
