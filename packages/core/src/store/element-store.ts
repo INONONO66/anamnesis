@@ -12,7 +12,7 @@ import { type ElementNode, type LinkRelationship, type ElementWriteOptions, reco
 import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ConductingStore } from "./conducting-store.ts";
-import type { EpisodeDerivedStore } from "./episode-derived.ts";
+import { episodeRoom, type EpisodeDerivedStore } from "./episode-derived.ts";
 
 export interface PutResult {
   id: string;
@@ -308,15 +308,21 @@ export class ElementStore {
     lineage: EchoLineage | undefined,
   ): Promise<{ t: string; seq: number; previous: string | null }> {
     if (payload) await this.mergePayloadTx(tx, payload);
+    const room = episodeRoom(el.origin.session, el.properties);
     const created = await tx.run<{ t: string; seq: number; previous: string | null }>(
       `CREATE (e:${labelClause(el.schema)}) SET e += $columns
-       WITH e MERGE (m:Meta { key: 'meta' })
+       WITH e OPTIONAL MATCH (assignment:RoomAssignment {source:$source,room:$room})
+       WITH e,assignment MERGE (m:Meta { key: 'meta' })
        ON CREATE SET m.ingest_seq = 0
        SET m.ingest_seq = m.ingest_seq + 1
-       SET e.ingest_seq = m.ingest_seq
+       SET e.ingest_seq = m.ingest_seq,e.room=$room,e.space=coalesce(assignment.space,'unknown:' + $source)
        ${lineage ? "SET m.structure_revision = coalesce(m.structure_revision, 0) + 1" : ""}
        RETURN e.time_utc AS t, e.ingest_seq AS seq, e.topology_previous_record AS previous`,
-      { columns: { ...elementColumns(el, payload?.hash ?? null, opts.previous, revision), ...(lineage ? lineageColumns(lineage) : {}) } },
+      {
+        columns: { ...elementColumns(el, payload?.hash ?? null, opts.previous, revision), ...(lineage ? lineageColumns(lineage) : {}) },
+        source: el.origin.source,
+        room,
+      },
     );
     if (payload) await this.linkPayloadTx(tx, el.id, payload.hash);
     const row = created.records[0]!;
