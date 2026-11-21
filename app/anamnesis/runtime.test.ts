@@ -243,9 +243,9 @@ dbTest("a live commit of the revision a blocked entry waits for wakes the drain,
   expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
   const woken = lanes.length;
   expect(await runtime.remember(delivery({ record: "unrelated" }))).toMatchObject({ state: "committed", created: true });
-  expect(lanes).toHaveLength(woken);
+  expect(lanes.slice(woken)).toEqual(["identity"]);
   expect(await runtime.remember(parent)).toMatchObject({ state: "committed", created: true });
-  expect(lanes).toHaveLength(woken + 1);
+  expect(lanes.slice(woken)).toEqual(["identity", "identity", "spool"]);
   await drainToRest(runtime);
   expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "committed", created: false });
   expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
@@ -282,7 +282,7 @@ dbTest("drain blocks a stale successor, a body conflicting with a committed revi
   expect(await runtime.remember(base)).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(delivery({ record: "stale", revision: "v1b", predecessor: revisionKeyOf(base) }))).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(liveBody)).toMatchObject({ state: "committed", created: true });
-  expect(lanes).toEqual(["spool"]);
+  expect(lanes).toEqual(["spool", "identity", "identity", "identity", "identity"]);
   await drainToRest(runtime);
   expect(await runtime.ingestStatus(identityOf(stale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "stale_revision" });
   expect(await runtime.ingestStatus(identityOf(behindStale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
@@ -494,7 +494,7 @@ dbTest("Runtime.create keeps providers wired while the extraction lane is off", 
     opened.push(runtime);
     expect(runtime.capabilities).toMatchObject({ extraction: false, embeddings: true });
     await runtime.init();
-    expect([...lanes].sort()).toEqual(["embedding", "spool"]);
+    expect([...lanes].sort()).toEqual(["embedding", "identity", "spool"]);
     expect((await runtime.status(0, false)).workers.extraction).toEqual({ state: "unconfigured" });
     expect(await runtime.extractionTurn()).toBe("stalled");
     expect(requests).toBe(0);
