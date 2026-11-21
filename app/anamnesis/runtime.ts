@@ -41,12 +41,21 @@ function revisionKey(params: RpcRememberParams): string {
   return sha(JSON.stringify([originKey(params), params.source_revision]));
 }
 interface Binding { digest_version: 1; params: RpcRememberParams; body_digest: string; incarnation: string; fs_epoch: string; }
-const Binding = { parse(value: unknown): Binding {
-  if (!value || typeof value !== "object") throw new RpcFault("spool_corrupt", "invalid delivery binding");
-  const data = value as Record<string, unknown>;
-  if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"]) || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string") throw new RpcFault("spool_corrupt", "invalid delivery binding");
-  return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
-} };
+const Binding: { parse(value: unknown): Binding; safeParse(value: unknown): Binding | null } = {
+  safeParse(value) {
+    if (!value || typeof value !== "object") return null;
+    const data = value as Record<string, unknown>;
+    const params = RpcRememberParams.safeParse(data["params"]);
+    if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"])
+      || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string" || !params.success) return null;
+    return { digest_version: 1, params: params.data, body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
+  },
+  parse(value) {
+    const binding = Binding.safeParse(value);
+    if (!binding) throw new RpcFault("spool_corrupt", "invalid delivery binding");
+    return binding;
+  },
+};
 function digest(params: RpcRememberParams): string { return sha(canonical({ digest_version: 1, params })); }
 type StoredEpisode = {
   id: string; schema: string; time_value: string; time_precision: string;
@@ -680,6 +689,9 @@ export class Runtime {
     if (!entry) return unknown();
     const quarantined = this.quarantined.get(entry.sequence);
     if (quarantined) {
+      // An unparseable quarantined body cannot provide a digest to compare.
+      const binding = Binding.safeParse(entry.body);
+      if (binding && binding.body_digest !== identity.body_digest) return unknown();
       await this.releaseBinding(identity.revision_key);
       return { state: "quarantined", ...identity, reason: quarantined };
     }

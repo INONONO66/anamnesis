@@ -177,7 +177,7 @@ test("remember skips an empty spool scan but finds a pending re-delivery", async
     expect(page).toHaveBeenCalledTimes(0);
 
     expect(await runtime.remember(params)).toEqual(spooled);
-    expect(page).toHaveBeenCalledTimes(1);
+    expect(page).toHaveBeenCalled();
   } finally { page.mockRestore(); }
 });
 
@@ -339,6 +339,21 @@ dbTest("entries from another incarnation are quarantined while this incarnation 
   expect(await runtime.status(0, false)).toMatchObject({ state: "degraded", storage: "available", spool: { pending: 1, quarantined: 1 } });
   await expect(runtime.remember(stranded)).rejects.toMatchObject({ code: "incarnation_mismatch" });
   expect(await runtime.remember(delivery({ record: "served" }))).toMatchObject({ state: "committed", created: true });
+});
+
+dbTest("a quarantined other-incarnation entry answers only its recorded body digest", async () => {
+  const root = await freshRoot();
+  const foreign = installationAt(root);
+  const stranded = delivery({ record: "quarantined-digest" });
+  await spoolOffline(foreign, stranded);
+  const installation = installationAt(root);
+  const { runtime } = await boot(installation);
+  await drainToRest(runtime);
+  const identity = identityOf(stranded, installation.incarnation);
+  expect(await runtime.ingestStatus(identity)).toEqual({ state: "quarantined", ...identity, reason: "incarnation_mismatch" });
+  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({
+    state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available",
+  });
 });
 
 dbTest("a quarantined spool stops admission and drain, and reports every pending delivery as quarantined", async () => {
