@@ -7,6 +7,7 @@ import {
   type ExtractionProviderInput,
 } from "./extraction.ts";
 import { chatExtractionSchema, normalizeChatExtraction } from "./extraction-chat-output.ts";
+import { identityJudgeSchema, type IdentityJudgeInput } from "./identity.ts";
 import type { ExtractionFailureDetail } from "@anamnesis/protocol";
 
 export type ExtractionDialect = "openai_chat" | "anthropic_messages";
@@ -18,9 +19,15 @@ export type OpenAiChatExtractionProviderOptions = {
   systemPrompt: string;
   /** System prompt for `judge_relations` requests; other tasks keep `systemPrompt`. */
   relationPrompt?: string;
+  identityPrompt?: string;
   fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
   timeoutMs?: number;
 };
+
+function optionalPrompt(value: string | undefined, name: string): string | undefined {
+  if (value !== undefined && (typeof value !== "string" || !value.trim())) throw new TypeError(`${name} must be a non-empty string`);
+  return value;
+}
 
 class OpenAiChatExtractionError extends ExtractionProviderError {
   readonly code: ExtractionProviderError["reason"];
@@ -56,6 +63,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
   private readonly relationPrompt: string | undefined;
   private readonly timeoutMs: number;
   private readonly fetch: NonNullable<OpenAiChatExtractionProviderOptions["fetch"]>;
+  readonly judgeIdentity: ((input: IdentityJudgeInput) => Promise<unknown>) | undefined;
 
   constructor(options: OpenAiChatExtractionProviderOptions) {
     let baseUrl: URL;
@@ -65,7 +73,7 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     if (typeof options.model !== "string" || options.model.length === 0 || options.model.length > 256) throw new TypeError("model must be non-empty");
     if (typeof options.apiKey !== "string") throw new TypeError("apiKey must be a string");
     if (typeof options.systemPrompt !== "string") throw new TypeError("systemPrompt must be a string");
-    if (options.relationPrompt !== undefined && (typeof options.relationPrompt !== "string" || !options.relationPrompt.trim())) throw new TypeError("relationPrompt must be a non-empty string");
+    optionalPrompt(options.relationPrompt, "relationPrompt");
     const timeoutMs = options.timeoutMs ?? 5000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new TypeError("timeoutMs out of range");
     this.model = options.model;
@@ -81,6 +89,17 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
     this.relationPrompt = options.relationPrompt;
     this.timeoutMs = timeoutMs;
     this.fetch = options.fetch ?? globalThis.fetch;
+    const identityPrompt = optionalPrompt(options.identityPrompt, "identityPrompt");
+    this.judgeIdentity = identityPrompt === undefined ? undefined : input => this.identityJudgement(identityPrompt, input);
+  }
+
+  private async identityJudgement(prompt: string, input: IdentityJudgeInput): Promise<unknown> {
+    const { content, incarnation } = await this.complete(prompt, input, identityJudgeSchema, "identity_judgement", "");
+    let output: unknown;
+    try { output = JSON.parse(content); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "json"); }
+    this.pin(incarnation);
+    return output;
   }
 
   /** POST the request; any transport, non-2xx or unreadable body is provider_unavailable, a non-JSON body is an envelope mismatch. */
@@ -123,6 +142,26 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
   }
 
   async extract(input: ExtractionProviderInput): Promise<unknown> {
+    const systemPrompt = input.task === "judge_relations" && this.relationPrompt !== undefined ? this.relationPrompt : this.systemPrompt;
+    const { content, incarnation } = await this.complete(systemPrompt, input, chatExtractionSchema, "extraction_output",
+      " The schema is authoritative for field names and the requested task. Evidence values are exact quote strings copied from the input text; do not generate offsets.");
+    let output: unknown;
+    try { output = JSON.parse(content); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "json"); }
+    try { output = normalizeChatExtraction(output, input); }
+    catch { throw new OpenAiChatExtractionError("provider_mismatch", "normalize"); }
+    this.pin(incarnation);
+    return output;
+  }
+
+  private pin(incarnation: string): void {
+    if (this.reportedModelIncarnation !== undefined && this.reportedModelIncarnation !== incarnation) {
+      throw new OpenAiChatExtractionError("provider_mismatch", "incarnation");
+    }
+    this.reportedModelIncarnation = incarnation;
+  }
+
+  private async complete(systemPrompt: string, payload: unknown, schema: unknown, name: string, note: string): Promise<{ content: string; incarnation: string }> {
     const signal = AbortSignal.timeout(this.timeoutMs);
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -132,36 +171,25 @@ export class OpenAiChatExtractionProvider implements ExtractionProvider {
       headers["x-api-key"] = this.apiKey;
       headers["anthropic-version"] = "2023-06-01";
     }
-    const systemPrompt = input.task === "judge_relations" && this.relationPrompt !== undefined ? this.relationPrompt : this.systemPrompt;
     const body = JSON.stringify(this.dialect === "anthropic_messages" ? {
       model: this.model,
       max_tokens: 8192,
-      system: `${systemPrompt}\n\nRespond with ONLY a JSON object matching this schema. The schema is authoritative for field names and the requested task. Evidence values are exact quote strings copied from the input text; do not generate offsets.\n${JSON.stringify(chatExtractionSchema)}`,
-      messages: [{ role: "user", content: JSON.stringify(input) }],
+      system: `${systemPrompt}\n\nRespond with ONLY a JSON object matching this schema.${note}\n${JSON.stringify(schema)}`,
+      messages: [{ role: "user", content: JSON.stringify(payload) }],
     } : {
       model: this.model,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify(input) },
+        { role: "user", content: JSON.stringify(payload) },
       ],
       response_format: {
         type: "json_schema",
-        json_schema: { name: "extraction_output", strict: true, schema: chatExtractionSchema },
+        json_schema: { name, strict: true, schema },
       },
       temperature: 0,
     });
 
     const parsedBody = await this.send(headers, body, signal);
-    const { content, incarnation } = this.dialect === "anthropic_messages" ? this.anthropicReply(parsedBody) : this.chatReply(parsedBody);
-    let output: unknown;
-    try { output = JSON.parse(content); }
-    catch { throw new OpenAiChatExtractionError("provider_mismatch", "json"); }
-    try { output = normalizeChatExtraction(output, input); }
-    catch { throw new OpenAiChatExtractionError("provider_mismatch", "normalize"); }
-    if (this.reportedModelIncarnation !== undefined && this.reportedModelIncarnation !== incarnation) {
-      throw new OpenAiChatExtractionError("provider_mismatch", "incarnation");
-    }
-    this.reportedModelIncarnation = incarnation;
-    return output;
+    return this.dialect === "anthropic_messages" ? this.anthropicReply(parsedBody) : this.chatReply(parsedBody);
   }
 }

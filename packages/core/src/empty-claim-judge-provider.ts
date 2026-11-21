@@ -1,4 +1,5 @@
 import type { ExtractionProvider, ExtractionProviderInput } from "./extraction.ts";
+import type { IdentityJudgeInput } from "./identity.ts";
 
 /** Answers a claim judge that has nothing to judge without a provider call. A judge owes one decision per claim, so
  * for an empty claim set the only valid answer is no decisions, whatever model is asked; every other call, including
@@ -6,9 +7,11 @@ import type { ExtractionProvider, ExtractionProviderInput } from "./extraction.t
 export class EmptyClaimJudgeProvider implements ExtractionProvider {
   readonly model: string;
   readonly modelIncarnation: string;
+  readonly judgeIdentity: ((input: IdentityJudgeInput) => Promise<unknown>) | undefined;
 
   constructor(private readonly inner: ExtractionProvider) {
     this.model = inner.model; this.modelIncarnation = inner.modelIncarnation;
+    this.judgeIdentity = inner.judgeIdentity;
   }
 
   get reportedModelIncarnation(): string | undefined { return this.inner.reportedModelIncarnation; }

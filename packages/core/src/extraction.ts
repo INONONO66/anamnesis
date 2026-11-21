@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, ExtractionOutput, ExtractionSpan, type ExtractionFailureDetail } from "@anamnesis/protocol";
+import type { IdentityJudgeInput } from "./identity.ts";
 
 export const ExtractionProviderConfig = z.strictObject({ endpoint: z.url().refine(v => ["http:", "https:"].includes(new URL(v).protocol)), model: z.string().min(1).max(256), model_incarnation: z.string().regex(/^[0-9a-f]{64}$/), timeout_ms: z.number().int().min(1).max(30000).default(5000) });
 export type ExtractionProviderConfig = z.infer<typeof ExtractionProviderConfig>;
@@ -18,7 +19,8 @@ export function extractionInputBytes(input: ExtractionProviderInput): number {
  * fingerprint); a provider that checks and pins it exposes it so accepted results can be attributed to the model that
  * actually answered, not only to the configured alias. Undefined until a response was accepted or when the transport
  * reports none. */
-export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; readonly reportedModelIncarnation?: string | undefined; extract(input: ExtractionProviderInput): Promise<unknown>; }
+export interface ExtractionProvider { readonly model: string; readonly modelIncarnation: string; readonly reportedModelIncarnation?: string | undefined; extract(input: ExtractionProviderInput): Promise<unknown>;
+  readonly judgeIdentity?: ((input: IdentityJudgeInput) => Promise<unknown>) | undefined; }
 /** The configured model names the reported one when they are equal or the configured name is an alias the upstream
  * resolved to a dated snapshot of the same model (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`, `gpt-4o` ->
  * `gpt-4o-2024-08-06`). Only a date suffix is a snapshot: `gpt-4o-mini` is a different model, not an alias of `gpt-4o`. */

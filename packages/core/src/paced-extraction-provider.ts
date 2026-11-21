@@ -9,6 +9,7 @@
 // so the scheduler's in-flight bound still governs overlap. Waiters leave the
 // gate strictly in arrival order; a rejected inner call never jams the gate.
 import type { ExtractionProvider, ExtractionProviderInput } from "./extraction.ts";
+import type { IdentityJudgeInput } from "./identity.ts";
 
 export interface PacedExtractionProviderOptions {
   /** Minimum spacing between call starts, integer 0..600000. Zero passes calls through immediately. */
@@ -36,6 +37,7 @@ const realWait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve
 export class PacedExtractionProvider implements ExtractionProvider {
   readonly model: string;
   readonly modelIncarnation: string;
+  readonly judgeIdentity: ((input: IdentityJudgeInput) => Promise<unknown>) | undefined;
   private readonly minIntervalMs: number;
   private readonly jitterFraction: number;
   private readonly clock: () => number;
@@ -56,6 +58,8 @@ export class PacedExtractionProvider implements ExtractionProvider {
     this.minIntervalMs = minIntervalMs; this.jitterFraction = jitterFraction;
     this.clock = options.clock ?? Date.now; this.wait = options.wait ?? realWait; this.random = options.random ?? Math.random;
     this.model = inner.model; this.modelIncarnation = inner.modelIncarnation;
+    const judge = inner.judgeIdentity;
+    this.judgeIdentity = judge && (async input => { await this.turn(); return judge(input); });
   }
 
   /** The inner provider's pinned upstream identity; the gate adds none of its own. */

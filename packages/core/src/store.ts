@@ -26,6 +26,7 @@ import { RecallStore } from "./store/recall-store.ts";
 import { ProjectionStore } from "./store/projection-store.ts";
 import { IntegrityStore } from "./store/integrity-store.ts";
 import { EpisodeDerivedStore } from "./store/episode-derived.ts";
+import { IdentityStore } from "./store/identity-store.ts";
 import type { RpcSpacesImportParams, RpcSpacesListParams, RpcEpisodeRebuildParams } from "@anamnesis/protocol";
 import { ActivationStore } from "./store/activation-store.ts";
 import type { AuthoritySnapshot } from "./store/conducting-store.ts";
@@ -54,6 +55,7 @@ export class Store {
   private readonly integrity: IntegrityStore;
   private readonly activation: ActivationStore;
   private readonly episodeDerived: EpisodeDerivedStore;
+  readonly identity: IdentityStore;
 
   constructor(opts: StoreOptions, driver?: Driver) {
     this.core = new StoreCore(opts, driver);
@@ -68,6 +70,7 @@ export class Store {
     this.projections = new ProjectionStore(this.core, this.extraction);
     this.integrity = new IntegrityStore(this.core, this.receipts, this.elements);
     this.activation = new ActivationStore(this.core, this.materialization, this.extraction, this.conducting);
+    this.identity = new IdentityStore(this.core);
   }
 
   get databaseName(): string {
