@@ -12,12 +12,13 @@ layer and the Hit ledger are fixed in v0.1 and never change afterwards.
 
 ## Where the code is today
 
-The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
-`packages/protocol`, `packages/core`, `packages/backfill` and
-`packages/archive` plus the `app/anamnesis` daemon. What runs:
+The repository (branch `anamnesis2`) holds `packages/protocol` and
+`packages/core` plus the `app/anamnesis` daemon and its operator CLI. What
+runs:
 
-- An originals write path into Neo4j with the version-1 Episode digest and
-  D49 lineage properties written in the Episode's own transaction, and a
+- An originals write path into Neo4j with the D49 Episode digest: version 2
+  (`episode-rfc8785-v2`) with lineage properties written in the Episode's own
+  transaction when lineage is supplied, version 1 otherwise, and a
   Lucene fulltext index over Element content (`element_content`, cjk
   analyzer).
 - The `recall` RPC, served as `Engine.recallHybrid` → `Store.recall`
@@ -62,13 +63,11 @@ The repository at HEAD (`7fb4d19`, branch `anamnesis2`) holds
   `extraction-state.json` (D55); `extraction.audit.create` / `run` /
   `status` run the same pipeline on demand. This is the production
   extraction path, not an audit-only one.
-- The raw archive (`packages/archive`): `collect` copies every source file
-  by content hash and writes one record per message, and `archive admit`
-  replays those records into the daemon over the UDS socket with the
-  `remember` RPC, keeping a per-source cursor so an interrupted run resumes
-  after the last acknowledged record (#264). Backfill is no longer the only
-  way into the graph; the archive is the collection SSOT and admission
-  reads from it.
+- `anamnesis-ops load`: loads one source of a cleaned corpus (one JSONL
+  record per message, prepared outside the repository) as `remember` calls
+  with direct lineage, rooms in parallel and each room in order, resuming
+  from a line cursor per room file. The earlier in-repository collectors and
+  raw-source adapters are gone.
 - Policy RPCs (D43), budget (D44), the Hit ledger with receipts (D45),
   conflict bundles (D46), `backup` / `restore`, the authority snapshot and
   the hit cache.
@@ -85,7 +84,7 @@ Not in code: Entity and relationship vectors (no `vec_rel_*` index, no
 `embedding_m_<modelhex>` property), the Fact session channel, the Entity
 identity channel, hub damping, the top-128 seed cap, the 2,000-node /
 20,000-link bounded envelope and its timeout degradation, D46 occurrence
-grouping, dreaming, and the version-2 digest. The former `Engine.recall(string)`
+grouping and dreaming. The former `Engine.recall(string)`
 fulltext-only test helper is gone; tests go through `Engine.recallHybrid`.
 
 Everything below is the normative target, not a description of the code.
@@ -97,13 +96,13 @@ with Episodes as provenance only, windowed extraction behind a cheap
 pre-gate) is recorded in D56.
 
 One boundary is deliberately narrower than "bring it in line". The Episode
-digest that ships today is D49's version 1, and v0.1 keeps it that way for
-every already-stored row. Adding the version-2 digest means adding the
-server-selected `episode_digest_version` discriminator and a dispatching
-verifier beside the frozen version-1 serializer, so verify, retry, journal
-replay, backup/restore and rebuild all run write-free over legacy rows. No
-Episode is reserialized, relabeled or given lineage in place, and there is no
-data migration in any stage (docs/01 §1, docs/08).
+digest has two versions: D49's version 1 for metadata-free Episodes and
+version 2 (`episode-rfc8785-v2`, selected by the stored
+`episode_digest_version`) for Episodes admitted with lineage. The verifier
+dispatches on the stored version, so verify, retry, journal replay,
+backup/restore and rebuild run write-free over version-1 rows. No Episode is
+reserialized, relabeled or given lineage in place, and there is no data
+migration in any stage (docs/01 §1, docs/08).
 
 ### Neo4j holds memory only
 
@@ -118,7 +117,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 | G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
 | G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
 | G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason (`provider_absent`, `profile_absent`, `embed_failed`, `query_failed`); `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
-| G9 | done (#264) | archive admit over the daemon socket with per-source cursor resume; `admit --archive --socket --token [--source]` sends each archive record as one Episode through `remember`, tallies created / duplicate / failed, and keeps `<archive>/admit/<source>.cursor.json` (atomic rewrite after every ack, `in_progress` resumes after `last`, `complete` or absent means a full run that the daemon dedupes) | packages/archive README, D56 |
+| G9 | done (#264) | archive admit over the daemon socket with per-source cursor resume; `admit --archive --socket --token [--source]` sends each archive record as one Episode through `remember`, tallies created / duplicate / failed, and keeps `<archive>/admit/<source>.cursor.json` (atomic rewrite after every ack, `in_progress` resumes after `last`, `complete` or absent means a full run that the daemon dedupes); the archive package was removed later, and loading is `anamnesis-ops load` | packages/archive README, D56 |
 | G10 | done (#268) | `ops projection write`: read-only markdown per Entity of valid Facts; `projection` RPC over the writable generation at T, `FACT_VALID` plus content deny policies, deterministic file bytes, stale `*-<12 hex>.md` files removed | 01 §4, 02 §2 |
 
 ## v0.1 — originals, forgetting, search

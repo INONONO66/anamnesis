@@ -225,7 +225,7 @@ export async function foreground(): Promise<void> {
       catch (error) { send(connection, errorResponse(error instanceof FrameFault ? error.id : null, fault(error)), reservation); return true; }
       const receivedAt = performance.now();
       const context = { method: request.method, id: request.id, connection: connectionId };
-      const timing = daemonTiming && ["status", "remember", "ingest.status"].includes(request.method)
+      const timing = daemonTiming && ["status", "remember", "remember.batch", "ingest.status"].includes(request.method)
         ? (event: string) => daemonTiming?.({ layer: "daemon", event, ...context, elapsedMs: performance.now() - receivedAt }) : undefined;
       timing?.("request_received");
       // Eight global/two connection slots remain available to authenticated
@@ -289,7 +289,7 @@ export async function foreground(): Promise<void> {
   const server = createServer(accept("uds"));
   const tcpServer = listen ? createServer(accept("tcp")) : undefined;
   const listeners = tcpServer ? [server, tcpServer] : [server];
-  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" }>): unknown {
+  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" | "spaces.import" | "spaces.list" | "spaces.rebuild" | "replies.rebuild" }>): unknown {
     switch (request.method) {
       case "object.begin": return runtime.uploads.begin(connection, { hash: request.params.sha256, size: request.params.size, media_type: request.params.media_type });
       case "object.chunk": return runtime.uploads.chunk(connection, request.params.upload_id, request.params.seq, Buffer.from(request.params.bytes_b64, "base64"));
@@ -306,6 +306,10 @@ export async function foreground(): Promise<void> {
       case "restore.status": return runtime.restoreStatus(request.params.operation_id);
       case "hit-cache.verify": return runtime.verifyHitCache();
       case "hit-cache.rebuild": return runtime.rebuildHitCache();
+      case "spaces.import": return runtime.importRoomAssignments(request.params);
+      case "spaces.list": return runtime.listSpaces(request.params);
+      case "spaces.rebuild": return runtime.rebuildEpisodeDerived(request.params, "labels");
+      case "replies.rebuild": return runtime.rebuildEpisodeDerived(request.params, "replies");
     }
   }
   /** The hello handshake: constant-time token check, then the connection is bound and the runtime's capabilities and limits are announced. */
@@ -327,6 +331,7 @@ export async function foreground(): Promise<void> {
     switch (request.method) {
       case "status": return runtime.status(pending, stopping);
       case "remember": return runtime.remember(request.params, connection.context!);
+      case "remember.batch": return runtime.rememberBatch(request.params.deliveries, connection.context!);
       case "ingest.status": return runtime.ingestStatus(request.params);
       case "recall": return runtime.recall(request.params, connection.context!);
       case "projection": return runtime.projection(request.params, connection.context!);

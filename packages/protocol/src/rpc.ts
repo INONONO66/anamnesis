@@ -19,13 +19,15 @@ export const RPC_LIMITS = {
   upload_temp_bytes: 1024 * 1024 * 1024,
   queued_requests_per_connection: 16,
   queued_requests: 256,
+  remember_batch: 32,
   spool_bytes: 1024 * 1024 * 1024,
 } as const;
 
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
-  "object.commit", "remember", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
+  "spaces.import", "spaces.list", "spaces.rebuild", "replies.rebuild",
+  "object.commit", "remember", "remember.batch", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
 ] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
@@ -46,6 +48,40 @@ const positiveCounter = counter.min(1);
 export const RpcHash = z.string().regex(/^[0-9a-f]{64}$/);
 export type RpcHash = z.infer<typeof RpcHash>;
 const requestId = z.union([counter, boundedString(128)]);
+
+/** Explicit operator assignments; JSONL imports intentionally discard other keys. */
+export const RoomAssignment = z.object({
+  source: identifier, room: identifier, space: boundedString(2048), name: identifier.nullish(),
+});
+export type RoomAssignment = z.infer<typeof RoomAssignment>;
+export const RpcSpacesImportParams = z.strictObject({
+  assignments: z.array(RoomAssignment).min(1).max(1000),
+});
+export type RpcSpacesImportParams = z.infer<typeof RpcSpacesImportParams>;
+export const RpcSpacesListParams = z.strictObject({
+  after: boundedString(2048).optional(), limit: positiveCounter.max(100).default(100),
+});
+export type RpcSpacesListParams = z.infer<typeof RpcSpacesListParams>;
+export const RpcSpacesListResult = z.strictObject({
+  spaces: z.array(z.strictObject({
+    space: boundedString(2048), episodes: counter, rooms: counter,
+    first: z.iso.datetime().nullable(), last: z.iso.datetime().nullable(),
+  })).max(100),
+  next: boundedString(2048).nullable(),
+});
+export const RpcEpisodeRebuildParams = z.strictObject({
+  after: counter.default(0), through: counter.optional(),
+  limit: positiveCounter.max(1000).default(500),
+  room: z.strictObject({ source: identifier, room: identifier }).optional(),
+}).refine(value => value.through === undefined || value.after <= value.through, {
+  message: "after must not exceed through",
+});
+export type RpcEpisodeRebuildParams = z.infer<typeof RpcEpisodeRebuildParams>;
+export const RpcEpisodeRebuildResult = z.strictObject({
+  after: counter, through: counter, done: z.boolean(), scanned: counter,
+  updated: counter, created: counter, removed: counter, missing: counter,
+});
+export type RpcEpisodeRebuildResult = z.infer<typeof RpcEpisodeRebuildResult>;
 
 /** Recursion retains Unicode and finite-number checks inside arbitrary properties. */
 const jsonValue: z.ZodType<z.core.util.JSONType> = z.lazy(() => z.union([
@@ -92,6 +128,8 @@ export const RpcRememberParams = z.strictObject({
 });
 export type RpcRememberParams = z.infer<typeof RpcRememberParams>;
 export type RpcRememberParamsInput = z.input<typeof RpcRememberParams>;
+/** Deliveries of one source session, admitted in order as `remember` admits each one, in one serial turn. */
+const RpcRememberBatchParams = z.strictObject({ deliveries: z.array(RpcRememberParams).min(1).max(RPC_LIMITS.remember_batch) });
 
 /** Reserved budget vocabulary; token installation is a runtime admission check. */
 export const RpcOutputBudget = z.discriminatedUnion("unit", [
@@ -266,6 +304,7 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("object.chunk", z.strictObject({ upload_id: z.uuid(), seq: counter, bytes_b64: chunkBytes })),
   request("object.commit", z.strictObject({ upload_id: z.uuid() })),
   request("remember", RpcRememberParams),
+  request("remember.batch", RpcRememberBatchParams),
   request("ingest.status", RpcIngestStatusParams),
   request("extraction.audit.create", CreateExtractionPipeline),
   request("extraction.audit.run", RunExtractionPipeline),
@@ -285,6 +324,10 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("policy.revoke", RpcPolicyRevokeParams),
   request("hit-cache.verify", RpcHitCacheParams),
   request("hit-cache.rebuild", RpcHitCacheParams),
+  request("spaces.import", RpcSpacesImportParams),
+  request("spaces.list", RpcSpacesListParams),
+  request("spaces.rebuild", RpcEpisodeRebuildParams),
+  request("replies.rebuild", RpcEpisodeRebuildParams),
 ]).superRefine(validateFrame).meta({ "x-maxJsonBytes": RPC_LIMITS.frame_bytes });
 export type RpcRequest = z.infer<typeof RpcRequest>;
 export type RpcRequestInput = z.input<typeof RpcRequest>;
@@ -339,6 +382,10 @@ export const RpcSpooledResult = z.strictObject({
 export type RpcSpooledResult = z.infer<typeof RpcSpooledResult>;
 export const RpcRememberResult = z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult]);
 export type RpcRememberResult = z.infer<typeof RpcRememberResult>;
+/** One answer per delivery, in order: its remember result, or the non-retryable refusal that answered it alone. */
+export const RpcRememberBatchResult = z.strictObject({ results: z.array(z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult,
+  z.strictObject({ state: z.literal("refused"), code: RpcErrorCode, message: boundedString(1024) })])).min(1).max(RPC_LIMITS.remember_batch) });
+export type RpcRememberBatchResult = z.infer<typeof RpcRememberBatchResult>;
 export const RpcStorageState = z.enum(["available", "unavailable"]);
 export type RpcStorageState = z.infer<typeof RpcStorageState>;
 export const RpcIngestStatusResult = z.discriminatedUnion("state", [
@@ -454,9 +501,14 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("object.chunk", z.strictObject({ upload_id: z.uuid(), next_seq: positiveCounter })),
   success("object.commit", RpcObjectMetadata),
   success("remember", RpcRememberResult),
+  success("remember.batch", RpcRememberBatchResult),
   success("ingest.status", RpcIngestStatusResult),
   success("hit-cache.verify", z.strictObject({ state: z.literal("verified"), hits: counter, issues: z.array(z.strictObject({ code: boundedString(128), id: boundedString(128) })).max(1024) })),
   success("hit-cache.rebuild", z.strictObject({ state: z.literal("rebuilt"), hits: counter, created: counter, removed: counter })),
+  success("spaces.import", z.strictObject({ imported: counter, changed: counter })),
+  success("spaces.list", RpcSpacesListResult),
+  success("spaces.rebuild", RpcEpisodeRebuildResult),
+  success("replies.rebuild", RpcEpisodeRebuildResult),
   success("graph.envelope", z.strictObject({ nodes: z.array(z.uuidv7()).max(2000), arcs: z.array(ConductingArcRow).max(20000),
     probes: z.array(ConductingArcProbeResult).max(128), truncated: z.boolean(),
     pin: z.strictObject({ policy_revision: counter, generation_id: z.uuidv7(), coverage_revision: counter, covered_ingest_seq: counter, T: counter }),

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
@@ -10,7 +10,6 @@ import { extractionBodyDigest, type RpcRememberParams } from "@anamnesis/protoco
 import { fakeAuthorityAdapter, sha256 } from "./authority-adapter.fixture.ts";
 import type { Installation } from "./config.ts";
 import { Runtime, type BackgroundLane } from "./runtime.ts";
-import { sourceRevisionKey } from "./source.ts";
 
 setDefaultTimeout(60_000);
 
@@ -45,13 +44,17 @@ function delivery({ record, revision = "v1", predecessor = null, content }: Deli
 }
 // Independent oracle: runtime.ts keeps its body-digest derivation private, so the test recomputes it from the wire
 // format instead of importing it; a change in that derivation fails here on purpose.
+function revisionKeyOf(params: RpcRememberParams): string {
+  const o = params.episode.origin;
+  return sha256(JSON.stringify([sha256(JSON.stringify([o.source, o.session, o.actor, o.record])), params.source_revision]));
+}
 function identityOf(params: RpcRememberParams, incarnation: string) {
   const canonical = (value: unknown): string => {
     if (value === null || typeof value !== "object") return JSON.stringify(value);
     if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
     return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, member]) => `${JSON.stringify(key)}:${canonical(member)}`).join(",")}}`;
   };
-  return { revision_key: sourceRevisionKey(params), body_digest: sha256(canonical({ digest_version: 1, params })), data_incarnation: incarnation };
+  return { revision_key: revisionKeyOf(params), body_digest: sha256(canonical({ digest_version: 1, params })), data_incarnation: incarnation };
 }
 
 type Remembered = Awaited<ReturnType<Runtime["remember"]>>;
@@ -170,11 +173,12 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   const first = delivery({ record: "first" });
   const committed = asCommitted(await runtime.remember(first));
   expect(committed).toMatchObject({ state: "committed", created: true, ...identityOf(first, installation.incarnation) });
-  expect(lanes).toEqual(["spool", "spool"]);
+  expect(lanes).toEqual(["spool"]);
   expect(await runtime.remember(first)).toEqual({ ...committed, created: false });
   await expect(runtime.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
 
   const identity = identityOf(first, installation.incarnation);
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([identity.revision_key + ".json"]);
   expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
   expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({ state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available" });
   expect(await runtime.ingestStatus({ ...identity, revision_key: "1".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
@@ -189,7 +193,7 @@ dbTest("storage loss spools deliveries, reports degraded, and the same incarnati
   const offline = await boot(installation, DEAD_URI);
   expect(await offline.runtime.status(0, false)).toMatchObject({ state: "degraded", storage: "unavailable", outbox_pending: null });
   const parent = delivery({ record: "doc" });
-  const child = delivery({ record: "doc", revision: "v2", predecessor: sourceRevisionKey(parent) });
+  const child = delivery({ record: "doc", revision: "v2", predecessor: revisionKeyOf(parent) });
   const spooledChild = await offline.runtime.remember(child);
   expect(spooledChild).toMatchObject({ state: "spooled", spool_seq: 1, fs_epoch: installation.epoch, ...identityOf(child, installation.incarnation) });
   expect(await offline.runtime.remember(parent)).toMatchObject({ state: "spooled", spool_seq: 2 });
@@ -226,10 +230,28 @@ dbTest("a spooled successor whose predecessor never arrives stays blocked and a 
   await expect(runtime.remember(orphan)).rejects.toMatchObject({ code: "stale_revision" });
 });
 
+dbTest("a live commit of the revision a blocked entry waits for wakes the drain, which then commits the entry", async () => {
+  const installation = installationAt(await freshRoot());
+  const parent = delivery({ record: "late" });
+  const child = delivery({ record: "late", revision: "v2", predecessor: revisionKeyOf(parent) });
+  await spoolOffline(installation, child);
+  const { runtime, lanes } = await boot(installation);
+  await drainToRest(runtime);
+  expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
+  const woken = lanes.length;
+  expect(await runtime.remember(delivery({ record: "unrelated" }))).toMatchObject({ state: "committed", created: true });
+  expect(lanes).toHaveLength(woken);
+  expect(await runtime.remember(parent)).toMatchObject({ state: "committed", created: true });
+  expect(lanes).toHaveLength(woken + 1);
+  await drainToRest(runtime);
+  expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "committed", created: false });
+  expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
+});
+
 dbTest("mutually dependent spool entries are blocked as a dependency cycle and a tail entering the cycle as a missing predecessor", async () => {
   const installation = installationAt(await freshRoot());
-  const keyA = sourceRevisionKey(delivery({ record: "cycle", revision: "a" }));
-  const keyB = sourceRevisionKey(delivery({ record: "cycle", revision: "b" }));
+  const keyA = revisionKeyOf(delivery({ record: "cycle", revision: "a" }));
+  const keyB = revisionKeyOf(delivery({ record: "cycle", revision: "b" }));
   const a = delivery({ record: "cycle", revision: "a", predecessor: keyB });
   const b = delivery({ record: "cycle", revision: "b", predecessor: keyA });
   const tail = delivery({ record: "cycle", revision: "c", predecessor: keyA });
@@ -245,18 +267,19 @@ dbTest("mutually dependent spool entries are blocked as a dependency cycle and a
 dbTest("drain blocks a stale successor, a body conflicting with a committed revision, and the entry behind them without stopping the cohort", async () => {
   const installation = installationAt(await freshRoot());
   const base = delivery({ record: "stale" });
-  const stale = delivery({ record: "stale", revision: "v2", predecessor: sourceRevisionKey(base) });
-  const behindStale = delivery({ record: "stale", revision: "v3", predecessor: sourceRevisionKey(stale) });
+  const stale = delivery({ record: "stale", revision: "v2", predecessor: revisionKeyOf(base) });
+  const behindStale = delivery({ record: "stale", revision: "v3", predecessor: revisionKeyOf(stale) });
   const conflicting = delivery({ record: "conflict", content: "spooled body" });
   const liveBody = delivery({ record: "conflict", content: "live body" });
   await spoolOffline(installation, stale, behindStale, conflicting);
   // A lost delivery binding lets a different body for the same revision reach the store first; the spooled body
   // then meets the committed one at drain time instead of at admission.
-  await rm(join(installation.root, "deliveries", `${sourceRevisionKey(conflicting)}.json`));
-  const { runtime } = await boot(installation);
+  await rm(join(installation.root, "deliveries", `${revisionKeyOf(conflicting)}.json`));
+  const { runtime, lanes } = await boot(installation);
   expect(await runtime.remember(base)).toMatchObject({ state: "committed", created: true });
-  expect(await runtime.remember(delivery({ record: "stale", revision: "v1b", predecessor: sourceRevisionKey(base) }))).toMatchObject({ state: "committed", created: true });
+  expect(await runtime.remember(delivery({ record: "stale", revision: "v1b", predecessor: revisionKeyOf(base) }))).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(liveBody)).toMatchObject({ state: "committed", created: true });
+  expect(lanes).toEqual(["spool"]);
   await drainToRest(runtime);
   expect(await runtime.ingestStatus(identityOf(stale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "stale_revision" });
   expect(await runtime.ingestStatus(identityOf(behindStale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
@@ -315,12 +338,35 @@ dbTest("lineage metadata needs authenticated custody and is re-verified from the
   const committed = asCommitted(await runtime.remember(v2, receiptContext));
   expect(committed).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(v2, receiptContext)).toEqual({ ...committed, created: false });
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
   const identity = identityOf(v2, installation.incarnation);
   expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
+  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
   await query("MATCH (e:Episode {id:$id}) SET e.context_digests = [$digest]", { id: committed.id, digest: "f".repeat(64) });
   await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_mismatch" });
   await query("MATCH (e:Episode {id:$id}) REMOVE e.lineage_mode", { id: committed.id });
   await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_unavailable" });
+});
+
+dbTest("remember.batch answers each delivery in order: a refusal answers its delivery alone and a retryable failure fails the rest", async () => {
+  const installation = installationAt(await freshRoot());
+  const live = await boot(installation);
+  const first = delivery({ record: "batch-1" }), second = delivery({ record: "batch-2" });
+  const lineage = { ...delivery({ record: "batch-lineage" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
+  const { results } = await live.runtime.rememberBatch([first, second, delivery({ record: "batch-1", content: "a different body" }), lineage, first], receiptContext);
+  expect(results.map(result => result.state)).toEqual(["committed", "committed", "refused", "committed", "committed"]);
+  expect(results[2]).toMatchObject({ state: "refused", code: "revision_conflict" });
+  const [stored] = results;
+  if (stored?.state !== "committed") throw new Error("the first delivery did not commit");
+  expect(results[4]).toEqual({ ...stored, created: false });
+  await shutdown(live.runtime);
+
+  const offline = await boot(installation, DEAD_URI);
+  const third = delivery({ record: "batch-3" }), fourth = delivery({ record: "batch-4" });
+  const offlineLineage = { ...delivery({ record: "batch-lineage-2" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
+  await expect(offline.runtime.rememberBatch([third, offlineLineage, fourth], receiptContext)).rejects.toMatchObject({ code: "storage_unavailable", retryable: true });
+  expect(await offline.runtime.ingestStatus(identityOf(third, installation.incarnation))).toMatchObject({ state: "spooled" });
+  expect(await offline.runtime.ingestStatus(identityOf(fourth, installation.incarnation))).toMatchObject({ state: "unknown", storage: "unavailable" });
 });
 
 dbTest("stored rows that no longer verify are reported as digest faults instead of commits", async () => {
@@ -392,7 +438,7 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   expect(await runtime.extractionTurn()).toBe("waiting");
 
   const committed = asCommitted(await runtime.remember(delivery({ record: "embedded" })));
-  expect(lanes.slice(4).sort()).toEqual(["embedding", "extraction", "spool"]);
+  expect(lanes.slice(4).sort()).toEqual(["embedding", "extraction"]);
   const deferred = await runtime.status(0, false);
   expect(deferred.workers.embedding).toMatchObject({ pending: 1, drained_total: 0, quarantined_total: 0 });
   expect(deferred.workers.embedding.last_error).toContain("deferred");
@@ -452,7 +498,7 @@ dbTest("a prior revision denied by episode id is withheld from the primary's sup
   const { runtime } = await boot(installation);
   const original = delivery({ record: "revised", content: "the sleepy owl hoots" });
   const first = asCommitted(await runtime.remember(original));
-  const second = asCommitted(await runtime.remember(delivery({ record: "revised", revision: "v2", predecessor: sourceRevisionKey(original), content: "the sleepy owl hoots at dusk" })));
+  const second = asCommitted(await runtime.remember(delivery({ record: "revised", revision: "v2", predecessor: revisionKeyOf(original), content: "the sleepy owl hoots at dusk" })));
   const view = (recall: Awaited<ReturnType<Runtime["recall"]>>) => recall.results.map(item => [item.id, item.provenance.supersedes, item.provenance.supersedes_redacted]);
   const query = { query: "sleepy owl hoots", limit: 5 };
   expect(view(await runtime.recall(query, autoContext))).toEqual([[second.id, [{ id: first.id, content: "the sleepy owl hoots" }], false]]);

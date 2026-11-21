@@ -16,7 +16,7 @@ import { promisify } from "node:util";
 import neo4j, { type Driver } from "neo4j-driver";
 import { v7 as uuidv7 } from "../../packages/core/node_modules/uuid/dist/esm/index.js";
 import { RpcRememberParams, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
-import { maskSecrets } from "../../packages/backfill/src/secrets.ts";
+import { maskSecrets } from "../../app/anamnesis/secrets.ts";
 import { loadProviderConfig } from "../../app/anamnesis/config.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
 import { ModelTask } from "../../packages/protocol/src/extraction.ts";
@@ -238,56 +238,41 @@ export async function runE2eDaemon(evidence = resolve(".omo/evidence/auto-pipeli
     await log("daemon_ready", { capabilities: initial.capabilities, workers: initial.workers });
     summary.stage = "ingest";
     const ingestStart = Date.now();
-    // The first sorted Codex rollout keeps admission inside the existing 256-source cutover bound.
-    const source = join(homedir(), ".codex/sessions");
-    const copied = join(parent, "codex-copy"); await mkdir(copied);
-    const codexFiles = (await readdir(source, { recursive: true })).filter(file => file.endsWith(".jsonl")).sort().slice(0, 1);
-    for (const file of codexFiles) { await mkdir(join(copied, file, ".."), { recursive: true }); await cp(join(source, file), join(copied, file)); }
-    await log("source_copy", { source, files: codexFiles, destination: copied, source_access: "read_only" });
-    await ops("ingest-codex-raw", copied, join(parent, "raw-checkpoint.json"));
-    await verify();
-    count = Number((await snapshot()).episodes);
-    summary.episodes = count;
-    const episodeSource = { raw: { source: "codex-session", files: codexFiles, episodes: count }, converted: 0,
+    const episodeSource = { converted: 0,
       rule: "Sorted Claude JSONL files and physical lines; first user/assistant text block per record, 40-1200 UTF-8 bytes; preserve timestamp and actor; origin.record=file:line; mass=1; stop at 200 total admitted Episodes." };
     summary.episode_source = episodeSource;
     const converted: RpcRememberParams[] = [];
-    if (count < 200) {
-      deviations.push("One copied Codex rollout yielded fewer than 200 Episodes; deterministic real Claude text-block conversion filled the remainder via ops ingest. One rollout keeps the run inside the current 256-source cutover bound.");
-      deviations.push("The first transcript Episode is admitted metadata-free so the crash-drain replay is an exact legacy retry (explicit lineage cannot spool offline).");
-      const fallback = process.env.ANAMNESIS_E2E_FALLBACK_PROJECT ?? join(homedir(), ".claude/projects/-Users-ino-Develop-token-hub");
-      const fallbackCopy = join(parent, "fallback-copy"); await cp(fallback, fallbackCopy, { recursive: true });
-      for (const file of (await readdir(fallbackCopy)).filter(file => file.endsWith(".jsonl")).sort()) {
-        let lineNumber = 0;
-        for (const line of (await readFile(join(fallbackCopy, file), "utf8")).split("\n")) {
-          lineNumber++; if (!line) continue;
-          const record = JSON.parse(line) as { type?: string; timestamp?: string; sessionId?: string; message?: { role?: string; content?: string | { type: string; text?: string }[] } };
-          const actor = record.message?.role;
-          if (actor !== "user" && actor !== "assistant") continue;
-          const raw = record.message?.content;
-          const content = typeof raw === "string" ? raw : raw?.find(block => block.type === "text")?.text;
-          if (!content || content.length < 40 || Buffer.byteLength(content) > 1200 || !record.timestamp || !Number.isFinite(Date.parse(record.timestamp))) continue;
-          if (maskSecrets(content).redactions > 0) continue;
-          // Explicit lineage admission (D49): only version-2 Episodes are semantic-eligible; metadata-free imports stay pre-lineage and refuse Facts.
-          // The first transcript Episode stays metadata-free on purpose: it is the crash-drain replay source, and only an exact
-          // legacy retry may spool offline (explicit lineage needs the database; a v2 retry with different lineage fields is a revision_conflict).
-          const lineage = converted.length === 0 ? {} : { origin_role: actor, lineage_mode: "direct", parent_recall_ids: [] };
-          const params = RpcRememberParams.parse({ episode: { schema: "anamnesis.original-message/1", content,
-            time: { value: new Date(record.timestamp).toISOString(), precision: "second" },
-            origin: { source: "claude-transcript", session: record.sessionId ?? file, actor, record: `${file}:${lineNumber}` }, mass: 1, properties: {} },
-            source_revision: sha(content), expected_previous_revision_key: null, ...lineage });
-          converted.push(params);
-          if (converted.length + count >= 200) break;
-        }
-        if (converted.length + count >= 200) break;
+    deviations.push("The first transcript Episode is admitted metadata-free so the crash-drain replay is an exact legacy retry (explicit lineage cannot spool offline).");
+    const fallback = process.env.ANAMNESIS_E2E_FALLBACK_PROJECT ?? join(homedir(), ".claude/projects/-Users-ino-Develop-token-hub");
+    const fallbackCopy = join(parent, "fallback-copy"); await cp(fallback, fallbackCopy, { recursive: true });
+    for (const file of (await readdir(fallbackCopy)).filter(file => file.endsWith(".jsonl")).sort()) {
+      let lineNumber = 0;
+      for (const line of (await readFile(join(fallbackCopy, file), "utf8")).split("\n")) {
+        lineNumber++; if (!line) continue;
+        const record = JSON.parse(line) as { type?: string; timestamp?: string; sessionId?: string; message?: { role?: string; content?: string | { type: string; text?: string }[] } };
+        const actor = record.message?.role;
+        if (actor !== "user" && actor !== "assistant") continue;
+        const raw = record.message?.content;
+        const content = typeof raw === "string" ? raw : raw?.find(block => block.type === "text")?.text;
+        if (!content || content.length < 40 || Buffer.byteLength(content) > 1200 || !record.timestamp || !Number.isFinite(Date.parse(record.timestamp))) continue;
+        if (maskSecrets(content).redactions > 0) continue;
+        // Explicit lineage admission (D49): only version-2 Episodes are semantic-eligible; metadata-free imports stay pre-lineage and refuse Facts.
+        // The first transcript Episode stays metadata-free on purpose: it is the crash-drain replay source, and only an exact
+        // legacy retry may spool offline (explicit lineage needs the database; a v2 retry with different lineage fields is a revision_conflict).
+        const lineage = converted.length === 0 ? {} : { origin_role: actor, lineage_mode: "direct", parent_recall_ids: [] };
+        const params = RpcRememberParams.parse({ episode: { schema: "anamnesis.original-message/1", content,
+          time: { value: new Date(record.timestamp).toISOString(), precision: "second" },
+          origin: { source: "claude-transcript", session: record.sessionId ?? file, actor, record: `${file}:${lineNumber}` }, mass: 1, properties: {} },
+          source_revision: sha(content), expected_previous_revision_key: null, ...lineage });
+        converted.push(params);
+        if (converted.length >= 200) break;
       }
-      assert.ok(count + converted.length >= 200, "not enough real transcript Episodes");
-      const input = join(parent, "episodes.jsonl"); await writeFile(input, converted.map(value => JSON.stringify(value)).join("\n") + "\n", { mode: 0o600 });
-      await ops("ingest", input, join(parent, "converted-checkpoint.json"));
-      const checkpoint = JSON.parse(await readFile(join(parent, "converted-checkpoint.json"), "utf8"));
-      episodeSource.converted = converted.length;
-      await log("conversion", { source: fallback, rule: episodeSource.rule, records: converted.length, checkpoint });
+      if (converted.length >= 200) break;
     }
+    assert.ok(converted.length >= 200, "not enough real transcript Episodes");
+    for (const params of converted) assert.equal((await rpc.request("remember", params)).state, "committed");
+    episodeSource.converted = converted.length;
+    await log("conversion", { source: fallback, rule: episodeSource.rule, records: converted.length });
     await verify(); count = Number((await snapshot()).episodes); assert.ok(count >= 200 && count <= 256, "episode_count_out_of_bounds");
     summary.episodes = count; durations.ingest_ms = Date.now() - ingestStart;
     // The daemon keeps running: its worker lanes, not this script, own extraction, coverage, embeddings and cutover.

@@ -15,14 +15,9 @@ const PATTERNS: readonly RegExp[] = [
   /\b(?:api[_-]?key|secret|token|password|passwd)\b["'\s:=]{1,4}[A-Za-z0-9/+_-]{20,}/gi,
 ];
 
-export const REDACTION = "[REDACTED]";
+const REDACTION = "[REDACTED]";
 
-export interface MaskResult {
-  text: string;
-  redactions: number;
-}
-
-export function maskSecrets(text: string): MaskResult {
+export function maskSecrets(text: string): { text: string; redactions: number } {
   let masked = text;
   let redactions = 0;
   for (const pattern of PATTERNS) {

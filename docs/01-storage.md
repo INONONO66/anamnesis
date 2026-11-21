@@ -13,7 +13,7 @@ permits a different kind of write.
              rebuild's explicit old/new target mappings; originals alone do not suffice (§4)
              Fact · Entity · Community · derived links · embedding
   caches     SET allowed. Can be dropped and regenerated at any time
-             hit/utility cache · active policy · Entity witness properties · session topology · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · selectors
+             hit/utility cache · active policy · Entity witness properties · session topology · Episode room/space · REPLIES_TO · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · selectors
              (embedding, extraction and materialization operational state are not graph
              layers; they live in `embedding-state.json`, `extraction-state.json` and
              `materialization-state.json` beside the runtime root, §4, §6)
@@ -24,6 +24,7 @@ permits a different kind of write.
              Episode lineage properties, AdjudicationAttempt/Proposal/
              Review/Correction records and EmbeddingResolution/Qualification records;
              retained regeneration authority, never receipt-TTL data (§4)
+             mutable RoomAssignment table, changed only by explicit operator import (D58)
 ```
 
 Two things live on the filesystem outside Neo4j (§6): **payload bytes**
@@ -56,6 +57,7 @@ kind-specific queries go through the kind label.
 | `properties` | all | Schema-specific canonical JSON, encoded size ≤ 32 KiB |
 | `time_value`, `time_utc`, `time_precision` | Episode, Fact | Event time (docs/03 §1) |
 | `origin_source/session/actor/record` | Episode | Source identification |
+| `room`, `space` | Episode | Recomputable cache properties outside `properties` and the digest. Room = string `properties.room`, otherwise `origin_session`; space = explicit room assignment, otherwise `unknown:<origin_source>` (D58) |
 | `origin_role` | Episode | `user \| assistant \| tool \| document \| operator`, supplied by the authenticated adapter. Immutable; extraction never infers it from prose (D49) |
 | `lineage_mode`, `parent_recall_ids`, `context_digests`, `root_episode_ids`, `echo_depth`, `lineage_complete`, `lineage_digest` | Episode | Bounded lineage body and its canonical SHA-256, stored on the Episode in the same transaction; the digest is part of version-2 Episode identity (§3.3, §1 *Episode digest versions*) |
 | `session_key` | Episode | `sha256(origin_source, origin_session)`; namespaces session order across adapters |
@@ -1193,9 +1195,9 @@ changes nothing until the next write overwrites it.
 
 ## 5. Link
 
-Relationships are real Neo4j relationship types, not nodes. The seven roles
-are not extended — variety in relationships is absorbed by the natural
-language in `RELATES_TO.content`.
+Relationships are real Neo4j relationship types, not nodes. The eight roles
+are closed; D58 adds the structural `REPLIES_TO` cache. Semantic variety is
+absorbed by the natural language in `RELATES_TO.content`.
 
 ```jsonc
 {
@@ -1244,6 +1246,7 @@ peers are unknown, not certified absent; incomplete warnings remain mandatory.
 | Role | Direction | Layer | Meaning | Conducts PPR |
 |---|---|---|---|---|
 | `NEXT_EPISODE` | Episode → next Episode | cache | Rebuildable same-session total order. Rewired on backfill | yes |
+| `REPLIES_TO` | replying Episode → answered Episode | cache | Explicit reply address or Slack thread parent; no generation or content in its key | no |
 | `MENTIONS` | Episode\|Fact → Entity | derived | What it is about | yes |
 | `RELATES_TO` | Fact\|Entity ↔ Fact\|Entity | derived | Free natural-language relation | yes |
 | `HAS_MEMBER` | Community → Entity\|Fact | derived (community) | Topic membership; captures `member_visible_from_utc` at build | yes |
@@ -1253,6 +1256,75 @@ peers are unknown, not certified absent; incomplete warnings remain mandatory.
 
 PPR uses the five conducting roles **bidirectionally**. The stored direction is
 for the semantic model.
+
+### Episode room, space and replies (D58)
+
+`RoomAssignment {source, room, space, name?}` is an explicit daemon-managed
+control table in Neo4j, unique on `(source, room)`. It is not an Element.
+The client chooses labels; the engine never infers a project from `cwd`.
+Import upserts entries (last line wins); omitted rooms retain their assignments,
+and omitting `name` clears that optional display name. Labels are written by
+the same function at admission and rebuild, in the Episode creation transaction
+for new admissions. Exact remember retries do not relabel old originals.
+
+`properties.reply` addresses `<source>:<room>#<message>` by
+`(origin_source, origin_session, origin_record)`. Slack thread replies with
+session `<room>/<thread>` additionally address `(slack, room, thread)`.
+If revisions or actors share an address, the greatest `ingest_seq` wins.
+Self-links are excluded. Absent targets increment `missing` per address;
+they do not fail admission or rebuild. A later rebuild resolves late targets
+and replaces a prior target when a newer revision arrived. Duplicate addresses
+and duplicate resolved endpoints collapse to one link.
+
+`REPLIES_TO.idem_key = sha256(JSON.stringify([from, to, "REPLIES_TO"]))`;
+its ID is UUIDv5 of that key in the URL namespace. It carries fixed descriptive
+content and no generation. Rebuild only deletes stale `REPLIES_TO` links from
+its page. Neither labels nor replies change Episode properties JSON, digests,
+identity, lineage, NEXT_EPISODE, conducting rows, serving revisions or recall.
+
+Operator surface (local or the existing authenticated TCP transport):
+
+```sh
+node dist/anamnesis-ops.mjs spaces import rooms.jsonl
+node dist/anamnesis-ops.mjs spaces rebuild
+node dist/anamnesis-ops.mjs replies rebuild
+node dist/anamnesis-ops.mjs spaces list
+node dist/anamnesis-ops.mjs spaces rebuild --source slack --room C123
+node dist/anamnesis-ops.mjs replies rebuild --after 500 --through 1600000 --limit 500
+```
+
+JSONL rows require `source`, `room`, `space`, optionally `name` (absent or
+`null` both mean no name); other keys are discarded. Records end with LF only,
+so a name may hold U+2028 / U+2029 unescaped. CLI import streams batches of
+100; each RPC transaction accepts up to 1,000 entries. A failed later batch leaves earlier batches committed; replaying
+the file is safe. Import changes the table, not existing Episode labels: follow
+it with rebuild. `spaces.list` reports labelled Episode counts, distinct
+`(source, room)` counts and first/last event time, ordered and paged by space.
+Run the initial labels rebuild before relying on listing or room-scoped rebuild.
+
+RPCs are `spaces.import`, `spaces.list`, `spaces.rebuild`, `replies.rebuild`.
+Each rebuild RPC commits one page, default 500 / maximum 1,000 Episodes, and
+returns `{after, through, done, scanned, updated, created, removed, missing}`.
+`through` is the initial ingest high-water mark; the CLI retains it and prints
+each committed cursor. Resume with the last printed `--after` and `--through`,
+and the same room filter. A lost response can replay its page safely. Page
+counts describe that invocation, not a persistent job total. New admissions
+above the high-water mark already receive labels and available replies.
+Rerun replies from zero to repair targets arriving after an earlier pass.
+
+Initial backfill uses the unique `Episode.ingest_seq` range index. Subsequent
+room-scoped work uses `(origin_source, room, ingest_seq)` and touches only that
+room, including its Slack threads. Target resolution uses
+`(origin_source, origin_session, origin_record, ingest_seq)` with an ordered
+`LIMIT 1`. Import and rebuild share the existing Meta writer fence. If an
+assignment changes during a pass, rerun that room after import completes.
+Listing uses the `Episode.space` index; aggregation reads the labelled rows.
+
+The ordinary Neo4j dump retains the assignment table, properties and reply
+relationships, with no new filesystem member or digest format. Integrity
+decodes originals independently of these cache fields. The authority snapshot's
+`physical_links` remains the conducting-only inventory; dump checksums cover
+these additional stored bytes. After a cache loss, rebuild labels then replies.
 
 ### ConductingArc — bounded physical access cache
 

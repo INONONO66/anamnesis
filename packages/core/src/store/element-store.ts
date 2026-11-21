@@ -12,6 +12,7 @@ import { type ElementNode, type LinkRelationship, type ElementWriteOptions, reco
 import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ConductingStore } from "./conducting-store.ts";
+import type { EpisodeDerivedStore } from "./episode-derived.ts";
 
 export interface PutResult {
   id: string;
@@ -85,7 +86,7 @@ function lineageColumns({ episode_id: _episodeId, complete, ...columns }: EchoLi
 }
 
 export class ElementStore {
-  constructor(private readonly core: StoreCore, private readonly receipts: ReceiptStore, private readonly conducting: ConductingStore) {}
+  constructor(private readonly core: StoreCore, private readonly receipts: ReceiptStore, private readonly conducting: ConductingStore, private readonly episodeDerived: EpisodeDerivedStore) {}
 
   async putElement(
     input: MemoryElementInput,
@@ -172,6 +173,7 @@ export class ElementStore {
           });
         }
         await this.spliceTopologyTx(tx, { id: el.id, sessionKey: sessionKey(el.origin), ...slot });
+        await this.episodeDerived.admitTx(tx, el);
         return {
           id: el.id,
           created: true,
@@ -457,7 +459,7 @@ export class ElementStore {
         to: link.to,
         fromLabels: [...lattice.from],
         toLabels: [...lattice.to],
-        originalsLayer: link.role === "INVALIDATES",
+        originalsLayer: link.role === "INVALIDATES" || link.role === "REPLIES_TO",
         originalsIdemKey: linkIdemKey(link, true),
         derivedIdemKey: linkIdemKey(link, false),
         id: link.id,
