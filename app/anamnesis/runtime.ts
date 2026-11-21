@@ -356,13 +356,10 @@ export class Runtime {
     const stored = await this.refresh(key);
     if (stored) return this.rememberExisting(key, candidate, stored);
     const pending = await this.pendingEntry(key);
-    if (pending) {
-      const binding = await this.admitBinding(params, this.validated(pending), candidate, context);
-      await this.releaseBinding(key);
-      return this.spooled(binding, pending.sequence);
-    }
-    const previous = await this.binding(key);
+    const pendingBinding = pending ? this.validated(pending) : null;
+    const previous = pendingBinding ?? await this.binding(key);
     const binding = await this.admitBinding(params, previous, candidate, context);
+    if (pendingBinding) await this.releaseBinding(key);
     const metadata = lineageMetadata(params);
     // A lineage admission is never spooled, so its stored row is its only record: it writes no delivery reservation.
     const bound = !previous && !metadata;
@@ -680,15 +677,15 @@ export class Runtime {
       return { state: "quarantined", ...identity, reason: "spool_corrupt" };
     }
     const entry = await this.pendingEntry(identity.revision_key);
-    if (!entry) {
-      await this.binding(identity.revision_key);
-      return unknown();
+    if (!entry) return unknown();
+    const quarantined = this.quarantined.get(entry.sequence);
+    if (quarantined) {
+      await this.releaseBinding(identity.revision_key);
+      return { state: "quarantined", ...identity, reason: quarantined };
     }
     const binding = this.validated(entry);
     await this.releaseBinding(identity.revision_key);
     if (binding.body_digest !== identity.body_digest) return unknown();
-    const quarantined = this.quarantined.get(entry.sequence);
-    if (quarantined) return { state: "quarantined", ...identity, reason: quarantined };
     const reason = this.blocked.get(entry.sequence);
     if (reason) return { ...this.spooled(binding, entry.sequence), state: "blocked", expected_previous_revision_key: entry.predecessor, reason };
     return this.spooled(binding, entry.sequence);
