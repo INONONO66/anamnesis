@@ -26,6 +26,23 @@ test("extraction gate configuration defaults off and validates Jev settings", as
   for (const value of ["-0.1", "1.1", "NaN", ""]) await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_GATE_THRESHOLD: value }), /ANAMNESIS_EXTRACTION_GATE_THRESHOLD/);
 });
 
+test("extraction scope is opt-in and its file is parsed strictly at startup", async () => {
+  assert.equal((await loadProviderConfig({})).scope, undefined);
+  const root = await fs.mkdtemp(join(tmpdir(), "ana-extraction-scope-"));
+  try {
+    const scopeFile = join(root, "scope.json");
+    const scope = { sources: ["omo", "codex"], rooms: [{ source: "kakao", room: "203276098174167" }] };
+    await fs.writeFile(scopeFile, JSON.stringify(scope));
+    assert.deepEqual((await loadProviderConfig({ ANAMNESIS_EXTRACTION_SCOPE_FILE: scopeFile })).scope, scope);
+    for (const invalid of [{ sources: ["omo"] }, { ...scope, rooms: [{ source: "kakao" }] }, { ...scope, extra: true }]) {
+      await fs.writeFile(scopeFile, JSON.stringify(invalid));
+      await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_SCOPE_FILE: scopeFile }), /invalid ANAMNESIS_EXTRACTION_SCOPE_FILE/);
+    }
+    await fs.writeFile(scopeFile, "{");
+    await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_SCOPE_FILE: scopeFile }), /unable to read ANAMNESIS_EXTRACTION_SCOPE_FILE/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("relation prompt override is validated like the extraction prompt", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "ana-relation-prompt-"));
   try {

@@ -20,8 +20,18 @@ import type { ExtractionPipeline } from "@anamnesis/protocol";
 export type ExtractionTurn = "more" | "waiting" | "idle";
 export type ExtractionSchedulerStatus = { state: "starting" } | {
   state: "catching_up" | "active"; generation_id: string; covered_ingest_seq: number; live_ingest_seq: number;
-  in_flight: number; completed_total: number; failed_total: number; gated_total: number; last_error: string | null;
+  in_flight: number; completed_total: number; failed_total: number; gated_total: number; out_of_scope_total: number; last_error: string | null;
 };
+/** The Episodes an installation extracts: every Episode of `sources`, plus the listed rooms of other sources. */
+export interface ExtractionScope {
+  readonly sources: readonly string[];
+  readonly rooms: readonly { readonly source: string; readonly room: string }[];
+}
+/** A room covers its own session and every thread session under it (`room/thread`). */
+function inExtractionScope(scope: ExtractionScope, source: string, session: string): boolean {
+  return scope.sources.includes(source)
+    || scope.rooms.some(room => room.source === source && (session === room.room || session.startsWith(`${room.room}/`)));
+}
 export interface ExtractionSchedulerOptions {
   provider: ExtractionProvider;
   context: InstallationContext;
@@ -33,6 +43,8 @@ export interface ExtractionSchedulerOptions {
   maxInFlight?: number;
   gate?: ExtractionGate | undefined;
   gateThreshold?: number | undefined;
+  /** Absent: every Episode is extracted. Present: an Episode outside it is covered without a provider call. */
+  scope?: ExtractionScope | undefined;
   windowMax?: number;
   contextMax?: number;
   /** First attempt plus retries; a task failing this often is a terminal omission. */
@@ -51,7 +63,7 @@ const LEASE_MS = 90000;
 type Outcome = "completed" | "failed";
 type Known = Extract<ExtractionPipeline, { state: "known" }>;
 type Action = Outcome | "run" | "pending" | "unresolved" | { kind: "retry" | "settle" | "cancel"; task: ModelTask };
-interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null; session: string | null }
+interface ScanRow extends Record<string, unknown> { live: number; id: string | null; seq: number | null; session: string | null; source: string | null; origin_session: string | null }
 type WindowRow = ScanRow & { id: string; seq: number };
 type Driven = { outcome: Outcome; fresh: boolean } | null;
 
@@ -97,6 +109,7 @@ export class ExtractionScheduler {
   private readonly clock: () => number;
   private readonly gate: ExtractionGate | undefined;
   private readonly gateThreshold: number;
+  private readonly scope: ExtractionScope | undefined;
   private readonly windowMax: number;
   private readonly contextMax: number;
   /** work_key -> settlement; a drive removes itself before waking. */
@@ -108,6 +121,7 @@ export class ExtractionScheduler {
   private completed_total = 0;
   private failed_total = 0;
   private gated_total = 0;
+  private out_of_scope_total = 0;
   /** Oversized windows retry as single targets, including after adopting a persisted failure. */
   private readonly singletons = new Set<string>();
   private readonly rewindow = new Set<string>();
@@ -125,6 +139,7 @@ export class ExtractionScheduler {
     this.clock = options.clock ?? Date.now;
     this.gate = options.gate;
     this.gateThreshold = options.gateThreshold ?? 0.2;
+    this.scope = options.scope;
     this.windowMax = options.windowMax ?? 8;
     this.contextMax = options.contextMax ?? 3;
     if (!Number.isInteger(this.windowMax) || this.windowMax < 1 || this.windowMax > 8) throw new TypeError("windowMax must be 1..8");
@@ -138,7 +153,7 @@ export class ExtractionScheduler {
     if (!this.generation) return { state: "starting" };
     return { state: this.generation.state === "active" ? "active" : "catching_up", generation_id: this.generation.id,
       covered_ingest_seq: this.generation.covered_ingest_seq, live_ingest_seq: this.live, in_flight: this.inFlightCount,
-      completed_total: this.completed_total, failed_total: this.failed_total, gated_total: this.gated_total, last_error: this.last_error };
+      completed_total: this.completed_total, failed_total: this.failed_total, gated_total: this.gated_total, out_of_scope_total: this.out_of_scope_total, last_error: this.last_error };
   }
 
   recordError(error: unknown): void { this.last_error = String(error).slice(0, 512); }
@@ -155,7 +170,8 @@ export class ExtractionScheduler {
     const generation = await this.writableGeneration();
     const rows = await this.read<ScanRow>(`MATCH (m:Meta {key:'meta'})
       OPTIONAL MATCH (e:Element:Episode) WHERE e.ingest_seq > $from AND e.ingest_seq <= m.ingest_seq
-      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,e.session_key AS session ORDER BY seq LIMIT ${COVERAGE_STEP}`,
+      RETURN m.ingest_seq AS live,e.id AS id,e.ingest_seq AS seq,e.session_key AS session,e.origin_source AS source,e.origin_session AS origin_session
+      ORDER BY seq LIMIT ${COVERAGE_STEP}`,
       { from: generation.covered_ingest_seq, generation: generation.id });
     this.live = rows[0]?.live ?? generation.covered_ingest_seq;
     const { prefix, open } = this.scanWindow(generation, rows);
@@ -260,6 +276,7 @@ export class ExtractionScheduler {
       else settled = this.recordOutcome(key, await this.drive(claim, existing === null)) || settled;
     }
     if (!queued.length || this.closed) return settled;
+    if (await this.skipOutOfScope(queued, rows)) return true;
     if (await this.skipWindow(queued)) return true;
     // A byte-bound retry has no context: otherwise a preceding large Episode could make even a small lone target fail forever.
     const context_ids = queued.some(task => this.singletons.has(`${generation.id}:${task.source_id}`))
@@ -280,6 +297,19 @@ export class ExtractionScheduler {
       RETURN e.id AS id ORDER BY e.ingest_seq DESC LIMIT toInteger($limit)`,
     { session: first.session, before: first.seq, targets: rows.map(row => row.id), limit: this.contextMax });
     return preceding.map(row => row.id).reverse();
+  }
+
+  /** A window is one session, so it is in or out of scope whole. Out of scope, each claim is cancelled with a
+   * content-free reason: the same terminal, coverable outcome the gate produces, without reading text or calling a model. */
+  private async skipOutOfScope(tasks: ModelTask[], rows: WindowRow[]): Promise<boolean> {
+    const first = rows[0];
+    if (!this.scope || !first || (first.source !== null && first.origin_session !== null && inExtractionScope(this.scope, first.source, first.origin_session))) return false;
+    for (const task of tasks) {
+      await this.engine.store.cancelModelTask({ task_id: task.id, expected_version: task.version, reason: "out_of_scope" }, this.context);
+      this.outcomes.set(`${task.generation_id}:${task.source_id}`, "failed");
+      this.out_of_scope_total++;
+    }
+    return true;
   }
 
   private async skipWindow(tasks: ModelTask[]): Promise<boolean> {

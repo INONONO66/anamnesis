@@ -33,7 +33,7 @@ function generation(state: Generation["state"], covered_ingest_seq = 0): Generat
   return { id: GEN, stream: "extraction", incarnation: HEX, state, covered_ingest_seq, created_at: 0, updated_at: 0 };
 }
 
-interface Episode { id: string; seq: number; session: string; task?: ModelTask }
+interface Episode { id: string; seq: number; session: string; task?: ModelTask; source?: string; origin?: string }
 
 class Harness {
   readonly calls: string[] = [];
@@ -162,7 +162,7 @@ class Harness {
     else {
       const from = Number(params.from);
       rows = this.episodes.filter(e => e.seq > from && e.seq <= this.live).sort((a, b) => a.seq - b.seq).slice(0, WINDOW)
-        .map(e => ({ live: this.live, id: e.id, seq: e.seq, session: e.session }));
+        .map(e => ({ live: this.live, id: e.id, seq: e.seq, session: e.session, source: e.source ?? "omo", origin_session: e.origin ?? e.session }));
       if (rows.length === 0) rows = [{ live: this.live, id: null, seq: null }];
     }
     // The daemon's reader is generic over the row shape; the scripted rows carry exactly the columns each query names.
@@ -476,6 +476,30 @@ test("a low gate verdict cancels every target with its score without counting pr
   expect(scheduler.status()).toMatchObject({ gated_total: 2, failed_total: 0 });
   await scheduler.turn();
   expect(scheduler.status()).toMatchObject({ covered_ingest_seq: 2 });
+});
+
+test("an out-of-scope session is cancelled as out_of_scope without a window, while listed sources and rooms extract", async () => {
+  const h = new Harness();
+  h.catchingUp = [generation("catching_up")];
+  const sessions: [string, string, string][] = [
+    ["agent", "omo", "session-1"], ["thread", "kakao", "room-1/thread-9"], ["thread", "kakao", "room-1/thread-9"],
+    ["room", "slack", "room-1"], ["other", "kakao", "room-2"], ["prefix", "kakao", "room-10"],
+  ];
+  const outside = new Set([4, 5, 6]);
+  for (const [index, [session, source, origin]] of sessions.entries()) {
+    const seq = index + 1, episode = h.episode(seq), claim = task(uuid(2150 + seq), "queued");
+    Object.assign(episode, { session, source, origin });
+    h.script(episode, known(claim), outside.has(seq) ? known({ ...claim, state: "cancelled", attempt_id: uuid(800) }) : done(claim));
+  }
+  const scheduler = h.scheduler({ maxInFlight: 8, scope: { sources: ["omo"], rooms: [{ source: "kakao", room: "room-1" }] } });
+  await scheduler.turn();
+  await driven(scheduler);
+  expect([...h.windows].sort((a, b) => String(a[0]).localeCompare(String(b[0])))).toEqual([[uuid(2151)], [uuid(2152), uuid(2153)]]);
+  expect([...h.cancellations].sort((a, b) => a.task_id.localeCompare(b.task_id)))
+    .toEqual([4, 5, 6].map(seq => ({ task_id: uuid(2150 + seq), expected_version: 3, reason: "out_of_scope" })));
+  expect(scheduler.status()).toMatchObject({ completed_total: 3, out_of_scope_total: 3, gated_total: 0, failed_total: 0 });
+  await scheduler.turn();
+  expect(scheduler.status()).toMatchObject({ covered_ingest_seq: 6 });
 });
 
 test("a failing gate leaves extraction enabled and records its failure", async () => {

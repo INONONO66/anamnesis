@@ -15,7 +15,7 @@ const policy = z.strictObject({ revision: timestamp, authority: z.literal("insta
 const disposition = z.enum(["retain", "suppress", "correct", "unknown"]);
 const modality = z.enum(["text", "code", "mixed", "unknown"]);
 const terminal = z.enum(["succeeded", "failed", "cancelled", "expired", "worker_lost"]);
-export const ExtractionFailure = z.enum(["provider_unavailable", "provider_rejected", "provider_mismatch", "output_too_large", "input_too_large", "policy_denied", "cancelled", "gate_skipped", "expired", "worker_lost", "premises_changed"]);
+export const ExtractionFailure = z.enum(["provider_unavailable", "provider_rejected", "provider_mismatch", "output_too_large", "input_too_large", "policy_denied", "cancelled", "gate_skipped", "out_of_scope", "expired", "worker_lost", "premises_changed"]);
 /** Which check a `provider_mismatch` failed (#218): the response envelope, its JSON content, the model/incarnation the
  * upstream reported, output normalization, evidence span verification, the judge's decision shape or a premise digest. */
 export const ExtractionFailureDetail = z.enum(["model", "incarnation", "envelope", "json", "normalize", "span", "judge_shape", "window_shape", "digest"]);
@@ -87,7 +87,7 @@ export const ExtractionAttempt = z.strictObject({
   if (v.state === "succeeded") {
     if (!v.output || v.reason !== null || v.disposition === null || !v.lease || v.detail !== undefined || canonicalExtractionBody(v.spans) !== canonicalExtractionBody(v.output.spans)) ctx.addIssue({ code: "custom", message: "invalid success" });
   } else if (v.output !== null || v.spans.length || v.disposition !== null || v.reason === null || v.reported_model !== undefined) ctx.addIssue({ code: "custom", message: "non-success must be content-free" });
-  if (["cancelled", "expired", "worker_lost"].includes(v.state) && v.reason !== v.state && !(v.state === "cancelled" && (v.reason === "policy_denied" || v.reason === "gate_skipped"))) ctx.addIssue({ code: "custom", message: "outcome/reason mismatch" });
+  if (["cancelled", "expired", "worker_lost"].includes(v.state) && v.reason !== v.state && !(v.state === "cancelled" && (v.reason === "policy_denied" || v.reason === "gate_skipped" || v.reason === "out_of_scope"))) ctx.addIssue({ code: "custom", message: "outcome/reason mismatch" });
 });
 export type ExtractionAttempt = z.infer<typeof ExtractionAttempt>;
 

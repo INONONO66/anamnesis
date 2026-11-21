@@ -19,7 +19,7 @@ import { StoreCore, type StoreOptions } from "./store/core.ts";
 import { ReceiptStore } from "./store/receipt-store.ts";
 import { ConductingStore } from "./store/conducting-store.ts";
 import { ElementStore } from "./store/element-store.ts";
-import { EmbeddingStore } from "./store/embedding-store.ts";
+import { EmbeddingStore, type EmbeddingDrain } from "./store/embedding-store.ts";
 import { ExtractionStore } from "./store/extraction-store.ts";
 import { MaterializationStore } from "./store/materialization-store.ts";
 import { RecallStore } from "./store/recall-store.ts";
@@ -323,8 +323,17 @@ export class Store {
   }
 
   /** Drain missing vectors and due deferrals within a bounded batch. */
-  drainEmbeddingOutbox(limit?: number, context?: InstallationContext): Promise<{ drained: number; quarantined: number; deferred: number; deferral_reason: string | null } | { drained: 0; reason: "embeddings_disabled" }> {
+  drainEmbeddingOutbox(limit?: number, context?: InstallationContext): Promise<EmbeddingDrain | { drained: 0; reason: "embeddings_disabled" }> {
     return this.embeddings.drainEmbeddingOutbox(limit, context);
+  }
+
+  /** The outbox's next Facts without a provider call; null when embeddings are not configured. */
+  dueEmbeddings(limit?: number): Promise<string[] | null> {
+    return this.embeddings.dueEmbeddings(limit);
+  }
+
+  embedOutbox(ids: readonly string[], context?: InstallationContext): Promise<EmbeddingDrain> {
+    return this.embeddings.embedOutbox(ids, context);
   }
 
   verify(): Promise<IntegrityIssue[]> {

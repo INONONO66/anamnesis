@@ -425,16 +425,20 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   expect((await empty.status(0, false)).workers.embedding).toMatchObject({ pending: 0, drained_total: 0 });
   await shutdown(empty);
   const factId = await seedFact(installation.root);
-  const runtime = await withEnv(env, () => Runtime.create(installation, lane => { lanes.push(lane); }));
+  let embeddingWoken = () => {};
+  const runtime = await withEnv(env, () => Runtime.create(installation, lane => { lanes.push(lane); if (lane === "embedding") embeddingWoken(); }));
   opened.push(runtime);
   expect(runtime.capabilities).toMatchObject({ extraction: true, embeddings: true });
   await runtime.init();
   expect([...lanes].sort()).toEqual(["embedding", "extraction", "spool"]);
-  expect(await runtime.embeddingTurn()).toBe("more");
+  // The turn only finds the batch; its provider call runs outside the turn and the batch's end wakes the lane.
+  const batchEnded = new Promise<void>(resolve => { embeddingWoken = resolve; });
+  expect(await runtime.embeddingTurn()).toBe("waiting");
+  await batchEnded;
   expect(await runtime.extractionTurn()).toBe("waiting");
 
   const committed = asCommitted(await runtime.remember(delivery({ record: "embedded" })));
-  expect(lanes.slice(3).sort()).toEqual(["embedding", "extraction"]);
+  expect(lanes.slice(4).sort()).toEqual(["embedding", "extraction"]);
   const deferred = await runtime.status(0, false);
   expect(deferred.workers.embedding).toMatchObject({ pending: 1, drained_total: 0, quarantined_total: 0 });
   expect(deferred.workers.embedding.last_error).toContain("deferred");
