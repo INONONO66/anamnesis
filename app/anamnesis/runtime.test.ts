@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { Engine, type InstallationContext } from "@anamnesis/core";
+import { DurableSpool, Engine, type InstallationContext } from "@anamnesis/core";
 import { extractionBodyDigest, type RpcRememberParams } from "@anamnesis/protocol";
 import { fakeAuthorityAdapter, sha256 } from "./authority-adapter.fixture.ts";
 import type { Installation } from "./config.ts";
@@ -162,6 +162,24 @@ afterEach(async () => {
   if (failure) throw failure.reason;
 });
 afterAll(async () => { await admin?.close(); });
+
+test("remember skips an empty spool scan but finds a pending re-delivery", async () => {
+  const page = spyOn(DurableSpool.prototype, "page");
+  try {
+    const installation = installationAt(await freshRoot());
+    const runtime = await withEnv({ ...dbEnv(DEAD_URI), ANAMNESIS_NEO4J_PASSWORD: "test-password" }, async () => new Runtime(installation));
+    opened.push(runtime);
+    await runtime.init();
+    const params = delivery({ record: "pending-redelivery" });
+
+    const spooled = await runtime.remember(params);
+    expect(spooled).toMatchObject({ state: "spooled", spool_seq: 1 });
+    expect(page).toHaveBeenCalledTimes(0);
+
+    expect(await runtime.remember(params)).toEqual(spooled);
+    expect(page).toHaveBeenCalledTimes(1);
+  } finally { page.mockRestore(); }
+});
 
 dbTest("a live boot reports ready, commits deliveries once, and answers re-deliveries and ingest status from the store", async () => {
   const installation = installationAt(await freshRoot());

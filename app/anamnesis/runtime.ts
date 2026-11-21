@@ -231,9 +231,11 @@ export class Runtime {
     catch (error) { logEvent("error", "delivery_reservation_cleanup_failed", { revision_key: key, error: String(error) }); }
   }
   private async pendingEntry(revision: string): Promise<SpoolEntry | null> {
+    const status = await this.spool.status();
+    if (status.pending === 0) return null;
     // Snapshot the admitted cohort rather than using an unbounded sentinel. The
     // page cursor then gives deterministic continuation without materializing the journal.
-    const cohort = (await this.spool.status()).nextSequence - 1;
+    const cohort = status.nextSequence - 1;
     const lookup = this.findPending(revision, cohort);
     let step = await lookup.next();
     while (!step.done) step = await lookup.next();
