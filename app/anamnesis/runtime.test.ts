@@ -1,6 +1,9 @@
 import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
@@ -460,6 +463,49 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   await bumpWriterEpoch();
   await expect(runtime.embeddingTurn()).rejects.toMatchObject({ code: "ownership_lost" });
   await expect(runtime.extractionTurn()).rejects.toMatchObject({ code: "ownership_lost" });
+});
+
+dbTest("Runtime.create keeps providers wired while the extraction lane is off", async () => {
+  const installation = installationAt(await freshRoot());
+  const keyFile = join(installation.root, "llm-key.json");
+  await writeFile(keyFile, JSON.stringify({ bearer: "fixture-bearer" }));
+  let requests = 0;
+  const provider = createServer((_request, response) => {
+    requests++;
+    response.end("{}");
+  });
+  const listening = once(provider, "listening");
+  provider.listen(0, "127.0.0.1");
+  await listening;
+  try {
+    const port = (provider.address() as AddressInfo).port;
+    const lanes: BackgroundLane[] = [];
+    const env = {
+      ...dbEnv(TEST_DB.uri),
+      ANAMNESIS_LLM_BASE_URL: `http://127.0.0.1:${port}`,
+      ANAMNESIS_LLM_API_KEY_FILE: keyFile,
+      ANAMNESIS_LLM_MODEL: "fixture-chat",
+      ANAMNESIS_EMBEDDING_BASE_URL: "http://127.0.0.1:1",
+      ANAMNESIS_EMBEDDING_MODEL: "fixture-embedding",
+      ANAMNESIS_EMBEDDING_DIMENSIONS: "3",
+      ANAMNESIS_EXTRACTION_LANE: "off",
+    };
+    const runtime = await withEnv(env, () => Runtime.create(installation, lane => { lanes.push(lane); }));
+    opened.push(runtime);
+    expect(runtime.capabilities).toMatchObject({ extraction: false, embeddings: true });
+    await runtime.init();
+    expect([...lanes].sort()).toEqual(["embedding", "spool"]);
+    expect((await runtime.status(0, false)).workers.extraction).toEqual({ state: "unconfigured" });
+    expect(await runtime.extractionTurn()).toBe("stalled");
+    expect(requests).toBe(0);
+    await runtime.remember(delivery({ record: "lane-off" }));
+    expect(lanes.filter(lane => lane === "extraction")).toEqual([]);
+    await expect(runtime.createExtractionPipeline({ id: uuidv7(), generation_id: uuidv7(), source_id: uuidv7() }, receiptContext))
+      .rejects.toMatchObject({ code: "extraction_not_configured" });
+  } finally {
+    provider.close();
+    await once(provider, "close");
+  }
 });
 
 dbTest("storage-backed RPCs pass through to the engine under the caller's custody", async () => {

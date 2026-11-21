@@ -15,7 +15,15 @@ test("provider defaults leave endpoints opt-in and load the bundled prompts", as
   assert.equal(config.relationPromptFile, DEFAULT_RELATION_PROMPT_FILE);
   assert.equal(config.relationPrompt, await fs.readFile(DEFAULT_RELATION_PROMPT_FILE, "utf8"));
   assert.match(config.relationPrompt, /judge_relations/);
+  assert.equal(config.extractionLane, "on");
   assert.deepEqual(config.gate, { kind: "off" });
+});
+
+test("extraction lane defaults on and accepts only on or off", async () => {
+  assert.equal((await loadProviderConfig({})).extractionLane, "on");
+  assert.equal((await loadProviderConfig({ ANAMNESIS_EXTRACTION_LANE: "on" })).extractionLane, "on");
+  assert.equal((await loadProviderConfig({ ANAMNESIS_EXTRACTION_LANE: "off" })).extractionLane, "off");
+  for (const value of ["", "disabled", "ON"]) await assert.rejects(loadProviderConfig({ ANAMNESIS_EXTRACTION_LANE: value }), /ANAMNESIS_EXTRACTION_LANE/);
 });
 
 test("extraction gate configuration defaults off and validates Jev settings", async () => {
