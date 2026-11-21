@@ -7,6 +7,7 @@ import { connect } from "node:net";
 import neo4j, { type RecordShape, type Record as Neo4jRecord } from "neo4j-driver";
 import { Engine } from "../../packages/core/src/engine.ts";
 import { RpcResponse, RPC_METHODS, RpcPolicySetParams, type RpcErrorCode, type RpcRememberResult } from "../../packages/protocol/src/rpc.ts";
+import { NON_IDENTITY_GRAPH_SNAPSHOT_QUERY } from "./graph-snapshot.ts";
 
 const uuidv7 = () => Bun.randomUUIDv7();
 const uri = process.env["ANAMNESIS_TEST_NEO4J_URI"];
@@ -56,10 +57,7 @@ function admin() {
     return (await driver.executeQuery<Row>(cypher, params)).records.map((row: Neo4jRecord<Row>) => row.toObject());
   } };
 }
-const snapshotQuery = `MATCH (n) OPTIONAL MATCH (n)-[r]->(target)
-  WITH n,r,target ORDER BY elementId(r)
-  WITH n,collect({id:elementId(r),type:type(r),target:elementId(target),props:properties(r)}) AS edges
-  RETURN elementId(n) AS id,labels(n) AS labels,properties(n) AS props,edges ORDER BY id`;
+const snapshotQuery = NON_IDENTITY_GRAPH_SNAPSHOT_QUERY;
 
 // Regression of the exact original unsupported_policy RED, without fabricating
 // revision zero: initialization must now establish and retain real authority.

@@ -9,6 +9,7 @@ import neo4j from 'neo4j-driver';
 import { Engine } from '../../packages/core/src/engine.ts';
 import { canonicalExtractionBody } from '../../packages/protocol/src/extraction.ts';
 import { validateSemanticClaim } from '../../packages/protocol/src/semantic-claim.ts';
+import { NON_IDENTITY_GRAPH_EDGES_QUERY, NON_IDENTITY_GRAPH_NODES_QUERY } from './graph-snapshot.ts';
 const uuid = () => `01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 const hash = text => createHash('sha256').update(text).digest('hex');
 const context = { principal: 'installation', commit_mode: 'receipt' };
@@ -87,8 +88,8 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     properties: { z: 1, a: 2 }, mass: 0.5, time: { value: '2026-09-01T00:00:00Z', precision: 'second' },
     origin: { source: root, session: root, actor: 'assistant', record } }, source_revision: record, expected_previous_revision_key: null });
   const coreInput = p => ({ ...p.episode, source_revision: p.source_revision, expected_previous_revision_key: p.expected_previous_revision_key });
-  const nodes = () => query('MATCH (n) RETURN elementId(n) AS identity,labels(n) AS labels,properties(n) AS props ORDER BY identity');
-  const edges = () => query('MATCH (a)-[r]->(b) RETURN elementId(r) AS identity,elementId(a) AS a,elementId(b) AS b,type(r) AS type,properties(r) AS props ORDER BY identity');
+  const nodes = () => query(NON_IDENTITY_GRAPH_NODES_QUERY);
+  const edges = () => query(NON_IDENTITY_GRAPH_EDGES_QUERY);
   const snapshot = async () => ({ nodes: await nodes(), edges: await edges() });
   let runtime;
   try {
