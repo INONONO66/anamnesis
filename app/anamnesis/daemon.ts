@@ -296,7 +296,7 @@ export async function foreground(): Promise<void> {
   const server = createServer(accept("uds"));
   const tcpServer = listen ? createServer(accept("tcp")) : undefined;
   const listeners = tcpServer ? [server, tcpServer] : [server];
-  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" | "spaces.import" | "spaces.list" | "spaces.rebuild" | "replies.rebuild" | "identity.status" | "identity.rebuild" | "identity.correct" | "identity.directory" | "people.list" | "people.show" }>): unknown {
+  function maintenance(runtime: Runtime, connection: Connection, request: Extract<RpcRequest, { method: "object.begin" | "object.chunk" | "object.commit" | "extraction.audit.create" | "extraction.audit.run" | "extraction.audit.status" | "embedding.recover" | "embedding.status" | "embedding.requeue" | "backup" | "restore" | "backup.status" | "restore.status" | "hit-cache.verify" | "hit-cache.rebuild" | "spaces.import" | "spaces.list" | "spaces.rebuild" | "replies.rebuild" }>): unknown {
     switch (request.method) {
       case "object.begin": return runtime.uploads.begin(connection, { hash: request.params.sha256, size: request.params.size, media_type: request.params.media_type });
       case "object.chunk": return runtime.uploads.chunk(connection, request.params.upload_id, request.params.seq, Buffer.from(request.params.bytes_b64, "base64"));
@@ -317,6 +317,10 @@ export async function foreground(): Promise<void> {
       case "spaces.list": return runtime.listSpaces(request.params);
       case "spaces.rebuild": return runtime.rebuildEpisodeDerived(request.params, "labels");
       case "replies.rebuild": return runtime.rebuildEpisodeDerived(request.params, "replies");
+    }
+  }
+  function identity(runtime: Runtime, request: Extract<RpcRequest, { method: "identity.status" | "identity.rebuild" | "identity.correct" | "identity.directory" | "people.list" | "people.show" }>): unknown {
+    switch (request.method) {
       case "identity.status": return runtime.identityStatus();
       case "identity.rebuild": return runtime.rebuildIdentity(request.params);
       case "identity.correct": return runtime.correctIdentity(request.params);
@@ -356,6 +360,12 @@ export async function foreground(): Promise<void> {
       case "policy.revoke":
         await cancelPublications();
         return runtime.revokePolicy(request.params, connection.context!);
+      case "identity.status":
+      case "identity.rebuild":
+      case "identity.correct":
+      case "identity.directory":
+      case "people.list":
+      case "people.show": return identity(runtime, request);
       case "shutdown":
         stopping = true;
         setImmediate(() => { void stop().catch(logError); });
