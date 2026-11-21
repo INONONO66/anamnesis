@@ -65,22 +65,21 @@ export class ConductingStore {
   /** Called only for a newly created physical link, inside its writer transaction.
    * Duplicates do not rewrite, repair, or replace either cache or coverage rows. */
   async appendConductingTx(tx: ManagedTransaction, role: LinkRole, id: string): Promise<void> {
-    const result = await tx.run<PhysicalConductor>(`MATCH (a)-[l:${role}]->(b) WHERE l.id=$id
+    // One round trip reads the link, its partition's coverage row and whether another conducting role reuses the id:
+    // per-role seeks reject cross-role identity reuse (even disjoint endpoints).
+    const collisions = CONDUCTING_ROLES.filter(other => other !== role).map(other => `EXISTS { MATCH ()-[x:${other}]->() WHERE x.id=$id }`);
+    const result = await tx.run<PhysicalConductor & { collision: boolean; covered: boolean; coverage: string | null }>(`MATCH (a)-[l:${role}]->(b) WHERE l.id=$id
       OPTIONAL MATCH (g:Generation {stream:'community',generation:l.generation})
+      OPTIONAL MATCH (c:ConductingArcCoverage {stream:$stream,generation:coalesce(l.generation,0)})
       RETURN a.id AS source_id,b.id AS peer_id,l.id AS link_id,type(l) AS role,l.generation AS generation,
         CASE WHEN type(l)='HAS_MEMBER' THEN coalesce(g.source_extraction_generation,a.source_extraction_generation) ELSE null END AS source_extraction_generation,
-        a.id AS from,b.id AS to,g.source_extraction_generation AS registry_source`, { id });
-    const link = result.records[0]!.toObject();
+        a.id AS from,b.id AS to,g.source_extraction_generation AS registry_source,
+        ${collisions.join(" OR ")} AS collision, c IS NOT NULL AS covered, c.state AS coverage`, { id, stream: conductingPartition(role, null).stream });
+    const { collision, covered, coverage, ...link } = result.records[0]!.toObject();
     if (role === "HAS_MEMBER" && link.source_extraction_generation === null) throw new Error("conducting_source_generation_missing");
-    // Per-role seeks also reject cross-role identity reuse (even disjoint endpoints).
-    for (const other of CONDUCTING_ROLES) {
-      if (other === role) continue;
-      const collision = await tx.run(`MATCH ()-[l:${other}]->() WHERE l.id=$id RETURN l.id LIMIT 1`, { id });
-      if (collision.records.length) throw new Error("conducting_link_id_collision");
-    }
+    if (collision) throw new Error("conducting_link_id_collision");
     const partition = conductingPartition(role, link.generation);
-    const coverage = await tx.run(`MATCH (c:ConductingArcCoverage {stream:$stream,generation:$generation}) RETURN c.state AS state`, partition);
-    if (!coverage.records.length) {
+    if (!covered) {
       // A missing partition is empty only if this is its first retained link.
       // Never infer that fact from the serving selector, policy or the ready bit.
       const peers = await tx.run(`MATCH ()-[l]->() WHERE type(l) IN $roles
@@ -92,13 +91,13 @@ export class ConductingStore {
         ...partition, state: peers.records.length ? "UNAVAILABLE" : "COMPLETE",
       });
       if (peers.records.length) await this.invalidateConductingTx(tx);
-    } else if (coverage.records[0]!.get("state") !== "COMPLETE") {
+    } else if (coverage !== "COMPLETE") {
       await this.invalidateConductingTx(tx);
     }
     const rows = [...new Set([link.from,link.to])].map(source => ({ source_id:source,peer_id:source === link.from ? link.to : link.from,
       link_id:link.link_id,role:link.role,generation:link.generation,source_extraction_generation:link.source_extraction_generation }));
-    await tx.run(`UNWIND $rows AS row CREATE (a:ConductingArc) SET a=row`, { rows });
-    await this.conductingRevisionTx(tx);
+    await tx.run(`UNWIND $rows AS row CREATE (a:ConductingArc) SET a=row
+      WITH count(a) AS arcs MATCH (m:Meta {key:'meta'}) SET m.conducting_arc_revision=coalesce(m.conducting_arc_revision,0)+1`, { rows });
   }
   /** The only supported physical deletion today is topology replacement.
    * Future generation deletion/GC must use the same endpoint + HubArc removal

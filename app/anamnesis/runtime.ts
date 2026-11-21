@@ -46,14 +46,14 @@ const Binding = { parse(value: unknown): Binding {
   return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
 } };
 function digest(params: RpcRememberParams): string { return sha(canonical({ digest_version: 1, params })); }
-interface StoredEpisode {
+type StoredEpisode = {
   id: string; schema: string; time_value: string; time_precision: string;
   content: string; mass: number; properties: string;
   origin_source: string; origin_session: string; origin_actor: string; origin_record: string;
   source_revision: string; previous_revision_key?: string; payload_hash?: string;
   ingest_seq: number; digest: string; digest_format?: string;
   episode_digest_version?: number; origin_role?: string; lineage_digest?: string;
-}
+};
 function lineageMetadata(params: RpcRememberParams) {
   return params.origin_role !== undefined || params.lineage_mode !== undefined || params.parent_recall_ids !== undefined
     ? { origin_role: params.origin_role, lineage_mode: params.lineage_mode, parent_recall_ids: params.parent_recall_ids } : undefined;
@@ -173,8 +173,8 @@ export class Runtime {
   async refresh(): Promise<void> {
     await this.installation.assertOwned();
     try {
-      await this.read("RETURN 1 AS connected");
-      if (!this.initialized) { await runtimeTimed("engine.init", () => this.engine.init()); this.initialized = true; }
+      // Once initialized, the writer-epoch read below doubles as the connectivity probe.
+      if (!this.initialized) { await this.read("RETURN 1 AS connected"); await runtimeTimed("engine.init", () => this.engine.init()); this.initialized = true; }
       if (this.epoch === undefined) this.epoch = await runtimeTimed("engine.claimWriterEpoch", () => this.engine.claimWriterEpoch());
       const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
       if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
@@ -244,12 +244,9 @@ export class Runtime {
     }
     return binding;
   }
-  /** The retained lineage of a v2 Episode, verified against its stored digests, as the remember metadata it implies. */
-  private async retainedLineage(row: StoredEpisode, binding: Binding): Promise<{ origin_role: StoredEpisode["origin_role"]; lineage_mode: EchoLineage["lineage_mode"]; parent_recall_ids: EchoLineage["parent_recall_ids"] }> {
-    const retained = (await this.read<{ props: Record<string, unknown> }>(
-      "MATCH (e:Element:Episode {id:$id}) RETURN properties(e) AS props", { id: row.id }))[0];
-    if (!retained) throw new RpcFault("lineage_unavailable", "retained lineage missing");
-    const lineage = verifyEpisodeLineage(row.id, row.lineage_digest ?? null, retained.props);
+  /** The retained lineage of a v2 Episode row, verified against its stored digests, as the remember metadata it implies. */
+  private retainedLineage(row: StoredEpisode, binding: Binding): { origin_role: StoredEpisode["origin_role"]; lineage_mode: EchoLineage["lineage_mode"]; parent_recall_ids: EchoLineage["parent_recall_ids"] } {
+    const lineage = verifyEpisodeLineage(row.id, row.lineage_digest ?? null, row);
     verifyLineageRetry(lineageMetadata(binding.params), row.origin_role ?? null, lineage);
     return { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids };
   }
@@ -260,7 +257,7 @@ export class Runtime {
       throw new RpcFault("unsupported_digest_version", "stored Episode version is unsupported");
     if (row.episode_digest_version !== 2 && row.digest_format !== undefined && row.digest_format !== "rfc8785-v1")
       throw new RpcFault("unsupported_digest_version", "stored digest format is unsupported");
-    const metadata = row.episode_digest_version === 2 ? await this.retainedLineage(row, binding) : undefined;
+    const metadata = row.episode_digest_version === 2 ? this.retainedLineage(row, binding) : undefined;
     const params = RpcRememberParams.parse({ episode: {
       schema: row.schema, time: { value: row.time_value, precision: row.time_precision },
       content: row.content, mass: row.mass, properties: JSON.parse(row.properties),
@@ -280,8 +277,6 @@ export class Runtime {
   }
   private async write(binding: Binding, context?: InstallationContext): Promise<RpcCommittedResult> {
     const params = binding.params;
-    const existing = await this.committed(binding);
-    if (existing) return existing;
     let payload: { payload: Uint8Array<ArrayBuffer>; payload_media_type: string } | undefined;
     if (params.payload_hash) {
       const metadata = await this.uploads.metadata(params.payload_hash);
@@ -293,7 +288,10 @@ export class Runtime {
     if (metadata && !context) throw new RpcFault("lineage_binding_mismatch", "new lineage requires authenticated connection custody");
     const result = await runtimeTimed("engine.remember", () => this.engine.remember({ ...params.episode, source_revision: params.source_revision,
       expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, metadata ? { metadata, context: context! } : undefined));
-    const committed = await this.committed(binding, result.created);
+    // A created Episode is answered from the engine's own commit; a revision the engine found stored is re-read and verified.
+    const committed = result.created && result.ingest_seq !== undefined
+      ? { state: "committed" as const, ...this.identity(binding), id: result.id, created: true, ingest_seq: result.ingest_seq }
+      : await this.committed(binding, result.created);
     if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
     if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); } // Direct and spool-drained commits alike enqueue worker work.
     return committed;

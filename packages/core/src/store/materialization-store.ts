@@ -293,10 +293,10 @@ export class MaterializationStore {
     const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated, relations } = input;
     const claim = validated.claim, { fact_id, link_id } = allocated;
     const merged = await tx.run<{ id: string }>(`MERGE (f:Fact {generation:$generation,meaning_digest:$meaning,primary_episode_id:$source})
-      ON CREATE SET f.id=$id RETURN f.id AS id`, { generation, meaning: validated.meaning_digest, source: source.id, id: fact_id });
+      ON CREATE SET f.id=$id, f:Element RETURN f.id AS id`, { generation, meaning: validated.meaning_digest, source: source.id, id: fact_id });
     const retainedId = z.uuidv7().parse(merged.records[0]?.get("id"));
     if (retainedId !== fact_id) {
-      const evidence = await tx.run<{ id: string }>(`MATCH (:Fact {id:$fact})-[l:DERIVED_FROM]->(:Episode {id:$source}) RETURN l.id AS id`, { fact: retainedId, source: source.id });
+      const evidence = await tx.run<{ id: string }>(`MATCH (:Element:Fact {id:$fact})-[l:DERIVED_FROM]->(:Element:Episode {id:$source}) RETURN l.id AS id`, { fact: retainedId, source: source.id });
       const result = MaterializationResult.parse({ created: false, fact_id: retainedId, link_id: evidence.records[0]?.get("id") });
       await this.recordMaterialization(input, result, [retainedId]);
       return result;
@@ -308,7 +308,7 @@ export class MaterializationStore {
         confidence: claim.confidence, content_language: claim.content_language, semantic_time: claim.time,
         time_basis: inherited ? "episode_fallback" : "claim" } });
     await this.elements.createElementTx(tx, element, null, { existingFact: true });
-    await tx.run(`MATCH (f:Fact {id:$id}) SET f.generation=$generation,f.content_language=$language,f.sub_kind=$subkind,f.modality=$modality,
+    await tx.run(`MATCH (f:Element:Fact {id:$id}) SET f.generation=$generation,f.content_language=$language,f.sub_kind=$subkind,f.modality=$modality,
       f.confidence=$confidence,f.meaning_digest=$meaning,f.primary_episode_id=$source,f.source_episode_ids=$sources,f.max_source_ingest_seq=$seq,
       f.echo_state=$echo,f.echo_depth=$depth,f.echo_lineage_truncated=false,f.parent_recall_ids=$parents,f.corroboration_root_episode_ids=$roots,
       f.entity_ids=$entities,f.support_fact_ids=[],f.proposal_id=$proposal,f.policy_revision=$policy,f.semantic_profile_id=$profile`,
@@ -325,12 +325,12 @@ export class MaterializationStore {
       await this.elements.createElementTx(tx, MemoryElement.parse({ id: entity.entity_id, schema: SCHEMA_ID.ENTITY, content: entity.normalized_name,
         origin: { source: "semantic-extraction", session: generation, actor: profile, record: entity.entity_key },
         properties: { normalized_name: entity.normalized_name, entity_kind: entity.entity_kind, entity_key: entity.entity_key } }), null, {});
-      await tx.run(`MATCH (e:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entity.entity_id, generation, key: entity.entity_key });
+      await tx.run(`MATCH (e:Element:Entity {id:$id}) SET e.generation=$generation,e.entity_key=$key`, { id: entity.entity_id, generation, key: entity.entity_key });
       createdEntities.add(entity.entity_id);
     }
     for (const [i, entity] of validated.identity.entity_ids.entries()) {
       await this.elements.mergeLinkTx(tx, MemoryLink.parse({ id: allocated.mention_ids[i], from: fact_id, to: entity, role: "MENTIONS", content: "semantic entity mention", weight: 1 }));
-      await tx.run(`MATCH (e:Entity {id:$entity})
+      await tx.run(`MATCH (e:Element:Entity {id:$entity})
         SET e.witness_generation=$generation,e.witness_policy_revision=$policy`, { entity, generation, policy: neo4j.int(policy) });
     }
     const result = MaterializationResult.parse({ created: true, fact_id, link_id, ...(relations ? { relations } : {}) });

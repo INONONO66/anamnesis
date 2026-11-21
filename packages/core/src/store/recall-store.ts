@@ -178,7 +178,7 @@ export class RecallStore {
     const factItem = async (node: ElementNode): Promise<RpcRecallItem | null> => {
       const id = String(node.properties["id"]), cached = factItems.get(id);
       if (cached) return cached;
-      const sourceRows = await tx.run(`MATCH (f:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode)
+      const sourceRows = await tx.run(`MATCH (f:Element:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode)
         WHERE ${FACT_VALID} AND ${RECALL_ALLOWED} RETURN e.id AS source ORDER BY e.id LIMIT 2`, { ...scope, id });
       const sourceId = sourceRows.records[0]?.get("source");
       if (typeof sourceId !== "string") return null;
@@ -203,7 +203,7 @@ export class RecallStore {
     };
     for (const [id, node] of derivedNodes) {
       const item = await factItem(node); if (!item) continue;
-      const peers = await tx.run<{ other: ElementNode }>(`MATCH (f:Fact {id:$id})-[:CONTRASTS]-(other:Fact {generation:$generation})
+      const peers = await tx.run<{ other: ElementNode }>(`MATCH (f:Element:Fact {id:$id})-[:CONTRASTS]-(other:Fact {generation:$generation})
         WHERE other.time_utc <= $T RETURN DISTINCT other ORDER BY other.id LIMIT 4`, { id, generation, T: scope.T });
       for (const row of peers.records) {
         const peer = await factItem(row.get("other"));
