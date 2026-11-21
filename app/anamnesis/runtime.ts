@@ -42,18 +42,15 @@ function revisionKey(params: RpcRememberParams): string {
 }
 interface Binding { digest_version: 1; params: RpcRememberParams; body_digest: string; incarnation: string; fs_epoch: string; }
 const Binding: { parse(value: unknown): Binding; safeParse(value: unknown): Binding | null } = {
-  safeParse(value) {
-    if (!value || typeof value !== "object") return null;
+  parse(value: unknown): Binding {
+    if (!value || typeof value !== "object") throw new RpcFault("spool_corrupt", "invalid delivery binding");
     const data = value as Record<string, unknown>;
-    const params = RpcRememberParams.safeParse(data["params"]);
-    if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"])
-      || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string" || !params.success) return null;
-    return { digest_version: 1, params: params.data, body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
+    if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"]) || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string") throw new RpcFault("spool_corrupt", "invalid delivery binding");
+    return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
   },
-  parse(value) {
-    const binding = Binding.safeParse(value);
-    if (!binding) throw new RpcFault("spool_corrupt", "invalid delivery binding");
-    return binding;
+  safeParse(value) {
+    try { return Binding.parse(value); }
+    catch { return null; }
   },
 };
 function digest(params: RpcRememberParams): string { return sha(canonical({ digest_version: 1, params })); }
