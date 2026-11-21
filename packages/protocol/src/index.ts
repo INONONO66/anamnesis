@@ -54,6 +54,8 @@ export {
   RpcHelloParams,
   RpcIngestStatusParams,
   RpcHitCacheParams,
+  IdentityAccountRef, IdentityDirectoryEntry, RpcIdentityDirectoryParams, RpcIdentityCorrectParams, RpcIdentityRebuildParams,
+  RpcIdentityStatusResult, RpcIdentityRebuildResult, RpcPeopleListParams, RpcPeopleListResult, RpcPeopleShowParams, RpcPeopleShowResult,
   RoomAssignment, RpcSpacesImportParams, RpcSpacesListParams, RpcSpacesListResult,
   RpcEpisodeRebuildParams, RpcEpisodeRebuildResult,
   RpcRequest,

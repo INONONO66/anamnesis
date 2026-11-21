@@ -26,6 +26,7 @@ export const RPC_LIMITS = {
 export const RPC_METHODS = [
   "hello", "status", "shutdown", "object.begin", "object.chunk",
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
+  "identity.status", "identity.rebuild", "identity.correct", "identity.directory", "people.list", "people.show",
   "spaces.import", "spaces.list", "spaces.rebuild", "replies.rebuild",
   "object.commit", "remember", "remember.batch", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
 ] as const;
@@ -48,6 +49,60 @@ const positiveCounter = counter.min(1);
 export const RpcHash = z.string().regex(/^[0-9a-f]{64}$/);
 export type RpcHash = z.infer<typeof RpcHash>;
 const requestId = z.union([counter, boundedString(128)]);
+
+export const IdentityAccountRef = z.strictObject({ source: identifier, actor: identifier });
+export type IdentityAccountRef = z.infer<typeof IdentityAccountRef>;
+const speakerName = boundedString(256);
+export const IdentityDirectoryEntry = z.object({
+  source: identifier, actor: identifier,
+  names: z.array(speakerName).max(8).default([]),
+  handles: z.array(speakerName).max(8).default([]),
+  emails: z.array(boundedString(320)).max(4).default([]),
+});
+export type IdentityDirectoryEntry = z.infer<typeof IdentityDirectoryEntry>;
+export const RpcIdentityDirectoryParams = z.strictObject({ entries: z.array(IdentityDirectoryEntry).min(1).max(1000) });
+export type RpcIdentityDirectoryParams = z.infer<typeof RpcIdentityDirectoryParams>;
+export const RpcIdentityCorrectParams = z.strictObject({
+  a: IdentityAccountRef, b: IdentityAccountRef, verdict: z.enum(["same", "different"]), reason: boundedString(512).optional(),
+}).refine(value => value.a.source !== value.b.source || value.a.actor !== value.b.actor, { message: "a and b must be different accounts" });
+export type RpcIdentityCorrectParams = z.infer<typeof RpcIdentityCorrectParams>;
+export const RpcIdentityRebuildParams = z.strictObject({ accounts: z.boolean().default(false) });
+export type RpcIdentityRebuildParams = z.infer<typeof RpcIdentityRebuildParams>;
+export const RpcIdentityStatusResult = z.strictObject({
+  covered_ingest_seq: counter, live_ingest_seq: counter, generation: counter,
+  accounts: counter, owners: counter, bots: counter, persons: counter,
+  decisions: z.strictObject({ rule: counter, judge: counter, operator: counter, same: counter, different: counter, unsure: counter }),
+  pending: counter, skipped_keys: counter, judge: z.enum(["configured", "unconfigured"]), in_flight: counter,
+  last_error: boundedString(512).nullable(),
+});
+export type RpcIdentityStatusResult = z.infer<typeof RpcIdentityStatusResult>;
+export const RpcIdentityRebuildResult = z.strictObject({ generation: counter, persons: counter, accounts: counter, built: z.boolean() });
+export type RpcIdentityRebuildResult = z.infer<typeof RpcIdentityRebuildResult>;
+const IdentityVerdict = z.enum(["same", "different", "unsure"]);
+const PersonSummary = z.strictObject({
+  id: z.uuid(), name: identifier, owner: z.boolean(), accounts: counter, episodes: counter,
+  sources: z.array(identifier).max(64), aliases: z.array(speakerName).max(8),
+});
+export const RpcPeopleListParams = z.strictObject({
+  after: z.uuid().optional(), limit: positiveCounter.max(200).default(50), query: speakerName.optional(),
+});
+export type RpcPeopleListParams = z.infer<typeof RpcPeopleListParams>;
+export const RpcPeopleListResult = z.strictObject({ people: z.array(PersonSummary).max(200), next: z.uuid().nullable() });
+export type RpcPeopleListResult = z.infer<typeof RpcPeopleListResult>;
+export const RpcPeopleShowParams = z.union([z.strictObject({ person_id: z.uuid() }), z.strictObject({ account: IdentityAccountRef })]);
+export type RpcPeopleShowParams = z.infer<typeof RpcPeopleShowParams>;
+export const RpcPeopleShowResult = z.strictObject({
+  person: PersonSummary.nullable(),
+  accounts: z.array(z.strictObject({
+    source: identifier, actor: identifier, names: z.array(speakerName).max(32), owner: z.boolean(), bot: z.boolean(),
+    episodes: counter, sessions: counter, first: z.iso.datetime().nullable(), last: z.iso.datetime().nullable(),
+  })).max(256),
+  decisions: z.array(z.strictObject({
+    id: z.uuid(), a: IdentityAccountRef, b: IdentityAccountRef, verdict: IdentityVerdict, confidence: z.number().min(0).max(1),
+    authority: z.enum(["judge", "operator"]), reason: boundedString(1024), decided_at: counter,
+  })).max(64),
+});
+export type RpcPeopleShowResult = z.infer<typeof RpcPeopleShowResult>;
 
 /** Explicit operator assignments; JSONL imports intentionally discard other keys. */
 export const RoomAssignment = z.object({
@@ -324,6 +379,12 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("policy.revoke", RpcPolicyRevokeParams),
   request("hit-cache.verify", RpcHitCacheParams),
   request("hit-cache.rebuild", RpcHitCacheParams),
+  request("identity.status", z.strictObject({})),
+  request("identity.rebuild", RpcIdentityRebuildParams),
+  request("identity.correct", RpcIdentityCorrectParams),
+  request("identity.directory", RpcIdentityDirectoryParams),
+  request("people.list", RpcPeopleListParams),
+  request("people.show", RpcPeopleShowParams),
   request("spaces.import", RpcSpacesImportParams),
   request("spaces.list", RpcSpacesListParams),
   request("spaces.rebuild", RpcEpisodeRebuildParams),
@@ -505,6 +566,12 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("ingest.status", RpcIngestStatusResult),
   success("hit-cache.verify", z.strictObject({ state: z.literal("verified"), hits: counter, issues: z.array(z.strictObject({ code: boundedString(128), id: boundedString(128) })).max(1024) })),
   success("hit-cache.rebuild", z.strictObject({ state: z.literal("rebuilt"), hits: counter, created: counter, removed: counter })),
+  success("identity.status", RpcIdentityStatusResult),
+  success("identity.rebuild", RpcIdentityRebuildResult),
+  success("identity.correct", z.strictObject({ decision_id: z.uuid() })),
+  success("identity.directory", z.strictObject({ imported: counter, changed: counter })),
+  success("people.list", RpcPeopleListResult),
+  success("people.show", RpcPeopleShowResult),
   success("spaces.import", z.strictObject({ imported: counter, changed: counter })),
   success("spaces.list", RpcSpacesListResult),
   success("spaces.rebuild", RpcEpisodeRebuildResult),
