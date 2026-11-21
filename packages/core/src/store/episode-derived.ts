@@ -17,9 +17,9 @@ type EpisodeEvidence = {
 type Address = { readonly source: string; readonly session: string; readonly record: string };
 
 /** The evidence stays untouched. Neither cwd nor content participates. */
-function roomOf(episode: EpisodeEvidence): string {
-  const room = episode.properties["room"];
-  return typeof room === "string" && room.length > 0 ? room : episode.session;
+export function episodeRoom(session: string, properties: MemoryElement["properties"]): string {
+  const room = properties["room"];
+  return typeof room === "string" && room.length > 0 ? room : session;
 }
 
 function replyAddresses(episode: EpisodeEvidence): Address[] {
@@ -31,7 +31,7 @@ function replyAddresses(episode: EpisodeEvidence): Address[] {
       addresses.push({ source: reply.slice(0, colon), session: reply.slice(colon + 1, hash), record: reply.slice(hash + 1) });
     }
   }
-  const thread = episode.properties["thread"], room = roomOf(episode);
+  const thread = episode.properties["thread"], room = episodeRoom(episode.session, episode.properties);
   if (episode.source === "slack" && typeof thread === "string" && thread.length > 0 && episode.session === `${room}/${thread}`) {
     addresses.push({ source: episode.source, session: room, record: thread });
   }
@@ -47,7 +47,7 @@ async function labelEpisodesTx(tx: ManagedTransaction, episodes: readonly Episod
      WITH e,row,coalesce(r.space,'unknown:' + row.source) AS space
      WHERE e.room IS NULL OR e.room <> row.room OR e.space IS NULL OR e.space <> space
      SET e.room=row.room,e.space=space RETURN count(e) AS updated`,
-    { rows: episodes.map(episode => ({ id: episode.id, source: episode.source, room: roomOf(episode) })) });
+    { rows: episodes.map(episode => ({ id: episode.id, source: episode.source, room: episodeRoom(episode.session, episode.properties) })) });
   return result.records[0]?.get("updated") ?? 0;
 }
 
@@ -92,8 +92,8 @@ export class EpisodeDerivedStore {
 
   async admitTx(tx: ManagedTransaction, episode: MemoryElement): Promise<void> {
     const evidence = [{ id: episode.id, source: episode.origin.source, session: episode.origin.session, properties: episode.properties }];
-    await labelEpisodesTx(tx, evidence);
-    // Admission runs on the serial writer: an Episode that answers nothing costs no reply statements.
+    // Labels are assigned in the Episode create statement so ordinary admission keeps one fewer round trip.
+    // An Episode that answers nothing costs no reply statements.
     if (evidence.some(row => replyAddresses(row).length > 0)) await replyEpisodesTx(tx, evidence);
   }
 
