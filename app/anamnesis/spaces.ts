@@ -1,19 +1,6 @@
-import { createReadStream } from "node:fs";
 import { RoomAssignment, RpcEpisodeRebuildParams, type RpcEpisodeRebuildResult } from "@anamnesis/protocol";
 import type { RpcClient } from "./client.ts";
-
-/** LF only: readline also splits on U+2028 / U+2029, which room names inside JSON strings may hold unescaped. */
-async function* jsonLines(path: string): AsyncGenerator<string> {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let carry = "";
-  for await (const chunk of createReadStream(path)) {
-    const parts = (carry + decoder.decode(chunk as Buffer, { stream: true })).split("\n");
-    carry = parts.pop() ?? "";
-    yield* parts;
-  }
-  carry += decoder.decode();
-  if (carry !== "") yield carry;
-}
+import { jsonLines } from "./json-lines.ts";
 
 /** Import in bounded wire batches. Replaying a file is an upsert, not a replacement. */
 async function importRooms(client: RpcClient, path: string): Promise<void> {

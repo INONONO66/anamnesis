@@ -166,7 +166,7 @@ afterAll(async () => { await admin?.close(); });
 dbTest("a live boot reports ready, commits deliveries once, and answers re-deliveries and ingest status from the store", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime, lanes } = await boot(installation);
-  expect(lanes).toEqual(["spool"]);
+  expect(lanes).toEqual(["spool", "identity"]);
   expect(runtime.capabilities).toMatchObject({ recall: true, commit: true, policy: true, extraction: false, embeddings: false });
   const ready = await runtime.status(0, false);
   expect(ready).toMatchObject({ version: 1, state: "ready", storage: "available", data_incarnation: installation.incarnation, fs_epoch: installation.epoch,
@@ -176,7 +176,7 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   const first = delivery({ record: "first" });
   const committed = asCommitted(await runtime.remember(first));
   expect(committed).toMatchObject({ state: "committed", created: true, ...identityOf(first, installation.incarnation) });
-  expect(lanes).toEqual(["spool"]);
+  expect(lanes).toEqual(["spool", "identity", "identity"]);
   expect(await runtime.remember(first)).toEqual({ ...committed, created: false });
   await expect(runtime.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
 
@@ -212,7 +212,7 @@ dbTest("storage loss spools deliveries, reports degraded, and the same incarnati
   await shutdown(offline.runtime);
 
   const live = await boot(installation);
-  expect(live.lanes).toEqual(["spool"]);
+  expect(live.lanes).toEqual(["spool", "identity"]);
   await drainToRest(live.runtime);
   expect(await live.runtime.ingestStatus(identityOf(parent, installation.incarnation))).toMatchObject({ state: "committed", created: false });
   expect(await live.runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "committed", created: false });
@@ -433,7 +433,7 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   opened.push(runtime);
   expect(runtime.capabilities).toMatchObject({ extraction: true, embeddings: true });
   await runtime.init();
-  expect([...lanes].sort()).toEqual(["embedding", "extraction", "spool"]);
+  expect([...lanes].sort()).toEqual(["embedding", "extraction", "identity", "spool"]);
   // The turn only finds the batch; its provider call runs outside the turn and the batch's end wakes the lane.
   const batchEnded = new Promise<void>(resolve => { embeddingWoken = resolve; });
   expect(await runtime.embeddingTurn()).toBe("waiting");
@@ -441,7 +441,7 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   expect(await runtime.extractionTurn()).toBe("waiting");
 
   const committed = asCommitted(await runtime.remember(delivery({ record: "embedded" })));
-  expect(lanes.slice(4).sort()).toEqual(["embedding", "extraction"]);
+  expect(lanes.slice(5).sort()).toEqual(["embedding", "extraction", "identity"]);
   const deferred = await runtime.status(0, false);
   expect(deferred.workers.embedding).toMatchObject({ pending: 1, drained_total: 0, quarantined_total: 0 });
   expect(deferred.workers.embedding.last_error).toContain("deferred");

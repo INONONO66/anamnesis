@@ -12,6 +12,7 @@ import { managed } from "./managed.ts";
 import { fileURLToPath } from "node:url";
 import { applyAuthorityEnvironment, offlineBackup, offlineRestore } from "./offline-ops.ts";
 import { spacesCommand } from "./spaces.ts";
+import { identityCommand } from "./identity.ts";
 
 const usage = "usage: anamnesis-ops up|down|backup <destination-dir>|restore <archive-dir>|extract|embed|embed-requeue [--limit N]|recall <query>|projection write <dir>|foreground|managed|status|verify|load <clean-dir> <source> <state-dir> [--concurrency N] [--limit N] [--room FILE]... [--dry-run]";
 const uuidv7 = () => { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; };
@@ -139,6 +140,8 @@ async function load({ root, extra }: Context): Promise<void> {
   await loadClean({ clean, source, state, concurrency, limit, rooms: values.room, dryRun: values["dry-run"] }, () => connectClient(root));
 }
 const commands: Record<string, Command> = {
+  identity: { arity: extra => extra.length > 0, run: ({ root, extra }) => withClient(root, client => identityCommand(client, "identity", extra)) },
+  people: { arity: extra => extra.length > 0, run: ({ root, extra }) => withClient(root, client => identityCommand(client, "people", extra)) },
   spaces: { arity: extra => extra.length > 0, run: ({ root, extra }) => withClient(root, client => spacesCommand(client, "spaces", extra)) },
   replies: { arity: extra => extra.length > 0, run: ({ root, extra }) => withClient(root, client => spacesCommand(client, "replies", extra)) },
   up: { arity: none, run: up },
