@@ -13,6 +13,11 @@ starting with `claude`, otherwise `openai_chat`; either can be explicitly select
 `ANAMNESIS_EXTRACTION_PROMPT_FILE` overrides the bundled extraction prompt.
 See [extraction audit](extraction-audit.md) for the provider and ABI semantics.
 
+`ANAMNESIS_EXTRACTION_LANE=off` keeps the LLM provider configured for other
+runtime lanes but does not create or wake the extraction scheduler. In this
+mode `capabilities.extraction` is false and `workers.extraction` reports
+`{"state":"unconfigured"}`. The default is `on`.
+
 `ANAMNESIS_EXTRACTION_GATE=jev` enables the pre-extraction gate (D56): the
 scheduler scores each claim window with `typesafe-ai/jev` through the Vercel AI
 Gateway and skips windows whose best score is below

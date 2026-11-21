@@ -595,6 +595,10 @@ durable spool.
 by what coverage has not sealed: Episodes whose `ingest_seq` is above the
 generation's `ExtractionCoverage.covered_ingest_seq`, read in a bounded
 window in sequence order. There is no extraction queue label in the graph.
+`ANAMNESIS_EXTRACTION_LANE=off` leaves the shared LLM provider configured but
+does not create the scheduler. The daemon then advertises
+`capabilities.extraction:false`, reports `workers.extraction` as
+`{"state":"unconfigured"}`, and never wakes this lane. The default is `on`.
 The pipeline a scan resolves for an Episode (claim task, lease, attempts,
 judge task and input, up to 64 decisions) lives in the
 `extraction-state.json` journal under the runtime root, keyed by
