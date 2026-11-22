@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
 import { Engine, envConfig, type EngineOptions } from "@anamnesis/core";
@@ -14,7 +14,7 @@ import type { InstallationContext, RecallTransportInput } from "@anamnesis/core"
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
-import { atomicJson, EXTRACTION_PACING_DEFAULTS, hasCode, identityOwners, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
+import { EXTRACTION_PACING_DEFAULTS, hasCode, identityOwners, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
 import { daemonTiming, runtimeTimed, timingHash } from "./timing.ts";
@@ -27,33 +27,9 @@ import { logEvent } from "./log.ts";
 import type { RpcSpacesImportParams, RpcSpacesListParams, RpcEpisodeRebuildParams } from "@anamnesis/protocol";
 import type { RpcIdentityCorrectParams, RpcIdentityDirectoryParams, RpcIdentityRebuildParams, RpcPeopleListParams, RpcPeopleShowParams } from "@anamnesis/protocol";
 import { IdentityRuntime } from "./identity-runtime.ts";
+import { Binding, DeliveryReservations, digest, originKey, revisionKey, sha } from "./delivery-reservations.ts";
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, member]) => `${JSON.stringify(key)}:${canonical(member)}`).join(",")}}`;
-}
-const sha = (value: string) => createHash("sha256").update(value).digest("hex");
-const originKey = (params: RpcRememberParams) => { const o = params.episode.origin; return sha(JSON.stringify([o.source, o.session, o.actor, o.record])); };
-// Origin field order is explicit, not object-insertion dependent.
-function revisionKey(params: RpcRememberParams): string {
-  return sha(JSON.stringify([originKey(params), params.source_revision]));
-}
-interface Binding { digest_version: 1; params: RpcRememberParams; body_digest: string; incarnation: string; fs_epoch: string; }
-const Binding: { parse(value: unknown): Binding; safeParse(value: unknown): Binding | null } = {
-  parse(value: unknown): Binding {
-    if (!value || typeof value !== "object") throw new RpcFault("spool_corrupt", "invalid delivery binding");
-    const data = value as Record<string, unknown>;
-    if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"]) || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string") throw new RpcFault("spool_corrupt", "invalid delivery binding");
-    return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
-  },
-  safeParse(value) {
-    try { return Binding.parse(value); }
-    catch { return null; }
-  },
-};
-function digest(params: RpcRememberParams): string { return sha(canonical({ digest_version: 1, params })); }
 type StoredEpisode = {
   id: string; schema: string; time_value: string; time_precision: string;
   content: string; mass: number; properties: string;
@@ -125,7 +101,7 @@ export class Runtime {
   private readonly database: string;
   private readonly spool: DurableSpool;
   private readonly spoolRoot: string;
-  private readonly bindings: string;
+  private readonly reservations: DeliveryReservations;
   private readonly authorityAdapter: TrustedAuthorityAdapter | undefined;
   private readonly backupOperations = new Map<string, { state: "running" | "complete" | "failed"; error?: string }>();
   private readonly restoreOperations = new Map<string, { state: "running" | "complete" | "failed"; error?: string }>();
@@ -180,11 +156,11 @@ export class Runtime {
     });
     this.uploads = new Uploads(config.objectsRoot, join(installation.root, "uploads"), uploadLifecycle);
     this.spoolRoot = join(installation.root, "spool");
-    this.bindings = join(installation.root, "deliveries");
+    this.reservations = new DeliveryReservations(join(installation.root, "deliveries"));
     this.spool = new DurableSpool(this.spoolRoot, { maxBytes: RPC_LIMITS.spool_bytes, maxFrameBytes: RPC_LIMITS.frame_bytes });
   }
   async init(): Promise<void> {
-    await mkdir(this.bindings, { recursive: true, mode: 0o700 });
+    await this.reservations.init();
     await mkdir(this.spoolRoot, { recursive: true, mode: 0o700 });
     await this.uploads.init();
     await syncDirectory(this.installation.root);
@@ -227,14 +203,6 @@ export class Runtime {
   }
   private spooled(binding: Binding, sequence: number) {
     return { state: "spooled" as const, ...this.identity(binding), fs_epoch: binding.fs_epoch, spool_seq: sequence };
-  }
-  private async binding(key: string): Promise<Binding | null> {
-    try { return Binding.parse(JSON.parse(await readFile(join(this.bindings, key + ".json"), "utf8"))); }
-    catch (error) { if (hasCode(error, "ENOENT")) return null; throw error; }
-  }
-  private async releaseBinding(key: string): Promise<void> {
-    try { await rm(join(this.bindings, key + ".json"), { force: true }); }
-    catch (error) { logEvent("error", "delivery_reservation_cleanup_failed", { revision_key: key, error: String(error) }); }
   }
   private async pendingEntry(revision: string): Promise<SpoolEntry | null> {
     const status = await this.spool.status();
@@ -363,13 +331,13 @@ export class Runtime {
     if (stored) return this.rememberExisting(key, candidate, stored);
     const pending = await this.pendingEntry(key);
     const pendingBinding = pending ? this.validated(pending) : null;
-    const previous = pendingBinding ?? await this.binding(key);
+    const previous = pendingBinding ?? await this.reservations.read(key);
     const binding = await this.admitBinding(params, previous, candidate, context);
-    if (pendingBinding) await this.releaseBinding(key);
+    if (pendingBinding) await this.reservations.release(key);
     const metadata = lineageMetadata(params);
     // A lineage admission is never spooled, so its stored row is its only record: it writes no delivery reservation.
     const bound = !previous && !metadata;
-    if (bound) await atomicJson(join(this.bindings, key + ".json"), binding);
+    if (bound) await this.reservations.write(key, binding);
     if (this.available) {
       const written = await this.tryWrite(binding, key, bound, context);
       if (written) return written;
@@ -380,7 +348,7 @@ export class Runtime {
   /** A revision the store already committed answers from its retained row; any obsolete reservation is removed. */
   private async rememberExisting(key: string, candidate: Binding, row: StoredEpisode): Promise<RpcCommittedResult> {
     const existing = this.verified(row, candidate);
-    await this.releaseBinding(key);
+    await this.reservations.release(key);
     return existing;
   }
   /** The admission gates in order: body conflict, incarnation, referenced object, lineage authority (spool health is checked on entry). */
@@ -402,13 +370,13 @@ export class Runtime {
   private async tryWrite(binding: Binding, key: string, bound: boolean, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
     try {
       const result = await this.write(binding, context);
-      await this.releaseBinding(key);
+      await this.reservations.release(key);
       if (result.created && this.awaited.has(key)) this.wakeDrain();
       return result;
     }
     catch (error) {
       if (!storageUnavailable(error)) {
-        if (bound) await rm(join(this.bindings, key + ".json"));
+        if (bound) await this.reservations.remove(key);
         throw error;
       }
       this.markUnavailable();
@@ -420,7 +388,7 @@ export class Runtime {
     const existing = await this.pendingEntry(key);
     if (existing) {
       const durable = this.validated(existing);
-      await this.releaseBinding(key);
+      await this.reservations.release(key);
       return this.spooled(durable, existing.sequence);
     }
     const sequence = await this.spool.append({ origin: originKey(params), revision: key,
@@ -428,7 +396,7 @@ export class Runtime {
     await syncDirectory(this.spoolRoot);
     await this.installation.assertOwned();
     if (sequence < 1 || (await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool did not publish a verifiable durable entry");
-    await this.releaseBinding(key);
+    await this.reservations.release(key);
     this.wakeDrain();
     return this.spooled(binding, sequence);
   }
@@ -673,12 +641,12 @@ export class Runtime {
       const params = this.storedParams(stored);
       const binding = { digest_version: 1 as const, params, body_digest: digest(params), incarnation: identity.data_incarnation, fs_epoch: this.installation.epoch };
       const committed = this.verified(stored, binding, false, params);
-      await this.releaseBinding(identity.revision_key);
+      await this.reservations.release(identity.revision_key);
       return binding.body_digest === identity.body_digest ? committed : unknown();
     }
     const spoolStatus = await this.spool.status();
     if (spoolStatus.quarantined) {
-      const reservation = await this.binding(identity.revision_key);
+      const reservation = await this.reservations.read(identity.revision_key);
       if (reservation && reservation.body_digest !== identity.body_digest) return unknown();
       return { state: "quarantined", ...identity, reason: "spool_corrupt" };
     }
@@ -689,11 +657,11 @@ export class Runtime {
       // An unparseable quarantined body cannot provide a digest to compare.
       const binding = Binding.safeParse(entry.body);
       if (binding && binding.body_digest !== identity.body_digest) return unknown();
-      await this.releaseBinding(identity.revision_key);
+      await this.reservations.release(identity.revision_key);
       return { state: "quarantined", ...identity, reason: quarantined };
     }
     const binding = this.validated(entry);
-    await this.releaseBinding(identity.revision_key);
+    await this.reservations.release(identity.revision_key);
     if (binding.body_digest !== identity.body_digest) return unknown();
     const reason = this.blocked.get(entry.sequence);
     if (reason) return { ...this.spooled(binding, entry.sequence), state: "blocked", expected_previous_revision_key: entry.predecessor, reason };
