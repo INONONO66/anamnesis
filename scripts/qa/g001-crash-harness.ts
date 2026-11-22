@@ -258,7 +258,8 @@ test("real crash recovery: exact identity/topology, legacy preservation and UDS 
     const meta = await metaSequence();
     assert.equal(meta, 2); assert.equal(recovered.outbox_pending, 2);
     record("topology-recovery-green.json", { sessionKey, rows: after, recoveredEdges, retryEdges, meta });
-    record("recovery-green.json", { recovered, rows: after, meta, retainedReceiptHashes: await hashes((await readdir(join(runtimeRoot, "deliveries"))).map(f => join(runtimeRoot, "deliveries", f))) });
+    const reservations = await readdir(join(runtimeRoot, "deliveries")); assert.deepEqual(reservations, []);
+    record("recovery-green.json", { recovered, rows: after, meta, reservations });
     // Transport-only response loss: consume a complete REAL daemon response,
     // withhold it from the client, and kill the daemon after that exact event.
     const proxyEvents = new EventEmitter();

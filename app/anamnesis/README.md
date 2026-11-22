@@ -97,10 +97,11 @@ The client has no Bolt connection or Bun runtime dependency.
   sequence. A versioned canonical RPC-body digest additionally binds fields such
   as mass that the existing core digest does not cover. Both digests are checked;
   matching only a revision key never makes an UNKNOWN delivery successful.
-- Durable binding files preserve delivery identity, data incarnation, predecessor,
-  and original filesystem epoch for deliveries that may be spooled (lineage
-  admissions never are, and write none). During database unavailability, ACK follows
-  `DurableSpool.append`, directory fsync, and verification of the published entry.
+- A transient binding file reserves delivery identity before the live store write
+  or spool append. The daemon removes it after Neo4j commits or after
+  `DurableSpool.append`, directory fsync, and verification publish the complete
+  binding in the spool. Lineage admissions are never spooled and write no
+  reservation.
 - Startup, authenticated `status`, `remember`, and `ingest.status` probe the DB and
   drain dependency-ready entries. Recovery is **demand-driven**, not a background
   polling service. Use `status` after restoring the DB. Missing predecessors,
@@ -225,10 +226,12 @@ runtime status-map memory. The evidence proves process restart and database
 outage/recovery, **not hardware power-loss qualification or retention-based
 journal reclamation**.
 
-Delivery bindings are retained for exact outcome lookup. Lineage admissions are
-never spooled and write no binding: their stored row is their only record, and
-`ingest.status` answers `committed` for one only when the row re-derives the
-asked body digest. Bindings and committed
-objects are not garbage-collected by this experimental runtime. Database row
-reads are daemon-only and coupled explicitly to the current originals schema;
-no new core export or package was added.
+The `deliveries/` directory holds only transient admission reservations.
+Committed exact outcomes are reconstructed and verified from Neo4j; pending
+exact outcomes come from their durable spool frames. A reservation left by a
+crash or an older daemon is removed after either durable owner verifies it.
+With the daemon stopped, an existing `deliveries/` directory from an older
+version may be deleted; startup recreates it. Committed objects are not
+garbage-collected by this experimental runtime. Database row reads are
+daemon-only and coupled explicitly to the current originals schema; no new core
+export or package was added.

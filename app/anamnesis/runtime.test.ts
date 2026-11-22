@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { Engine, type InstallationContext } from "@anamnesis/core";
+import { DurableSpool, Engine, type InstallationContext } from "@anamnesis/core";
 import { extractionBodyDigest, type RpcRememberParams } from "@anamnesis/protocol";
 import { fakeAuthorityAdapter, sha256 } from "./authority-adapter.fixture.ts";
 import type { Installation } from "./config.ts";
@@ -163,6 +163,24 @@ afterEach(async () => {
 });
 afterAll(async () => { await admin?.close(); });
 
+test("remember skips an empty spool scan but finds a pending re-delivery", async () => {
+  const page = spyOn(DurableSpool.prototype, "page");
+  try {
+    const installation = installationAt(await freshRoot());
+    const runtime = await withEnv({ ...dbEnv(DEAD_URI), ANAMNESIS_NEO4J_PASSWORD: "test-password" }, async () => new Runtime(installation));
+    opened.push(runtime);
+    await runtime.init();
+    const params = delivery({ record: "pending-redelivery" });
+
+    const spooled = await runtime.remember(params);
+    expect(spooled).toMatchObject({ state: "spooled", spool_seq: 1 });
+    expect(page).toHaveBeenCalledTimes(0);
+
+    expect(await runtime.remember(params)).toEqual(spooled);
+    expect(page).toHaveBeenCalled();
+  } finally { page.mockRestore(); }
+});
+
 dbTest("a live boot reports ready, commits deliveries once, and answers re-deliveries and ingest status from the store", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime, lanes } = await boot(installation);
@@ -177,18 +195,24 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   const committed = asCommitted(await runtime.remember(first));
   expect(committed).toMatchObject({ state: "committed", created: true, ...identityOf(first, installation.incarnation) });
   expect(lanes).toEqual(["spool", "identity", "identity"]);
-  expect(await runtime.remember(first)).toEqual({ ...committed, created: false });
-  await expect(runtime.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
-
   const identity = identityOf(first, installation.incarnation);
-  expect(await readdir(join(installation.root, "deliveries"))).toEqual([identity.revision_key + ".json"]);
-  expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
-  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({ state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available" });
-  expect(await runtime.ingestStatus({ ...identity, revision_key: "1".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
-  await expect(runtime.ingestStatus({ ...identity, data_incarnation: uuidv7() })).rejects.toMatchObject({ code: "incarnation_mismatch" });
-  await drainToRest(runtime);
-  expect(await runtime.drainTurn()).toBe(false);
-  expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
+  await shutdown(runtime);
+
+  const restarted = (await boot(installation)).runtime;
+  expect(await restarted.remember(first)).toEqual({ ...committed, created: false });
+  await expect(restarted.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
+  await writeFile(join(installation.root, "deliveries", identity.revision_key + ".json"), JSON.stringify({
+    digest_version: 1, params: first, body_digest: identity.body_digest, incarnation: installation.incarnation, fs_epoch: installation.epoch,
+  }));
+  expect(await restarted.ingestStatus(identity)).toEqual({ ...committed, created: false });
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
+  expect(await restarted.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({ state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available" });
+  expect(await restarted.ingestStatus({ ...identity, revision_key: "1".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
+  await expect(restarted.ingestStatus({ ...identity, data_incarnation: uuidv7() })).rejects.toMatchObject({ code: "incarnation_mismatch" });
+  await drainToRest(restarted);
+  expect(await restarted.drainTurn()).toBe(false);
+  expect((await restarted.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
 });
 
 dbTest("storage loss spools deliveries, reports degraded, and the same incarnation drains the backlog in dependency order once storage returns", async () => {
@@ -199,8 +223,12 @@ dbTest("storage loss spools deliveries, reports degraded, and the same incarnati
   const child = delivery({ record: "doc", revision: "v2", predecessor: revisionKeyOf(parent) });
   const spooledChild = await offline.runtime.remember(child);
   expect(spooledChild).toMatchObject({ state: "spooled", spool_seq: 1, fs_epoch: installation.epoch, ...identityOf(child, installation.incarnation) });
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
   expect(await offline.runtime.remember(parent)).toMatchObject({ state: "spooled", spool_seq: 2 });
   expect(await offline.runtime.remember(child)).toEqual(spooledChild);
+  await expect(offline.runtime.remember(delivery({ record: "doc", revision: "v2", predecessor: revisionKeyOf(parent), content: "a different body" })))
+    .rejects.toMatchObject({ code: "revision_conflict" });
+  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
   expect(await offline.runtime.ingestStatus(identityOf(child, installation.incarnation))).toEqual(spooledChild);
   expect(await offline.runtime.status(0, false)).toMatchObject({ state: "degraded", spool: { pending: 2 } });
   expect(await offline.runtime.drainTurn()).toBe(false);
@@ -275,14 +303,19 @@ dbTest("drain blocks a stale successor, a body conflicting with a committed revi
   const conflicting = delivery({ record: "conflict", content: "spooled body" });
   const liveBody = delivery({ record: "conflict", content: "live body" });
   await spoolOffline(installation, stale, behindStale, conflicting);
-  // A lost delivery binding lets a different body for the same revision reach the store first; the spooled body
-  // then meets the committed one at drain time instead of at admission.
-  await rm(join(installation.root, "deliveries", `${revisionKeyOf(conflicting)}.json`));
+  // Seed the conflicting committed owner below Runtime admission so drain still
+  // exercises its revision-conflict classification against the durable spool body.
+  const engine = new Engine({ uri: TEST_DB.uri, user: TEST_DB.user, password: TEST_DB.password, objectsRoot: join(installation.root, "direct-conflict") });
+  try {
+    await engine.init();
+    await engine.claimWriterEpoch();
+    await engine.remember({ ...liveBody.episode, source_revision: liveBody.source_revision,
+      expected_previous_revision_key: liveBody.expected_previous_revision_key });
+  } finally { await engine.close(); }
   const { runtime, lanes } = await boot(installation);
   expect(await runtime.remember(base)).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(delivery({ record: "stale", revision: "v1b", predecessor: revisionKeyOf(base) }))).toMatchObject({ state: "committed", created: true });
-  expect(await runtime.remember(liveBody)).toMatchObject({ state: "committed", created: true });
-  expect(lanes).toEqual(["spool", "identity", "identity", "identity", "identity"]);
+  expect(lanes).toEqual(["spool", "identity", "identity", "identity"]);
   await drainToRest(runtime);
   expect(await runtime.ingestStatus(identityOf(stale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "stale_revision" });
   expect(await runtime.ingestStatus(identityOf(behindStale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
@@ -306,6 +339,21 @@ dbTest("entries from another incarnation are quarantined while this incarnation 
   expect(await runtime.status(0, false)).toMatchObject({ state: "degraded", storage: "available", spool: { pending: 1, quarantined: 1 } });
   await expect(runtime.remember(stranded)).rejects.toMatchObject({ code: "incarnation_mismatch" });
   expect(await runtime.remember(delivery({ record: "served" }))).toMatchObject({ state: "committed", created: true });
+});
+
+dbTest("a quarantined other-incarnation entry answers only its recorded body digest", async () => {
+  const root = await freshRoot();
+  const foreign = installationAt(root);
+  const stranded = delivery({ record: "quarantined-digest" });
+  await spoolOffline(foreign, stranded);
+  const installation = installationAt(root);
+  const { runtime } = await boot(installation);
+  await drainToRest(runtime);
+  const identity = identityOf(stranded, installation.incarnation);
+  expect(await runtime.ingestStatus(identity)).toEqual({ state: "quarantined", ...identity, reason: "incarnation_mismatch" });
+  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({
+    state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available",
+  });
 });
 
 dbTest("a quarantined spool stops admission and drain, and reports every pending delivery as quarantined", async () => {

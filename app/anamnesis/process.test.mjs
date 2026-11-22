@@ -115,6 +115,7 @@ test('actual Node/socket durably accepts offline remember with real revision ide
   assert.equal(result.state,'spooled');assert.equal(result.revision_key,sha([sha(['test','s','a','r']),'r1']));
   assert.equal(result.data_incarnation,h.data_incarnation);
   assert.equal(result.body_digest,bodyDigest(params));
+  assert.deepEqual(await readdir(root+'/deliveries'),[]);
   const duplicate=(await p.request('remember',params)).result;assert.deepEqual(duplicate,result);
   // Wire insertion order and an omitted default do not change the normalized
   // admission envelope; JSON-RPC request IDs are not part of delivery identity.
@@ -155,10 +156,10 @@ test('actual Node/socket exposes spool quarantine and rejects new ingestion befo
   bytes[bytes.length-1]^=1;await writeFile(journal,bytes);
   const status=(await p.request('status')).result;
   assert.equal(status.spool.quarantined,1);assert.equal(status.state,'degraded');
-  const bindings=await readdir(root+'/deliveries');
+  assert.deepEqual(await readdir(root+'/deliveries'),[]);
   const next={...params,source_revision:'new-after-quarantine',payload_hash:'0'.repeat(64)};
   assert.equal((await p.request('remember',next)).error.data.code,'spool_corrupt');
-  assert.deepEqual(await readdir(root+'/deliveries'),bindings);
+  assert.deepEqual(await readdir(root+'/deliveries'),[]);
   const {revision_key,body_digest,data_incarnation}=receipt;
   assert.equal((await p.request('ingest.status',{revision_key,body_digest,data_incarnation})).result.state,'quarantined');
 }));

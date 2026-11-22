@@ -41,12 +41,18 @@ function revisionKey(params: RpcRememberParams): string {
   return sha(JSON.stringify([originKey(params), params.source_revision]));
 }
 interface Binding { digest_version: 1; params: RpcRememberParams; body_digest: string; incarnation: string; fs_epoch: string; }
-const Binding = { parse(value: unknown): Binding {
-  if (!value || typeof value !== "object") throw new RpcFault("spool_corrupt", "invalid delivery binding");
-  const data = value as Record<string, unknown>;
-  if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"]) || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string") throw new RpcFault("spool_corrupt", "invalid delivery binding");
-  return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
-} };
+const Binding: { parse(value: unknown): Binding; safeParse(value: unknown): Binding | null } = {
+  parse(value: unknown): Binding {
+    if (!value || typeof value !== "object") throw new RpcFault("spool_corrupt", "invalid delivery binding");
+    const data = value as Record<string, unknown>;
+    if (data["digest_version"] !== 1 || typeof data["body_digest"] !== "string" || !/^[a-f0-9]{64}$/.test(data["body_digest"]) || typeof data["incarnation"] !== "string" || typeof data["fs_epoch"] !== "string") throw new RpcFault("spool_corrupt", "invalid delivery binding");
+    return { digest_version: 1, params: RpcRememberParams.parse(data["params"]), body_digest: data["body_digest"], incarnation: data["incarnation"], fs_epoch: data["fs_epoch"] };
+  },
+  safeParse(value) {
+    try { return Binding.parse(value); }
+    catch { return null; }
+  },
+};
 function digest(params: RpcRememberParams): string { return sha(canonical({ digest_version: 1, params })); }
 type StoredEpisode = {
   id: string; schema: string; time_value: string; time_precision: string;
@@ -226,10 +232,16 @@ export class Runtime {
     try { return Binding.parse(JSON.parse(await readFile(join(this.bindings, key + ".json"), "utf8"))); }
     catch (error) { if (hasCode(error, "ENOENT")) return null; throw error; }
   }
+  private async releaseBinding(key: string): Promise<void> {
+    try { await rm(join(this.bindings, key + ".json"), { force: true }); }
+    catch (error) { logEvent("error", "delivery_reservation_cleanup_failed", { revision_key: key, error: String(error) }); }
+  }
   private async pendingEntry(revision: string): Promise<SpoolEntry | null> {
+    const status = await this.spool.status();
+    if (status.pending === 0) return null;
     // Snapshot the admitted cohort rather than using an unbounded sentinel. The
     // page cursor then gives deterministic continuation without materializing the journal.
-    const cohort = (await this.spool.status()).nextSequence - 1;
+    const cohort = status.nextSequence - 1;
     const lookup = this.findPending(revision, cohort);
     let step = await lookup.next();
     while (!step.done) step = await lookup.next();
@@ -345,14 +357,17 @@ export class Runtime {
     await this.installation.assertOwned();
     if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
     const key = revisionKey(params);
-    const previous = await this.binding(key);
     const candidate: Binding = { digest_version: 1, params, body_digest: digest(params), incarnation: this.installation.incarnation, fs_epoch: this.installation.epoch };
     // One read answers both the writer-epoch check and whether the store already holds this revision.
     const stored = await this.refresh(key);
-    if (stored) return this.rememberExisting(key, previous, candidate, stored);
+    if (stored) return this.rememberExisting(key, candidate, stored);
+    const pending = await this.pendingEntry(key);
+    const pendingBinding = pending ? this.validated(pending) : null;
+    const previous = pendingBinding ?? await this.binding(key);
     const binding = await this.admitBinding(params, previous, candidate, context);
+    if (pendingBinding) await this.releaseBinding(key);
     const metadata = lineageMetadata(params);
-    // A lineage admission is never spooled, so its stored row is its only record: it writes no delivery binding.
+    // A lineage admission is never spooled, so its stored row is its only record: it writes no delivery reservation.
     const bound = !previous && !metadata;
     if (bound) await atomicJson(join(this.bindings, key + ".json"), binding);
     if (this.available) {
@@ -362,13 +377,11 @@ export class Runtime {
     if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
     return this.spoolBinding(params, key, binding);
   }
-  /** A revision the store already committed: bind a lineage-free delivery on its first sighting and answer from the store. */
-  private async rememberExisting(key: string, previous: Binding | null, candidate: Binding, row: StoredEpisode): Promise<RpcCommittedResult> {
+  /** A revision the store already committed answers from its retained row; any obsolete reservation is removed. */
+  private async rememberExisting(key: string, candidate: Binding, row: StoredEpisode): Promise<RpcCommittedResult> {
     const existing = this.verified(row, candidate);
-    if (previous?.incarnation !== undefined && previous.incarnation !== this.installation.incarnation)
-      throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
-    if (!previous && !lineageMetadata(candidate.params)) await atomicJson(join(this.bindings, key + ".json"), candidate);
-    return previous ? { ...existing, ...this.identity(previous) } : existing;
+    await this.releaseBinding(key);
+    return existing;
   }
   /** The admission gates in order: body conflict, incarnation, referenced object, lineage authority (spool health is checked on entry). */
   private async admitBinding(params: RpcRememberParams, previous: Binding | null, candidate: Binding, context?: InstallationContext): Promise<Binding> {
@@ -389,6 +402,7 @@ export class Runtime {
   private async tryWrite(binding: Binding, key: string, bound: boolean, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
     try {
       const result = await this.write(binding, context);
+      await this.releaseBinding(key);
       if (result.created && this.awaited.has(key)) this.wakeDrain();
       return result;
     }
@@ -404,12 +418,17 @@ export class Runtime {
   private async spoolBinding(params: RpcRememberParams, key: string, binding: Binding) {
     await this.installation.assertOwned();
     const existing = await this.pendingEntry(key);
-    if (existing) { this.validated(existing); return this.spooled(binding, existing.sequence); }
+    if (existing) {
+      const durable = this.validated(existing);
+      await this.releaseBinding(key);
+      return this.spooled(durable, existing.sequence);
+    }
     const sequence = await this.spool.append({ origin: originKey(params), revision: key,
       predecessor: params.expected_previous_revision_key, body: binding, incarnation: binding.incarnation });
     await syncDirectory(this.spoolRoot);
     await this.installation.assertOwned();
     if (sequence < 1 || (await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool did not publish a verifiable durable entry");
+    await this.releaseBinding(key);
     this.wakeDrain();
     return this.spooled(binding, sequence);
   }
@@ -650,25 +669,34 @@ export class Runtime {
     // `unknown` carries the storage state this very call observed: without storage a committed delivery whose spool
     // entry is gone looks unknown too, and only the daemon can say which observation the verdict rests on.
     const unknown = () => ({ state: "unknown" as const, ...identity, storage: this.available ? "available" as const : "unavailable" as const });
-    const binding = await this.binding(identity.revision_key);
-    if (!binding) {
-      // Lineage admissions keep no delivery binding (they are never spooled): the stored row is their only record,
-      // and it answers only a delivery whose exact envelope it re-derives.
-      const params = stored && this.storedParams(stored);
-      if (!stored || !params || digest(params) !== identity.body_digest) return unknown();
-      return this.verified(stored, { digest_version: 1, params, body_digest: identity.body_digest, incarnation: identity.data_incarnation, fs_epoch: this.installation.epoch }, false, params);
+    if (stored) {
+      const params = this.storedParams(stored);
+      const binding = { digest_version: 1 as const, params, body_digest: digest(params), incarnation: identity.data_incarnation, fs_epoch: this.installation.epoch };
+      const committed = this.verified(stored, binding, false, params);
+      await this.releaseBinding(identity.revision_key);
+      return binding.body_digest === identity.body_digest ? committed : unknown();
     }
-    if (binding.body_digest !== identity.body_digest) return unknown();
-    if (stored) return this.verified(stored, binding);
     const spoolStatus = await this.spool.status();
-    if (spoolStatus.quarantined) return { state: "quarantined", ...identity, reason: "spool_corrupt" };
+    if (spoolStatus.quarantined) {
+      const reservation = await this.binding(identity.revision_key);
+      if (reservation && reservation.body_digest !== identity.body_digest) return unknown();
+      return { state: "quarantined", ...identity, reason: "spool_corrupt" };
+    }
     const entry = await this.pendingEntry(identity.revision_key);
     if (!entry) return unknown();
     const quarantined = this.quarantined.get(entry.sequence);
-    if (quarantined) return { state: "quarantined", ...identity, reason: quarantined };
+    if (quarantined) {
+      // An unparseable quarantined body cannot provide a digest to compare.
+      const binding = Binding.safeParse(entry.body);
+      if (binding && binding.body_digest !== identity.body_digest) return unknown();
+      await this.releaseBinding(identity.revision_key);
+      return { state: "quarantined", ...identity, reason: quarantined };
+    }
+    const binding = this.validated(entry);
+    await this.releaseBinding(identity.revision_key);
+    if (binding.body_digest !== identity.body_digest) return unknown();
     const reason = this.blocked.get(entry.sequence);
     if (reason) return { ...this.spooled(binding, entry.sequence), state: "blocked", expected_previous_revision_key: entry.predecessor, reason };
-    this.validated(entry);
     return this.spooled(binding, entry.sequence);
   }
   async status(pending: number, stopping: boolean): Promise<RpcStatusResult> {
