@@ -103,8 +103,8 @@ extraction episodes are preserved in a DLQ file with an idempotent replay
 script, and a bounded ingest queue (bulkhead) blocks stampedes. The
 normative equivalent: the extraction sequencer pauses the blocked sequence
 head after three automatic failures and nothing overtakes it (D28); the
-Episode is already durable, so only cursor state is involved, and the spool
-is the bounded ingest queue (D22).
+Episode is already durable, so only cursor state is involved. Ingestion
+requires a Neo4j commit before acknowledgement (D61).
 
 **Lesson F — re-ranking and recall UX (ADR-041/042/106).** Center-node
 proximity search (re-ranking by graph distance), two-stage recall (find the

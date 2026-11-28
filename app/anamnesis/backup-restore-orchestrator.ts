@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { dirname, join, resolve } from "node:path";
 import { ARCHIVE_LIMITS, canonical, preflightArchive, sha256 as hash, verifyAuthoritySnapshot, type ArchiveCompatibility, type ArchiveManifest, type AuthoritySnapshot } from "./archive-manifest.ts";
 
-/** The only boundary at which process, Neo4j, spool, or source identity effects may occur. */
+/** The only boundary at which process, Neo4j, or source identity effects may occur. */
 export interface TrustedAuthorityAdapter {
   revokeWriters(): Promise<{ epoch: string; cutoff: ArchiveManifest["cutoff"] }>;
   authoritySnapshot(epoch: string): Promise<AuthoritySnapshot>;

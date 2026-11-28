@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtractionDialect, ExtractionScope } from "@anamnesis/core";
-import { RpcEmbeddingAttempt, RpcExtractionPacing, RpcIngestStatusParams } from "@anamnesis/protocol";
+import { RpcEmbeddingAttempt, RpcExtractionPacing, RpcStatusResult } from "@anamnesis/protocol";
 
 // Reuse the protocol's Zod schemas; the app has no independent Zod dependency.
 const providerUrl = RpcEmbeddingAttempt.shape.model.refine(value => URL.canParse(value) && ["http:", "https:"].includes(new URL(value).protocol));
@@ -249,7 +249,7 @@ export async function acquireInstallation(root: string): Promise<Installation> {
     await fs.chmod(tokenPath, 0o600);
     const incarnationPath = join(root, "incarnation.json");
     let incarnation: string;
-    try { incarnation = RpcIngestStatusParams.shape.data_incarnation.parse(JSON.parse(await fs.readFile(incarnationPath, "utf8"))); }
+    try { incarnation = RpcStatusResult.shape.data_incarnation.parse(JSON.parse(await fs.readFile(incarnationPath, "utf8"))); }
     catch (error) {
       if (!hasCode(error, "ENOENT")) throw error;
       incarnation = randomUUID();

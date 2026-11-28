@@ -98,7 +98,7 @@ Neither its retrieval accuracy nor a private model's efficacy is claimed.
 - Model/dimension/norm mismatch is quarantined. The first valid vector for an
   immutable Fact/profile is preserved. Different profiles have separate
   digest-named Neo4j vector indexes and cannot overwrite one another.
-- Recovery is explicit and bounded, not an ingestion worker or a spool
+- Recovery is explicit and bounded, not an ingestion worker or a deferred ingestion
   consumer. Activation requires vectors for every Fact of the target
   generation; zero Facts are covered.
 

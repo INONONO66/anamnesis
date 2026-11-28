@@ -25,26 +25,21 @@ export async function foreground(): Promise<void> {
   const budget = new RpcByteBudget();
   let serial: Promise<void> = Promise.resolve();
   const requests: Array<() => Promise<void>> = [];
-  let running = false, started = false, drainReady = false, embeddingReady = false, extractionReady = false, identityReady = false, preferDrain = false, nextLane = 0;
+  let running = false, started = false, recoveryReady = false, embeddingReady = false, extractionReady = false, identityReady = false, preferBackground = false, nextLane = 0;
   const identityDue = () => identityReady && requests.length === 0;
-  const backgroundReady = () => (drainReady || embeddingReady || extractionReady || identityDue()) && !stopping;
+  const backgroundReady = () => (recoveryReady || embeddingReady || extractionReady || identityDue()) && !stopping;
   // Worker lanes start idle; an unconfigured lane is never woken, so it stays idle for the emitter.
   let embeddingIdle = true, extractionIdle = true;
   const reportIdle = () => { if (embeddingIdle && extractionIdle) logEvent("info", "workers_idle"); };
   const lostOwnership = () => {
     ownershipLost = true; stopping = true;
-    runtime!.cancelDrain();
+    runtime!.stopBackground();
     setImmediate(() => { void stop().catch(logError); });
   };
-  /** One spool-drain turn. Woken by remember/recovery through the runtime's scheduler. */
-  const drainTurn = async () => {
-    drainReady = false;
-    try {
-      daemonTiming?.({ layer: "daemon", event: "drain_start" });
-      drainReady = await runtime!.drainTurn();
-      daemonTiming?.({ layer: "daemon", event: "drain_complete" });
-      if (!drainReady) logEvent("info", "drain_settled");
-    } catch (error) {
+  const recoveryTurn = async () => {
+    recoveryReady = false;
+    try { await runtime!.refresh(); }
+    catch (error) {
       logError(error);
       if (fault(error).code === "ownership_lost") lostOwnership();
     }
@@ -85,14 +80,14 @@ export async function foreground(): Promise<void> {
     catch (error) { logError(error); if (fault(error).code === "ownership_lost") lostOwnership(); }
   };
   const lanes = [
-    { ready: () => drainReady, turn: drainTurn },
+    { ready: () => recoveryReady, turn: recoveryTurn },
     { ready: () => embeddingReady, turn: embeddingTurn },
     { ready: () => extractionReady, turn: extractionTurn },
     { ready: identityDue, turn: identityTurn },
   ];
   // Background has its own coalesced admission slot. Alternate dispatch lanes
-  // so neither a saturated foreground nor a large drain cohort can starve one.
-  // Inside the slot the spool, embedding and extraction lanes take round-robin
+  // so neither a saturated foreground nor a busy worker can starve one.
+  // Inside the slot ready background lanes take round-robin
   // turns, so no single deep backlog can starve the others or stretch RPC latency.
   const kick = () => {
     if (running || !started) return;
@@ -102,8 +97,8 @@ export async function foreground(): Promise<void> {
         while (requests.length || backgroundReady()) {
           // Let real socket admissions arrive between turns, not just promises.
           await new Promise<void>(resolve => setImmediate(resolve));
-          if (backgroundReady() && (preferDrain || !requests.length)) {
-            preferDrain = false;
+          if (backgroundReady() && (preferBackground || !requests.length)) {
+            preferBackground = false;
             for (let offset = 0; offset < lanes.length; offset++) {
               const index = (nextLane + offset) % lanes.length;
               if (!lanes[index]!.ready()) continue;
@@ -113,7 +108,7 @@ export async function foreground(): Promise<void> {
             }
           } else {
             const request = requests.shift();
-            if (request) { preferDrain = true; await request(); }
+            if (request) { preferBackground = true; await request(); }
           }
         }
       } finally { running = false; }
@@ -232,12 +227,12 @@ export async function foreground(): Promise<void> {
       catch (error) { send(connection, errorResponse(error instanceof FrameFault ? error.id : null, fault(error)), reservation); return true; }
       const receivedAt = performance.now();
       const context = { method: request.method, id: request.id, connection: connectionId };
-      const timing = daemonTiming && ["status", "remember", "remember.batch", "ingest.status"].includes(request.method)
+      const timing = daemonTiming && ["status", "remember", "remember.batch"].includes(request.method)
         ? (event: string) => daemonTiming?.({ layer: "daemon", event, ...context, elapsedMs: performance.now() - receivedAt }) : undefined;
       timing?.("request_received");
       // Eight global/two connection slots remain available to authenticated
       // control. Pre-hello status/shutdown cannot spend the reserved headroom.
-      const control = connection.authenticated && ["status", "ingest.status", "shutdown"].includes(request.method);
+      const control = connection.authenticated && ["status", "shutdown"].includes(request.method);
       if ((reservation.pool === "ingress" && (!control || !budget.control(reservation))) ||
           pending >= RPC_LIMITS.queued_requests - (control ? 0 : 8) ||
           connection.pending >= RPC_LIMITS.queued_requests_per_connection - (control ? 0 : 2)) {
@@ -349,7 +344,6 @@ export async function foreground(): Promise<void> {
       case "status": return runtime.status(pending, stopping);
       case "remember": return runtime.remember(request.params, connection.context!);
       case "remember.batch": return runtime.rememberBatch(request.params.deliveries, connection.context!);
-      case "ingest.status": return runtime.ingestStatus(request.params);
       case "recall": return runtime.recall(request.params, connection.context!);
       case "projection": return runtime.projection(request.params, connection.context!);
       case "commit": return runtime.commit(request.params, connection.context!);
@@ -375,8 +369,8 @@ export async function foreground(): Promise<void> {
   }
   const stop = (): Promise<void> => shutdown ??= (async () => {
     stopping = true;
-    drainReady = false; embeddingReady = false; extractionReady = false; identityReady = false;
-    runtime?.cancelDrain();
+    recoveryReady = false; embeddingReady = false; extractionReady = false; identityReady = false;
+    runtime?.stopBackground();
     const closed = Promise.all(listeners.map(listener => new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()))));
     const deadline = setTimeout(() => {
       logError(new Error("graceful shutdown deadline exceeded"));
@@ -407,7 +401,7 @@ export async function foreground(): Promise<void> {
       if (lane === "embedding") { embeddingReady = true; embeddingIdle = false; }
       else if (lane === "extraction") { extractionReady = true; extractionIdle = false; }
       else if (lane === "identity") identityReady = true;
-      else drainReady = true;
+      else recoveryReady = true;
       kick();
     }, {
       enqueue: job => { if (!stopping) enqueue(async () => { if (!stopping) { await installation.assertOwned(); await job(); } }); },

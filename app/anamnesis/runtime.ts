@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { opendir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import neo4j, { type Driver, type RecordShape } from "neo4j-driver";
 import { Engine, envConfig, type EngineOptions } from "@anamnesis/core";
@@ -12,8 +12,7 @@ import { ExtractionAuditError, parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
 import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
-import { DurableSpool, type SpoolEntry } from "@anamnesis/core";
-import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcIngestStatusParams, type RpcIngestStatusResult, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
+import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
 import { EXTRACTION_PACING_DEFAULTS, hasCode, identityOwners, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
 import { loadTokenizers } from "./tokenizer.ts";
@@ -27,7 +26,9 @@ import { logEvent } from "./log.ts";
 import type { RpcSpacesImportParams, RpcSpacesListParams, RpcEpisodeRebuildParams } from "@anamnesis/protocol";
 import type { RpcIdentityCorrectParams, RpcIdentityDirectoryParams, RpcIdentityRebuildParams, RpcPeopleListParams, RpcPeopleShowParams } from "@anamnesis/protocol";
 import { IdentityRuntime } from "./identity-runtime.ts";
-import { Binding, DeliveryReservations, digest, originKey, revisionKey, sha } from "./delivery-reservations.ts";
+import { canonical, sha256 } from "./archive-manifest.ts";
+
+function digest(params: RpcRememberParams): string { return sha256(canonical({ digest_version: 1, params })); }
 
 export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
 type StoredEpisode = {
@@ -52,7 +53,7 @@ export interface RuntimeAuthorityOptions {
   authorityAdapter?: TrustedAuthorityAdapter;
 }
 /** Background lanes the daemon's single writer interleaves with requests. */
-export type BackgroundLane = "spool" | "embedding" | "extraction" | "identity";
+export type BackgroundLane = "recovery" | "embedding" | "extraction" | "identity";
 /** Outcome of one embedding turn. "stalled" keeps the wake pending for the next storage recovery; "waiting": a batch is
  * embedding off the serial slot and its end wakes the lane again. */
 export type EmbeddingTurn = "more" | "idle" | "stalled" | "waiting";
@@ -62,7 +63,7 @@ const EMBEDDING_BATCH = 32;
 export class Runtime {
   readonly capabilities: RpcCapabilities;
   /** Load asynchronous provider assets once, before accepting RPC traffic. */
-  static async create(installation: Installation, scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
+  static async create(installation: Installation, scheduleBackground: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}): Promise<Runtime> {
     const providers: EngineOptions = {};
     let gate: JevGate | undefined;
     let gateThreshold = 0.2;
@@ -88,33 +89,24 @@ export class Runtime {
       if (config.embedding) {
         const { model, dimensions, baseUrl } = config.embedding;
         // Configuration identity only; an alias does not attest immutable server weights.
-        const profile = { model, dimensions, model_incarnation: sha(JSON.stringify([baseUrl, model, dimensions])),
+        const profile = { model, dimensions, model_incarnation: sha256(JSON.stringify([baseUrl, model, dimensions])),
           document_prefix: "", query_prefix: "", max_input_bytes: 65536, norm: "unit_l2" as const, norm_tolerance: 0.01 };
         providers.embeddingProvider = new OpenAiEmbeddingProvider({ ...config.embedding, profile, timeoutMs: 30000 });
       }
     }
-    return new Runtime(installation, scheduleDrain, uploadLifecycle, authorityOptions, providers, pacing, gate, gateThreshold, scope, extractionEnabled);
+    return new Runtime(installation, scheduleBackground, uploadLifecycle, authorityOptions, providers, pacing, gate, gateThreshold, scope, extractionEnabled);
   }
   readonly uploads: Uploads;
   private readonly engine: Engine;
   private readonly reader: Driver;
   private readonly database: string;
-  private readonly spool: DurableSpool;
-  private readonly spoolRoot: string;
-  private readonly reservations: DeliveryReservations;
   private readonly authorityAdapter: TrustedAuthorityAdapter | undefined;
   private readonly backupOperations = new Map<string, { state: "running" | "complete" | "failed"; error?: string }>();
   private readonly restoreOperations = new Map<string, { state: "running" | "complete" | "failed"; error?: string }>();
   private epoch: number | undefined;
   private initialized = false;
   private available = false;
-  private readonly blocked = new Map<number, "missing_predecessor" | "dependency_cycle" | "stale_revision" | "revision_conflict">();
-  private readonly quarantined = new Map<number, "spool_corrupt" | "incarnation_mismatch">();
-  /** Revision keys that entries blocked as missing_predecessor wait for: a live commit of one is the only live write that can release spooled work. */
-  private readonly awaited = new Set<string>();
-  private drainJob: AsyncGenerator<void, void, void> | undefined;
-  private drainRequested = false;
-  private drainStopped = false;
+  private backgroundStopped = false;
   private readonly embedding = { requested: false, drained_total: 0, quarantined_total: 0, last_error: null as string | null };
   /** The batch embedding off the serial slot, and a failure it hands back to the next turn so the lane reports it. */
   private embeddingBatch: Promise<void> | undefined;
@@ -125,9 +117,9 @@ export class Runtime {
   private readonly pacer: PacedExtractionProvider | undefined;
   private extractionRequested = false;
   private readonly identityRuntime: IdentityRuntime;
-  /** While storage is unavailable, ticks re-enter the spool lane so drainTurn retries refresh() on the daemon's serial queue. */
-  private readonly recovery = new RecoveryProbe(() => { if (!this.drainStopped) this.scheduleDrain("spool"); }, RECOVERY_PROBE_MS, nodeTimers);
-  constructor(readonly installation: Installation, private readonly scheduleDrain: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS, private readonly gate?: JevGate, private readonly gateThreshold = 0.2, private readonly scope?: ExtractionScope, private readonly extractionEnabled = true) {
+  /** While storage is unavailable, the probe schedules a storage check on the daemon's serial queue. */
+  private readonly recovery = new RecoveryProbe(() => { if (!this.backgroundStopped) this.scheduleBackground("recovery"); }, RECOVERY_PROBE_MS, nodeTimers);
+  constructor(readonly installation: Installation, private readonly scheduleBackground: (lane: BackgroundLane) => void = () => {}, uploadLifecycle: UploadLifecycle = {}, authorityOptions: RuntimeAuthorityOptions = {}, providers: EngineOptions = {}, private readonly pacing: ExtractionPacingConfig = EXTRACTION_PACING_DEFAULTS, private readonly gate?: JevGate, private readonly gateThreshold = 0.2, private readonly scope?: ExtractionScope, private readonly extractionEnabled = true) {
     this.authorityAdapter = authorityOptions.authorityAdapter;
     const unpaced = { ...envConfig(), ...providers, tokenizers: loadTokenizers(), objectsRoot: join(installation.root, "objects") };
     this.pacer = unpaced.extractionProvider && new PacedExtractionProvider(unpaced.extractionProvider, { minIntervalMs: pacing.minIntervalMs, jitterFraction: pacing.jitterFraction });
@@ -138,7 +130,7 @@ export class Runtime {
     const writer = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
-    // Attempt/quarantine state is an operational ledger beside the spool, never graph rows; Neo4j holds only memory.
+    // Attempt/quarantine state is an operational ledger on disk, never graph rows; Neo4j holds only memory.
     this.engine = new Engine({ ...config, driver: writer, embeddingLedgerPath: join(installation.root, "embedding-state.json"),
       extractionJournalPath: join(installation.root, "extraction-state.json"),
       materializationStatePath: join(installation.root, "materialization-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
@@ -149,19 +141,36 @@ export class Runtime {
       read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } }) : undefined;
     this.identityRuntime = new IdentityRuntime({ engine: this.engine, provider: config.extractionProvider, owners: identityOwners(),
       requireStorage: () => this.requireStorage(),
-      schedule: () => { if (this.available && !this.drainStopped) this.scheduleDrain("identity"); } });
+      schedule: () => { if (this.available && !this.backgroundStopped) this.scheduleBackground("identity"); } });
     this.database = config.database ?? "neo4j";
     this.reader = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
       disableLosslessIntegers: true, connectionTimeout: 1000, connectionAcquisitionTimeout: 1500, maxTransactionRetryTime: 0,
     });
     this.uploads = new Uploads(config.objectsRoot, join(installation.root, "uploads"), uploadLifecycle);
-    this.spoolRoot = join(installation.root, "spool");
-    this.reservations = new DeliveryReservations(join(installation.root, "deliveries"));
-    this.spool = new DurableSpool(this.spoolRoot, { maxBytes: RPC_LIMITS.spool_bytes, maxFrameBytes: RPC_LIMITS.frame_bytes });
   }
   async init(): Promise<void> {
-    await this.reservations.init();
-    await mkdir(this.spoolRoot, { recursive: true, mode: 0o700 });
+    const spool = join(this.installation.root, "spool");
+    const directory = await opendir(spool).catch(error => { if (!hasCode(error, "ENOENT")) throw error; });
+    if (directory) {
+      try {
+        if (await directory.read()) throw new Error(`legacy spool is not empty: ${spool}`);
+      } finally { await directory.close(); }
+    }
+    const deliveries = join(this.installation.root, "deliveries");
+    const leftovers = await readdir(deliveries, { withFileTypes: true }).catch(error => {
+      if (!hasCode(error, "ENOENT")) throw error;
+      return [];
+    });
+    let removed = 0;
+    for (const entry of leftovers) {
+      if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) continue;
+      await rm(join(deliveries, entry.name));
+      removed++;
+    }
+    if (removed) {
+      await syncDirectory(deliveries);
+      logEvent("info", "legacy_deliveries_cleaned", { path: deliveries, removed });
+    }
     await this.uploads.init();
     await syncDirectory(this.installation.root);
     await this.refresh();
@@ -185,7 +194,7 @@ export class Runtime {
       const recovered = !this.available;
       this.available = true;
       this.recovery.disarm();
-      if (recovered) { this.wakeDrain(); this.wakeEmbedding(); this.wakeExtraction(); this.identityRuntime.wake(); }
+      if (recovered) { this.wakeEmbedding(); this.wakeExtraction(); this.identityRuntime.wake(); }
       return rows[0]?.e ?? undefined;
     } catch (error) {
       if (!storageUnavailable(error)) throw error;
@@ -198,68 +207,15 @@ export class Runtime {
     this.available = false;
     this.recovery.arm();
   }
-  private identity(binding: Binding) {
-    return { revision_key: revisionKey(binding.params), body_digest: binding.body_digest, data_incarnation: binding.incarnation };
-  }
-  private spooled(binding: Binding, sequence: number) {
-    return { state: "spooled" as const, ...this.identity(binding), fs_epoch: binding.fs_epoch, spool_seq: sequence };
-  }
-  private async pendingEntry(revision: string): Promise<SpoolEntry | null> {
-    const status = await this.spool.status();
-    if (status.pending === 0) return null;
-    // Snapshot the admitted cohort rather than using an unbounded sentinel. The
-    // page cursor then gives deterministic continuation without materializing the journal.
-    const cohort = status.nextSequence - 1;
-    const lookup = this.findPending(revision, cohort);
-    let step = await lookup.next();
-    while (!step.done) step = await lookup.next();
-    return step.value;
-  }
-  private async *findPending(revision: string, cohort: number): AsyncGenerator<void, SpoolEntry | null, void> {
-    let cursor: string | undefined;
-    while (true) {
-      const page = await this.spool.page({ ...(cursor ? { cursor } : {}), limit: 100, maxBytes: 4 * 1024 * 1024 });
-      yield;
-      const found = page.entries.find(entry => entry.sequence <= cohort && entry.revision === revision);
-      if (found) return found;
-      if (!page.nextCursor || page.entries.some(entry => entry.sequence >= cohort)) return null;
-      cursor = page.nextCursor;
-    }
-  }
-  private async *eachPendingPage(cohort: number, visit: (entry: SpoolEntry) => AsyncGenerator<void, void, void>): AsyncGenerator<void, void, void> {
-    let cursor: string | undefined;
-    while (true) {
-      const page = await this.spool.page({ ...(cursor ? { cursor } : {}), limit: 100, maxBytes: 4 * 1024 * 1024 });
-      yield;
-      for (const entry of page.entries) {
-        if (entry.sequence > cohort) return;
-        yield* visit(entry);
-        yield; // Invalid/blocked entries also consume a bounded turn.
-      }
-      if (!page.nextCursor || page.entries.some(entry => entry.sequence >= cohort)) return;
-      cursor = page.nextCursor;
-    }
-  }
-  private validated(entry: SpoolEntry): Binding {
-    const binding = Binding.parse(entry.body);
-    if (entry.incarnation !== this.installation.incarnation || binding.incarnation !== entry.incarnation) throw new RpcFault("incarnation_mismatch", "spool belongs to another installation incarnation");
-    if (entry.revision !== revisionKey(binding.params) || entry.predecessor !== binding.params.expected_previous_revision_key || entry.origin !== originKey(binding.params) || binding.body_digest !== digest(binding.params)) {
-      throw new RpcFault("spool_corrupt", "spool envelope identity mismatch");
-    }
-    return binding;
-  }
-  private async storedEpisode(key: string): Promise<StoredEpisode | undefined> {
-    return (await this.read<{ e: StoredEpisode }>("MATCH (e:Element:Episode {revision_key:$key}) RETURN properties(e) AS e", { key }))[0]?.e;
-  }
   /** The remember params a stored row implies: its digest version checked and a v2 row's retained lineage verified
    * against its stored digests, and against the delivery's own lineage when one is given. */
-  private storedParams(row: StoredEpisode, delivered?: RpcRememberParams): RpcRememberParams {
+  private storedParams(row: StoredEpisode, delivered: RpcRememberParams): RpcRememberParams {
     if (row.episode_digest_version !== undefined && row.episode_digest_version !== 2)
       throw new RpcFault("unsupported_digest_version", "stored Episode version is unsupported");
     if (row.episode_digest_version !== 2 && row.digest_format !== undefined && row.digest_format !== "rfc8785-v1")
       throw new RpcFault("unsupported_digest_version", "stored digest format is unsupported");
     const lineage = row.episode_digest_version === 2 ? verifyEpisodeLineage(row.id, row.lineage_digest ?? null, row) : undefined;
-    if (lineage && delivered) verifyLineageRetry(lineageMetadata(delivered), row.origin_role ?? null, lineage);
+    if (lineage) verifyLineageRetry(lineageMetadata(delivered), row.origin_role ?? null, lineage);
     return RpcRememberParams.parse({ episode: {
       schema: row.schema, time: { value: row.time_value, precision: row.time_precision },
       content: row.content, mass: row.mass, properties: JSON.parse(row.properties),
@@ -268,43 +224,19 @@ export class Runtime {
     ...(row.payload_hash ? { payload_hash: row.payload_hash } : {}),
     ...(lineage ? { origin_role: row.origin_role, lineage_mode: lineage.lineage_mode, parent_recall_ids: lineage.parent_recall_ids } : {}) });
   }
-  private async committed(binding: Binding, created = false): Promise<RpcCommittedResult | null> {
-    const row = await this.storedEpisode(revisionKey(binding.params));
-    return row ? this.verified(row, binding, created) : null;
-  }
-  /** A stored row answers a delivery only when it re-derives the delivery's complete envelope and its own core digest. */
-  private verified(row: StoredEpisode, binding: Binding, created = false, params = this.storedParams(row, binding.params)): RpcCommittedResult {
+  /** A stored row answers a delivery only when it verifies the complete envelope and its own core digest. */
+  private rememberExisting(row: StoredEpisode, delivered: RpcRememberParams, identity: Pick<RpcCommittedResult, "revision_key" | "body_digest" | "data_incarnation">): RpcCommittedResult {
+    const stored = this.storedParams(row, delivered);
     const candidate = row.episode_digest_version === 2
-      ? { ...binding.params, ...parseEpisodeLineage(lineageMetadata(binding.params)) } : compatibilityParams(binding.params);
-    if (digest(params) !== digest(candidate)) throw new RpcFault("revision_conflict", "stored revision has a different delivery body");
+      ? { ...delivered, ...parseEpisodeLineage(lineageMetadata(delivered)) } : compatibilityParams(delivered);
+    if (digest(stored) !== digest(candidate)) throw new RpcFault("revision_conflict", "stored revision has a different delivery body");
     // Verify the core digest as well as the complete RPC envelope (which also
     // binds mass and origin). A revision-only match can never yield success.
     const coreDigest = elementDigest(candidate.episode, { payloadHash: candidate.payload_hash ?? null,
       previousRevisionKey: candidate.expected_previous_revision_key, format: row.digest_format ?? null,
       episodeDigestVersion: row.episode_digest_version ?? null, originRole: row.origin_role ?? null, lineageDigest: row.lineage_digest ?? null });
     if (row.digest !== coreDigest) throw new RpcFault("revision_conflict", "stored digest does not verify");
-    return { state: "committed", ...this.identity(binding), id: row.id, created, ingest_seq: row.ingest_seq };
-  }
-  private async write(binding: Binding, context?: InstallationContext): Promise<RpcCommittedResult> {
-    const params = binding.params;
-    let payload: { payload: Uint8Array<ArrayBuffer>; payload_media_type: string } | undefined;
-    if (params.payload_hash) {
-      const metadata = await this.uploads.metadata(params.payload_hash);
-      if (!metadata) throw new RpcFault("object_not_found", "remember references an uncommitted object");
-      payload = { payload: new Uint8Array(await this.uploads.store.get(params.payload_hash)), payload_media_type: metadata.media_type };
-    }
-    await this.installation.assertOwned();
-    const metadata = lineageMetadata(params);
-    if (metadata && !context) throw new RpcFault("lineage_binding_mismatch", "new lineage requires authenticated connection custody");
-    const result = await runtimeTimed("engine.remember", () => this.engine.remember({ ...params.episode, source_revision: params.source_revision,
-      expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, metadata ? { metadata, context: context! } : undefined));
-    // A created Episode is answered from the engine's own commit; a revision the engine found stored is re-read and verified.
-    const committed = result.created && result.ingest_seq !== undefined
-      ? { state: "committed" as const, ...this.identity(binding), id: result.id, created: true, ingest_seq: result.ingest_seq }
-      : await this.committed(binding, result.created);
-    if (!committed || committed.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
-    if (committed.created) { this.wakeEmbedding(); this.wakeExtraction(); this.identityRuntime.wake(); } // Direct and spool-drained commits alike enqueue worker work.
-    return committed;
+    return { state: "committed", ...identity, id: row.id, created: false, ingest_seq: row.ingest_seq };
   }
   /** `remember` for each delivery in order, in one serial turn. A non-retryable refusal answers its delivery alone and the
    * batch goes on; any other failure ends the batch and fails the request, so no later delivery is admitted before an
@@ -321,93 +253,49 @@ export class Runtime {
     }
     return { results };
   }
-  async remember(params: RpcRememberParams, context?: InstallationContext) {
-    await this.installation.assertOwned();
-    if ((await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool is quarantined; admission is stopped");
-    const key = revisionKey(params);
-    const candidate: Binding = { digest_version: 1, params, body_digest: digest(params), incarnation: this.installation.incarnation, fs_epoch: this.installation.epoch };
-    // One read answers both the writer-epoch check and whether the store already holds this revision.
+  async remember(params: RpcRememberParams, context?: InstallationContext): Promise<RpcCommittedResult> {
+    const origin = params.episode.origin;
+    const originKey = sha256(JSON.stringify([origin.source, origin.session, origin.actor, origin.record]));
+    const key = sha256(JSON.stringify([originKey, params.source_revision]));
+    const identity = { revision_key: key, body_digest: digest(params), data_incarnation: this.installation.incarnation };
+    // One read checks both the writer epoch and whether the store holds this revision.
     const stored = await this.refresh(key);
-    if (stored) return this.rememberExisting(key, candidate, stored);
-    const pending = await this.pendingEntry(key);
-    const pendingBinding = pending ? this.validated(pending) : null;
-    const previous = pendingBinding ?? await this.reservations.read(key);
-    const binding = await this.admitBinding(params, previous, candidate, context);
-    if (pendingBinding) await this.reservations.release(key);
-    const metadata = lineageMetadata(params);
-    // A lineage admission is never spooled, so its stored row is its only record: it writes no delivery reservation.
-    const bound = !previous && !metadata;
-    if (bound) await this.reservations.write(key, binding);
-    if (this.available) {
-      const written = await this.tryWrite(binding, key, bound, context);
-      if (written) return written;
+    if (stored) return this.rememberExisting(stored, params, identity);
+    if (!this.available) throw new RpcFault("storage_unavailable", "database unavailable", true);
+
+    let payload: { payload: Uint8Array<ArrayBuffer>; payload_media_type: string } | undefined;
+    if (params.payload_hash) {
+      const metadata = await this.uploads.metadata(params.payload_hash);
+      if (!metadata) throw new RpcFault("object_not_found", "remember references an uncommitted object");
+      payload = { payload: new Uint8Array(await this.uploads.store.get(params.payload_hash)), payload_media_type: metadata.media_type };
     }
-    if (metadata) throw new RpcFault("storage_unavailable", "lineage admission is never spooled without parent authority", true);
-    return this.spoolBinding(params, key, binding);
-  }
-  /** A revision the store already committed answers from its retained row; any obsolete reservation is removed. */
-  private async rememberExisting(key: string, candidate: Binding, row: StoredEpisode): Promise<RpcCommittedResult> {
-    const existing = this.verified(row, candidate);
-    await this.reservations.release(key);
-    return existing;
-  }
-  /** The admission gates in order: body conflict, incarnation, referenced object, lineage authority (spool health is checked on entry). */
-  private async admitBinding(params: RpcRememberParams, previous: Binding | null, candidate: Binding, context?: InstallationContext): Promise<Binding> {
-    if (previous && previous.body_digest !== candidate.body_digest) throw new RpcFault("revision_conflict", "revision already binds a different delivery body");
-    const binding = previous ?? candidate;
-    if (binding.incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
-    if (params.payload_hash && !await this.uploads.metadata(params.payload_hash)) throw new RpcFault("object_not_found", "remember references an uncommitted object");
+    await this.installation.assertOwned();
     const metadata = lineageMetadata(params);
+    let lineage: { metadata: typeof metadata; context: InstallationContext } | undefined;
     if (metadata) {
       if (!context?.client_binding) throw new RpcFault("lineage_binding_mismatch", "authenticated connection required");
-      if (!this.available) throw new RpcFault("storage_unavailable", "lineage admission requires retained authority", true);
       parseEpisodeLineage(metadata);
+      lineage = { metadata, context };
     }
-    return binding;
-  }
-  /** Live write; a non-storage failure removes the binding this delivery just wrote and rethrows, storage loss marks unavailable and falls through to the spool.
-   * A created Episode wakes the drain only when a blocked entry waits for it. */
-  private async tryWrite(binding: Binding, key: string, bound: boolean, context?: InstallationContext): Promise<Awaited<ReturnType<Runtime["write"]>> | null> {
     try {
-      const result = await this.write(binding, context);
-      await this.reservations.release(key);
-      if (result.created && this.awaited.has(key)) this.wakeDrain();
-      return result;
-    }
-    catch (error) {
-      if (!storageUnavailable(error)) {
-        if (bound) await this.reservations.remove(key);
-        throw error;
+      const result = await runtimeTimed("engine.remember", () => this.engine.remember({ ...params.episode, source_revision: params.source_revision,
+        expected_previous_revision_key: params.expected_previous_revision_key, ...payload }, lineage));
+      if (result.created && result.ingest_seq !== undefined) {
+        this.wakeEmbedding(); this.wakeExtraction(); this.identityRuntime.wake();
+        return { state: "committed", ...identity, id: result.id, created: true, ingest_seq: result.ingest_seq };
       }
-      this.markUnavailable();
-      return null;
+      const row = (await this.read<{ e: StoredEpisode }>("MATCH (e:Element:Episode {revision_key:$key}) RETURN properties(e) AS e", { key }))[0]?.e;
+      if (!row || row.id !== result.id) throw new RpcFault("internal_error", "database did not expose the committed delivery");
+      return this.rememberExisting(row, params, identity);
+    } catch (error) {
+      if (storageUnavailable(error)) this.markUnavailable();
+      throw error;
     }
-  }
-  private async spoolBinding(params: RpcRememberParams, key: string, binding: Binding) {
-    await this.installation.assertOwned();
-    const existing = await this.pendingEntry(key);
-    if (existing) {
-      const durable = this.validated(existing);
-      await this.reservations.release(key);
-      return this.spooled(durable, existing.sequence);
-    }
-    const sequence = await this.spool.append({ origin: originKey(params), revision: key,
-      predecessor: params.expected_previous_revision_key, body: binding, incarnation: binding.incarnation });
-    await syncDirectory(this.spoolRoot);
-    await this.installation.assertOwned();
-    if (sequence < 1 || (await this.spool.status()).quarantined) throw new RpcFault("spool_corrupt", "spool did not publish a verifiable durable entry");
-    await this.reservations.release(key);
-    this.wakeDrain();
-    return this.spooled(binding, sequence);
-  }
-  private wakeDrain(): void {
-    this.drainRequested = true;
-    if (this.available && !this.drainStopped) this.scheduleDrain("spool");
   }
   private wakeEmbedding(): void {
     if (!this.capabilities.embeddings) return; // Unconfigured: the worker is never scheduled and never reports.
     this.embedding.requested = true;
-    if (this.available && !this.drainStopped) this.scheduleDrain("embedding");
+    if (this.available && !this.backgroundStopped) this.scheduleBackground("embedding");
   }
   /** Called only by the daemon's serial owner, never from a second writer. The owner alternates a background turn with
    * a queued request, so the turn's length bounds RPC latency during a backlog: the turn only finds the next batch of
@@ -415,7 +303,7 @@ export class Runtime {
    * deadline). A failed batch is rethrown by the next turn, so the daemon logs it and handles ownership loss. */
   async embeddingTurn(): Promise<EmbeddingTurn> {
     if (this.embeddingFailure !== undefined) { const failure = this.embeddingFailure; this.embeddingFailure = undefined; throw failure; }
-    if (this.drainStopped || !this.available) return "stalled";
+    if (this.backgroundStopped || !this.available) return "stalled";
     if (this.embeddingBatch) return "waiting";
     if (!this.embedding.requested) return "idle";
     // Consume the request before working: a remember committing mid-turn re-arms the lane, and that wake must survive
@@ -440,11 +328,11 @@ export class Runtime {
   private wakeExtraction(): void {
     if (!this.extraction) return;
     this.extractionRequested = true;
-    if (this.available && !this.drainStopped) this.scheduleDrain("extraction");
+    if (this.available && !this.backgroundStopped) this.scheduleBackground("extraction");
   }
   /** One bounded scheduler turn: database work only, provider calls stay in tracked in-flight pipelines. */
   async extractionTurn(): Promise<ExtractionTurn | "stalled"> {
-    if (this.drainStopped || !this.available || !this.extraction) return "stalled";
+    if (this.backgroundStopped || !this.available || !this.extraction) return "stalled";
     if (!this.extractionRequested) return this.extraction.inFlightCount ? "waiting" : "idle";
     // Consume the request before working: a pipeline settling mid-turn re-arms the lane and that wake must survive.
     this.extractionRequested = false;
@@ -462,7 +350,7 @@ export class Runtime {
     }
   }
   async identityTurn(): Promise<import("@anamnesis/core").IdentityTurn | "stalled"> {
-    if (this.drainStopped || !this.available) return "stalled";
+    if (this.backgroundStopped || !this.available) return "stalled";
     try {
       await this.installation.assertOwned();
       const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
@@ -491,7 +379,7 @@ export class Runtime {
     try {
       let deferred = 0, reason: string | null = null;
       for (const id of ids) {
-        if (this.drainStopped) break;
+        if (this.backgroundStopped) break;
         const step = await runtimeTimed("engine.embedOutbox", () => this.engine.embedOutbox([id]));
         this.embedding.drained_total += step.drained;
         this.embedding.quarantined_total += step.quarantined;
@@ -505,183 +393,21 @@ export class Runtime {
       if (storageUnavailable(error)) { this.markUnavailable(); this.embedding.requested = true; return; } // Recovery re-schedules the pending wake.
       this.embedding.last_error = String(error).slice(0, 512);
       this.embeddingFailure = error;
-      if (!this.drainStopped) this.scheduleDrain("embedding");
+      if (!this.backgroundStopped) this.scheduleBackground("embedding");
     }
   }
-  /** Called only by the daemon's serial owner, never from a second writer. */
-  async drainTurn(): Promise<boolean> {
-    if (!this.drainStopped && !this.available) await this.refresh();
-    if (this.drainStopped || !this.available) {
-      await this.drainJob?.return(); this.drainJob = undefined;
-      return false;
-    }
-    try {
-      await this.installation.assertOwned();
-      const rows = await this.read<{ epoch: number }>("MATCH (m:Meta {key:'meta'}) RETURN m.writer_epoch AS epoch");
-      if (rows[0]?.epoch !== this.epoch) throw new RpcFault("ownership_lost", "database writer epoch changed");
-      if (!this.drainJob) {
-        if (!this.drainRequested) return false;
-        this.drainRequested = false;
-        this.drainJob = this.drain();
-      }
-      if ((await this.drainJob.next()).done) this.drainJob = undefined;
-      return !!this.drainJob || this.drainRequested;
-    } catch (error) {
-      await this.drainJob?.return(); this.drainJob = undefined;
-      if (!storageUnavailable(error)) throw error;
-      this.markUnavailable();
-      this.drainRequested = true; // Recovery will wake a fresh cohort.
-      return false;
-    }
-  }
-  /** The active bounded turn finishes; no continuation may write after stop. */
-  cancelDrain(): void { this.drainStopped = true; this.drainRequested = false; }
-  /** Follow only uncommitted, executable dependencies; retain no chain-sized set. */
-  private async *unresolvedPredecessor(entry: SpoolEntry, cohort: number): AsyncGenerator<void, SpoolEntry | null, void> {
-    if (!entry.predecessor) return null;
-    const rows = await this.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
-    yield;
-    if (rows[0]?.found) return null;
-    const predecessor = yield* this.findPending(entry.predecessor, cohort);
-    if (!predecessor || this.quarantined.has(predecessor.sequence)) return null;
-    const reason = this.blocked.get(predecessor.sequence);
-    if (reason && reason !== "dependency_cycle") return null;
-    this.validated(predecessor);
-    return predecessor;
-  }
-  private async *dependencyReason(entry: SpoolEntry, cohort: number): AsyncGenerator<void, "missing_predecessor" | "dependency_cycle", void> {
-    // Floyd traversal distinguishes a cycle member from a tail entering it.
-    // DB/missing/invalid/stale termini stop the chain. Each lookup is paged;
-    // this trades repeated journal scans for constant chain memory.
-    let slow: SpoolEntry | null = entry, fast: SpoolEntry | null = entry;
-    do {
-      slow = yield* this.unresolvedPredecessor(slow, cohort);
-      fast = yield* this.unresolvedPredecessor(fast, cohort);
-      if (fast) fast = yield* this.unresolvedPredecessor(fast, cohort);
-      if (!slow || !fast) return "missing_predecessor";
-    } while (slow.revision !== fast.revision);
-    let start: SpoolEntry | null = entry;
-    while (start.revision !== slow.revision) {
-      start = yield* this.unresolvedPredecessor(start, cohort);
-      slow = yield* this.unresolvedPredecessor(slow, cohort);
-      if (!start || !slow) return "missing_predecessor";
-    }
-    return start.revision === entry.revision ? "dependency_cycle" : "missing_predecessor";
-  }
-  private async *drain(): AsyncGenerator<void, void, void> {
-    this.blocked.clear(); this.quarantined.clear(); this.awaited.clear();
-    const spool = await this.spool.status();
-    if (spool.quarantined) return;
-    const cohort = spool.nextSequence - 1;
-    yield;
-    // Page/status/complete still scan O(N) inside core. Yields bound runtime
-    // entries and DB operations per turn, not the latency of those core calls.
-    const runtime = this;
-    let progress = true;
-    while (progress) {
-      progress = false;
-      yield* this.eachPendingPage(cohort, async function* (entry) {
-        let binding: Binding;
-        try { binding = runtime.validated(entry); }
-        catch (error) {
-          const reason = fault(error).code;
-          if (reason !== "spool_corrupt" && reason !== "incarnation_mismatch") throw error;
-          runtime.quarantined.set(entry.sequence, reason); return;
-        }
-        try {
-          const existing = await runtime.committed(binding);
-          yield;
-          if (!existing && entry.predecessor) {
-            const predecessor = await runtime.read<{ found: number }>("MATCH (e:Episode {revision_key:$key}) RETURN count(e) AS found", { key: entry.predecessor });
-            yield;
-            // Retained suffix visibility is not evidence that a predecessor
-            // still needs execution. Check the DB before deferring to it.
-            if (!predecessor[0]?.found) {
-              if (!(yield* runtime.findPending(entry.predecessor, cohort))) {
-                runtime.blocked.set(entry.sequence, "missing_predecessor");
-                runtime.awaited.add(entry.predecessor);
-              }
-              return;
-            }
-          }
-          const before = await runtime.spool.status();
-          yield;
-          const result = existing ?? await runtime.write(binding);
-          yield;
-          await runtime.installation.assertOwned();
-          await runtime.spool.complete(entry.sequence);
-          await syncDirectory(runtime.spoolRoot);
-          yield;
-          const after = await runtime.spool.status();
-          // Completing an already-committed suffix behind a blocked head is
-          // idempotent, not progress. Preserve advancement earlier in the pass.
-          progress = progress || result.created || after.pending < before.pending;
-          runtime.blocked.delete(entry.sequence);
-        } catch (error) {
-          const reason = fault(error).code;
-          if (reason === "revision_conflict" || reason === "stale_revision") runtime.blocked.set(entry.sequence, reason);
-          else throw error;
-        }
-      });
-    }
-    yield* this.eachPendingPage(cohort, async function* (entry) {
-      if (runtime.quarantined.has(entry.sequence) || runtime.blocked.has(entry.sequence)) return;
-      const committed = await runtime.committed(runtime.validated(entry));
-      yield;
-      if (!committed) runtime.blocked.set(entry.sequence, yield* runtime.dependencyReason(entry, cohort));
-    });
-  }
-  async ingestStatus(identity: RpcIngestStatusParams): Promise<RpcIngestStatusResult> {
-    if (identity.data_incarnation !== this.installation.incarnation) throw new RpcFault("incarnation_mismatch", "delivery belongs to another incarnation");
-    const stored = await this.refresh(identity.revision_key);
-    // `unknown` carries the storage state this very call observed: without storage a committed delivery whose spool
-    // entry is gone looks unknown too, and only the daemon can say which observation the verdict rests on.
-    const unknown = () => ({ state: "unknown" as const, ...identity, storage: this.available ? "available" as const : "unavailable" as const });
-    if (stored) {
-      const params = this.storedParams(stored);
-      const binding = { digest_version: 1 as const, params, body_digest: digest(params), incarnation: identity.data_incarnation, fs_epoch: this.installation.epoch };
-      const committed = this.verified(stored, binding, false, params);
-      await this.reservations.release(identity.revision_key);
-      return binding.body_digest === identity.body_digest ? committed : unknown();
-    }
-    const spoolStatus = await this.spool.status();
-    if (spoolStatus.quarantined) {
-      const reservation = await this.reservations.read(identity.revision_key);
-      if (reservation && reservation.body_digest !== identity.body_digest) return unknown();
-      return { state: "quarantined", ...identity, reason: "spool_corrupt" };
-    }
-    const entry = await this.pendingEntry(identity.revision_key);
-    if (!entry) return unknown();
-    const quarantined = this.quarantined.get(entry.sequence);
-    if (quarantined) {
-      // An unparseable quarantined body cannot provide a digest to compare.
-      const binding = Binding.safeParse(entry.body);
-      if (binding && binding.body_digest !== identity.body_digest) return unknown();
-      await this.reservations.release(identity.revision_key);
-      return { state: "quarantined", ...identity, reason: quarantined };
-    }
-    const binding = this.validated(entry);
-    await this.reservations.release(identity.revision_key);
-    if (binding.body_digest !== identity.body_digest) return unknown();
-    const reason = this.blocked.get(entry.sequence);
-    if (reason) return { ...this.spooled(binding, entry.sequence), state: "blocked", expected_previous_revision_key: entry.predecessor, reason };
-    return this.spooled(binding, entry.sequence);
-  }
+  /** The active turn finishes; no worker continuation may write after stop. */
+  stopBackground(): void { this.backgroundStopped = true; this.recovery.stop(); }
   async status(pending: number, stopping: boolean): Promise<RpcStatusResult> {
     await this.refresh();
-    const spool = await this.spool.status();
-    let bytes = 0;
-    try { bytes = (await stat(join(this.spoolRoot, "spool.journal"))).size; }
-    catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
     let outbox: number | null = null;
     if (this.available) {
       try { outbox = (await runtimeTimed("engine.status", () => this.engine.status())).pendingOutbox; }
       catch (error) { if (!storageUnavailable(error)) throw error; this.markUnavailable(); }
     }
-    return { version: 1, state: stopping ? "stopping" : this.available && !spool.quarantined && this.quarantined.size === 0 ? "ready" : "degraded",
+    return { version: 1, state: stopping ? "stopping" : this.available ? "ready" : "degraded",
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
       fs_epoch: this.installation.epoch, queue: { pending, capacity: RPC_LIMITS.queued_requests },
-      spool: { pending: spool.pending, blocked: this.blocked.size, quarantined: spool.quarantined ? 1 : this.quarantined.size, bytes },
       outbox_pending: outbox, capabilities: this.capabilities, workers: this.workers(outbox) };
   }
   async backup(context: InstallationContext, destination: string, operationId: string) {
@@ -694,7 +420,7 @@ export class Runtime {
     const objectRoot = join(this.installation.root, "objects");
     const objects = await objectInventory(objectRoot);
     const config = Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
-    const manifest = manifestTemplate(operationId, fenced.cutoff, authority, objects, createHash("sha256").update(config).digest("hex"));
+    const manifest = manifestTemplate(operationId, fenced.cutoff, authority, objects, sha256(config));
     const cached = fencedAdapter(this.authorityAdapter, fenced, authority);
     this.backupOperations.set(operationId, { state: "running" });
     try { await backupOwned({ root: this.installation.root, destination, operationId, compatibility: { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [manifest.compatibility.neo4j_version], neo4j_image_digests: [manifest.compatibility.neo4j_image_digest], episode_digest_version_ceiling: 2 }, manifest, objectRoot }, cached); this.backupOperations.set(operationId, { state: "complete" }); return { state: "complete", operation_id: operationId }; }
@@ -821,9 +547,7 @@ export class Runtime {
   listPeople(params: RpcPeopleListParams) { return this.identityRuntime.list(params); }
   showPerson(params: RpcPeopleShowParams) { return this.identityRuntime.show(params); }
   async close(): Promise<void> {
-    this.recovery.stop();
-    this.cancelDrain();
-    await this.drainJob?.return(); this.drainJob = undefined;
+    this.stopBackground();
     await this.extraction?.close(); // In-flight pipelines settle before the writer goes away.
     await this.embeddingBatch;
     await this.uploads.close(); await this.engine.close(); await this.reader.close();

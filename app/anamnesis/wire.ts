@@ -21,7 +21,6 @@ export function fault(error: unknown): RpcFault {
     if (parsed.success) return new RpcFault(parsed.data, error.message.slice(0, 512));
     if (["ENOSPC", "EDQUOT"].includes(String(error.code))) return new RpcFault("resource_exhausted", "filesystem quota exhausted");
   }
-  if (error instanceof Error && error.message.includes("spool quota")) return new RpcFault("resource_exhausted", "spool quota exhausted");
   return new RpcFault("internal_error", "internal runtime error");
 }
 export function envelope() {

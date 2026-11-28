@@ -146,7 +146,6 @@ async function deliver(client: RpcClient | null, built: readonly Built[]): Promi
   const { results } = await client.request("remember.batch", { deliveries: sent.map(item => item.params) });
   if (results.length !== sent.length) throw new Error("remember_batch_answer_count");
   for (const [position, result] of results.entries()) {
-    if (result.state === "spooled") throw new Error("remember_spooled");
     outcomes[sent[position]!.index] = result.state === "refused" ? { refused: result.code } : result.created ? "created" : "duplicate";
   }
   return outcomes;

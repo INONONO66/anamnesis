@@ -62,7 +62,6 @@ async function startDaemon(){daemon=launch(process.execPath,['dist/anamnesis-dae
 async function client(){const c=await RpcClient.connect(root+'/anamnesis.sock',token);clients.add(c);return c;}
 async function stopDaemon(){for(const c of clients){await c.close();}clients.clear();const stopped=await daemon.stop('SIGTERM');assert.equal(stopped.code,0,stopped.output);assert.match(stopped.output,/"event":"stopped"/);await assert.rejects(stat(root+'/anamnesis.sock'),{code:'ENOENT'});}
 const input=(record)=>({episode:{schema:'anamnesis.original-message/1',time:{value:'2026-09-09T00:00:00Z',precision:'second'},content:`actual Node ${record}`,origin:{source:'surface',session:'session',actor:'operator',record},mass:1,properties:{language:'en'}},source_revision:'v1',expected_previous_revision_key:null});
-const identity=result=>({revision_key:result.revision_key,body_digest:result.body_digest,data_incarnation:result.data_incarnation});
 try {
   attempted=true;
   await docker(['create','--name',name,'--label',`anamnesis.qa.owner=${owner}`,'-p','127.0.0.1::7687','-e','NEO4J_AUTH','-e','NEO4J_server_memory_heap_max__size=512M','-e','NEO4J_server_memory_pagecache_size=256M','neo4j:5.26-community']);
@@ -88,31 +87,22 @@ try {
   await assert.rejects(c.request('remember',{...firstInput,episode:{...firstInput.episode,mass:0.5}}),{code:'revision_conflict'});
   await assert.rejects(c.request('remember',{...firstInput,source_revision:'v2'}),{code:'stale_revision'});
   const revised=await c.request('remember',{...firstInput,source_revision:'v2',expected_previous_revision_key:first.revision_key});assert.equal(revised.ingest_seq,2);
-  assert.equal((await c.request('ingest.status',identity(first))).state,'committed');
-  assert.equal((await c.request('ingest.status',{...identity(first),body_digest:'0'.repeat(64)})).state,'unknown');
-  checkpoint('upload remember duplicate conflict predecessor and exact status',{first,duplicate,revised});
+  checkpoint('upload remember duplicate conflict and predecessor',{first,duplicate,revised});
   const cliStatus=JSON.parse(await command(process.execPath,['dist/anamnesis-ops.mjs','status'],{env}));assert.equal(cliStatus.state,'ready');
   const verify=JSON.parse(await command(process.execPath,['dist/anamnesis-ops.mjs','verify'],{env}));assert.equal(verify.ok,true);checkpoint('ops status and verify',verify);
   await docker(['stop','-t','10',name]);
-  const queued=[];
-  for(let i=0;i<50;i++){const params=input(`offline-${i}`);const receipt=await c.request('remember',params);assert.equal(receipt.state,'spooled');queued.push({params,receipt});}
-  const degraded=await c.request('status',{});assert.equal(degraded.spool.pending,50);assert.equal(degraded.storage,'unavailable');
-  checkpoint('DB stopped: 50 durably accepted records',{status:degraded,receipts:queued.map(x=>x.receipt)});
+  const retry=input('offline');
+  await assert.rejects(c.request('remember',retry),{code:'storage_unavailable',retryable:true});
+  const degraded=await c.request('status',{});assert.equal(degraded.storage,'unavailable');
   await stopDaemon();
   await startDaemon();c=await client();
-  const restarted=await c.request('status',{});assert.equal(restarted.data_incarnation,status.data_incarnation);assert.notEqual(restarted.fs_epoch,status.fs_epoch);assert.equal(restarted.spool.pending,50);
-  assert.deepEqual(await c.request('remember',queued[0].params),queued[0].receipt);
-  checkpoint('daemon restarted offline: receipts recovered',restarted);
-  const settled=once(daemon.signals,'drain_settled',{signal:AbortSignal.timeout(120000)});
+  const restarted=await c.request('status',{});assert.equal(restarted.data_incarnation,status.data_incarnation);assert.notEqual(restarted.fs_epoch,status.fs_epoch);
   await startDatabase();
-  await c.request('status',{});await settled;
-  // The embedding outbox holds Facts without a vector (D56); no extraction runs here, so the drained Episodes add none.
-  const drained=await c.request('status',{});assert.equal(drained.storage,'available');assert.equal(drained.spool.pending,0);assert.equal(drained.outbox_pending,0);
-  const committed=[];
-  for(const item of queued){const result=await c.request('ingest.status',identity(item.receipt));assert.equal(result.state,'committed');committed.push(result);}
-  assert.equal(new Set(committed.map(x=>x.ingest_seq)).size,50);checkpoint('DB restarted: all 50 deliveries drained through Engine',{status:drained,committed});
+  const committed=await c.request('remember',retry);assert.equal(committed.created,true);assert.equal(committed.ingest_seq,3);
+  assert.equal((await c.request('status',{})).outbox_pending,0);
+  checkpoint('DB restarted: client retry commits once',{degraded,committed});
   await stopDaemon();
-  await startDaemon();c=await client();assert.equal((await c.request('ingest.status',identity(first))).state,'committed');assert.equal((await c.request('status',{})).spool.pending,0);
+  await startDaemon();c=await client();assert.deepEqual(await c.request('remember',firstInput),{...first,created:false});
   checkpoint('ordinary restart preserves committed delivery evidence',true);
   await c.request('shutdown',{});clients.delete(c);await c.close();
   const exited=await daemon.done;assert.equal(exited.code,0);assert.match(exited.output,/"event":"stopped"/);checkpoint('RPC shutdown completed',true);

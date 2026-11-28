@@ -48,9 +48,8 @@ parent cannot establish new lineage. Children never depend on later retention.
 The row, v2 digest, Episode, revision CAS and session topology commit
 together under the writer fence. Lineage rows are not receipt-TTL data.
 
-New explicit lineage admission requires the database; it is not acknowledged
-through the legacy spool without parent custody. Metadata-free spool behavior
-is unchanged. On database-outcome uncertainty, the immutable stored revision
+Both explicit lineage and metadata-free admission require the database.
+On database-outcome uncertainty, the immutable stored revision
 is checked before any new parent lookup on retry.
 
 ## Frozen digests and retries

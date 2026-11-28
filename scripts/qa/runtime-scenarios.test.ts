@@ -400,7 +400,7 @@ test("cleanup distinguishes absent resources from Docker failure and removal fai
     : result("removal denied", 1)));
 });
 
-for (const caseName of ["uds-ingest", "object-spool-crashes", "outage-drain-50", "managed-ingest-restart"]) {
+for (const caseName of ["uds-ingest", "object-upload-crash", "storage-retry", "managed-ingest-restart"]) {
   test(`${caseName} selects the actual Node surface and cannot be replaced with a unit test`, () => {
     const args = ["--case", caseName, "--evidence-root", "proof"];
     expect(parseOptions(args).testPaths).toEqual([]);

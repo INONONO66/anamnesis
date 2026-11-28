@@ -55,7 +55,7 @@ test("real Node daemon: verified committed artifacts, lost UDS reply, death and 
     const timingRows = async (dir: string, file: string) => (await readFile(join(dir, file), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     const clientTiming = await timingRows(healthy, "continuous-timing.jsonl");
     const daemonTiming = await timingRows(healthy, "continuous-daemon-timing.jsonl");
-    for (const request of clientTiming.filter(row => row.layer === "client" && row.event === "request" && ["status", "remember", "ingest.status"].includes(row.method))) {
+    for (const request of clientTiming.filter(row => row.layer === "client" && row.event === "request" && ["status", "remember"].includes(row.method))) {
       expect(request.deadlineMs).toBe(120_000);
       expect(clientTiming.find(row => row.layer === "client" && row.event === "response" && row.id === request.id)).toMatchObject({ method: request.method, elapsedMs: expect.any(Number) });
       const daemonRequest = daemonTiming.filter(row => row.id === request.id);
@@ -65,7 +65,8 @@ test("real Node daemon: verified committed artifacts, lost UDS reply, death and 
       expect(daemonRequest.some(row => row.layer === "runtime" && row.operation === "neo4j.read" && row.event === "start")).toBe(true);
       expect(daemonRequest.some(row => row.layer === "runtime" && row.operation === "neo4j.read" && row.event === "complete")).toBe(true);
     }
-    expect(clientTiming.filter(row => row.layer === "client" && row.event === "request" && row.method === "remember")).toHaveLength(2);
+    // Two admissions, an exact retry verifying each, and one recovery retry.
+    expect(clientTiming.filter(row => row.layer === "client" && row.event === "request" && row.method === "remember")).toHaveLength(5);
     for (const rows of [clientTiming, daemonTiming]) {
       expect(rows.map(row => row.eventSequence)).toEqual(rows.map((_, index) => index + 1));
       expect(rows.every(row => typeof row.monotonicMs === "number" && typeof row.at === "string")).toBe(true);

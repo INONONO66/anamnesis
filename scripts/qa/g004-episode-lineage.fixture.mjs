@@ -202,7 +202,7 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     assert.equal(parentBody.selection_digest, hash(canonicalExtractionBody(parentBody.lineage_selection)));
     assert.deepEqual(parentBody.lineage_selection, [{ element_id: source.id, root_episode_ids: [source.id], echo_depth: 0, complete: true }]);
     const childParams = linked('child', [parent.recall_id]), child = await remember(childParams), childRow = await row(child.id);
-    assert.equal(ok(await runtime.request('ingest.status', { revision_key: child.revision_key, body_digest: child.body_digest, data_incarnation: child.data_incarnation })).id, child.id);
+    assert.deepEqual(ok(await runtime.request('remember', childParams)), { ...child, created: false });
     assert.deepEqual(lineageBody(childRow.e), { episode_id: child.id, lineage_mode: 'receipts', parent_recall_ids: [parent.recall_id],
       context_digests: [parentBody.selection_digest], root_episode_ids: [source.id], echo_depth: 1, complete: true });
     const foreign = peer(root + '/anamnesis.sock');

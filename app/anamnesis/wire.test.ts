@@ -167,7 +167,6 @@ describe("fault", () => {
       [coded("ENOSPC"), "resource_exhausted", false],
       [coded("EDQUOT"), "resource_exhausted", false],
       [coded("ENOENT"), "internal_error", false],
-      [new Error("spool quota exceeded"), "resource_exhausted", false],
       [new Error("anything else"), "internal_error", false],
       ["not an error", "internal_error", false],
     ];
@@ -176,7 +175,7 @@ describe("fault", () => {
       expect([mapped.code, mapped.retryable]).toEqual([code, retryable]);
     }
   });
-  test("a message that merely spells a protocol code is not mapped; only the ownership and spool message allowlists are", () => {
+  test("a message that merely spells a protocol code is not mapped; only the ownership message allowlist is", () => {
     expect([fault(new Error("policy_denied")).code, fault(new Error("storage_unavailable")).code]).toEqual(["internal_error", "internal_error"]);
   });
   test("a protocol-coded error keeps at most 512 characters of its own message; other mappings use fixed text", () => {

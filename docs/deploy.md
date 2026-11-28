@@ -1,6 +1,6 @@
 # Deployment runbook
 
-The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing else ([00-overview](00-overview.md) invariant 1). Durability comes from `backup`/`restore` over that authority. The episode journal is a write-ahead spool precursor and a disaster-recovery convenience — it lets the originals layer be re-ingested if the graph is lost before a backup exists — not a second store of record ([10-decision-log](10-decision-log.md) D0).
+The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing else ([00-overview](00-overview.md) invariant 1). Durability comes from `backup`/`restore` over that authority. The episode journal is a disaster-recovery convenience — it lets the originals layer be re-ingested if the graph is lost before a backup exists — not a second store of record ([10-decision-log](10-decision-log.md) D0).
 
 ## First deploy
 
@@ -18,7 +18,7 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
    set -a; . ./.env; set +a
    bun run migrate
    ```
-4. Optionally configure ingestion to use `journaledRemember` so writes are spooled before graph ingest. Put its journal directory on durable storage outside the Neo4j volumes. A future stateless ingestion service should depend on `neo4j` with `condition: service_healthy`.
+4. Retain failed ingest requests client-side and retry `storage_unavailable`. Before upgrading to D61, reconcile any acknowledged writes from a legacy runtime: startup refuses a nonempty `spool/` and leaves it untouched. An absent or empty directory needs no action. Leftover `deliveries/` files were pre-commit reservations and may be removed at startup with a log event.
 
 ## Optional TCP listener
 

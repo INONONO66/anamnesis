@@ -23,11 +23,8 @@ permits a different kind of write.
              invalidation outcome can affect a supported historical snapshot
              Episode lineage properties
 
-Two things live on the filesystem outside Neo4j (§6): **payload bytes**
-(`objects/`, durable — part of the data authority together with the Neo4j
-database) and the **spool** (`spool/`, a transient queue that is empty
-whenever Neo4j is healthy). Authority = Neo4j + `objects/`, nothing else
-(§9).
+Payload bytes live on the filesystem in `objects/`. Authority = Neo4j +
+`objects/`, nothing else (§9).
 
 ## 1. Element
 
@@ -62,7 +59,7 @@ kind-specific queries go through the kind label.
 | `revision_key` | Episode | `sha256(origin_key, source_revision)`. **Unique.** Identity of one revision occurrence, including A→B→A reverts |
 | `previous_revision_key` | Episode | Explicit predecessor for a revision; null only for the first occurrence. The origin head it is compared against is the newest Episode of the `origin_key` by `ingest_seq`, resolved by the `episode_origin_head` composite index inside the writer-fenced remember transaction; no separate head record exists |
 | `ingest_seq` | Episode | Globally monotonic integer allocated in the remember transaction, last of the statements that do not depend on it; unique build/catch-up cursor. Gapless: an aborted remember consumes no number |
-| `ingested_at` | Episode | Server ms, written once at CREATE. **Not used in snapshot computation** — audit and spool-drain ordering only (docs/03 §1) |
+| `ingested_at` | Episode | Server ms, written once at CREATE. **Not used in snapshot computation** — audit only (docs/03 §1) |
 | `payload_hash` | Episode | Payload reference (optional) |
 | `episode_digest_version` | Episode | Server-selected immutable digest discriminator. Absent on every Episode stored before D49 implementation, which means version 1; `2` on every Episode admitted afterwards; any other stored value is `unsupported_digest_version`. The caller never supplies or downgrades it (*Episode digest versions* below) |
 | `digest` | Episode | SHA-256 for integrity and retry conflict detection, computed by the row's own version. Version 1 hashes the frozen insertion-ordered body `{schema, content, properties, time, payload_hash, previous_revision_key}`; version 2 hashes the RFC-8785 body `{episode_digest_version, schema, content, properties, time, payload_hash, previous_revision_key, origin_role, lineage_digest}`. Byte-identical to the version-2 body in docs/02 §3; under one `revision_key`, a changed version-1 field, or a changed version-2 role or lineage body, is `revision_conflict` |
@@ -307,8 +304,7 @@ content-addressed files.
 - The daemon's bounded `object.begin/chunk/commit` RPC writes the file first
   (temp name → fsync → rename → fsync directory); `remember` later supplies
   only its hash. Every hash used in a path must match `^[0-9a-f]{64}$`.
-  A file without a node is a gc candidate (with the spool
-  exception in §9); a node without a file is reported by `verify` as
+  A file without a node is a gc candidate (§9); a node without a file is reported by `verify` as
   `missing-payload`.
 - Because the file always exists before any transaction that references it,
   a backup can copy the exact hash manifest after taking the offline Neo4j
@@ -1467,7 +1463,6 @@ copy.
 ├── extraction-state.json     extraction pipeline journal: tasks, leases, attempts, decisions (D55)
 ├── materialization-state.json  materialization custody and replay intent (D53)
 ├── objects/                  Payload bytes (§2). Part of the authority
-├── spool/                    transient remember() queue while Neo4j is unavailable (docs/02 §4)
 ├── tmp/dream/                bounded disposable GDS exports
 ├── neo4j/                    container volume (data/, dumps/)
 └── compose.yaml              container definition managed by the CLI
@@ -1662,32 +1657,15 @@ hidden generations, topology rewires and retired-generation GC (§5).
 ### Authority
 
 The data authority is exactly two things: the Neo4j database and
-`objects/`. The spool is a queue: after a successful drain its contents are
-redundant with Neo4j, and its files are deleted once every line is marked done
-and `verify` has confirmed the drained Episodes (default: 7 days after
-completion). Nothing that is only in the spool is considered stored — remember
-returns `spooled: true`, not `created: true`, so that callers know.
+`objects/`. An Episode is accepted only when its Neo4j transaction commits
+([02-daemon-and-pipelines](02-daemon-and-pipelines.md) §4).
 
 ### Write ordering
 
 | Step | Guarantee |
 |---|---|
 | objects write | fsync both temps; rename data first; rename metadata sidecar last as commit marker; fsync directory. A hash is committed iff its valid sidecar and matching data both exist |
-| spool append | framed record `[u32be length][canonical JSON][32 raw SHA-256 bytes]` → `fsync` → **then** ack; `fsync(dir)` on journal creation |
-| spool drain | Neo4j transaction commits → append the same framed/checksummed cursor to `.done` → `fsync`; a crash before the cursor replays and `revision_key` is a no-op |
 | Neo4j | its own WAL. Every remember/commit/extract is one transaction, so there is no partially applied state |
-
-Recovery scans each spool journal and cursor journal sequentially. Only an
-incomplete final frame is truncated. Any checksum mismatch, including the
-last complete frame, fails closed and quarantines the **whole journal**
-because boundaries after corruption are not trusted. No cursor may advance
-into or beyond that journal; valid-looking later records remain quarantined
-until explicit `anamnesis spool repair` exports verified frames for operator
-review and re-import. On ENOSPC or short append, truncate back to the prior
-verified offset, fsync, and return failure before any later append or ack.
-Cursor entries include `{offset, record_hash}` and may advance only to a
-verified record boundary. Journal rename/removal is followed by
-parent-directory fsync.
 
 Object startup recovery counts every temp byte toward the global quota,
 and deletes expired temps. The object-maintenance owner handles committed-path
@@ -1695,7 +1673,7 @@ states explicitly:
 
 | State | Outcome |
 |---|---|
-| data, no sidecar | uncommitted orphan; retain for the one-hour floor, then delete only after node/spool recheck |
+| data, no sidecar | uncommitted orphan; retain for the one-hour floor, then delete only after node recheck |
 | sidecar, no data | move sidecar to `objects/quarantine/`; report `object_corrupt`; refuse that hash |
 | sidecar + wrong size/hash data | move both to quarantine; report `object_corrupt`; refuse that hash |
 | sidecar + matching full SHA-256 data | committed and reusable |
@@ -1708,14 +1686,12 @@ before publication.
 
 ### gc --objects safety
 
-A payload file is deleted only if **no** `(:Payload {hash})` node references it
-**and** no undrained spool line references it. gc reads the spool's pending
-lines before deciding. A file younger than 1 hour is never deleted (covers the
+A payload file is deleted only if **no** `(:Payload {hash})` node references it. A file younger than 1 hour is never deleted (covers the
 window between the objects write and its transaction).
 
 All `objects/` mutations run through the daemon's write queue. `gc --objects`
-takes an exclusive object lease against upload, spool append/drain, backup
-and restore, then re-checks both predicates immediately before each unlink.
+takes an exclusive object lease against upload, backup
+and restore, then re-checks the node reference and age floor immediately before each unlink.
 Restore operates only in an empty staging root while holding that root's
 daemon lock. The age floor is defense in depth, not the synchronization
 mechanism.
@@ -1752,12 +1728,10 @@ overwrite/force mode—so a prior complete or partial archive is never reused.
          it as 0700; write the discoverable live-root
          ~/.anamnesis/backup.state = {operation_id, destination, phase: PREPARE}
       2. daemon acquires the backup gate; briefly take the object lease, finish
-         in-flight publications, drain accepted remembers and require
-         spool_pending=0
+         in-flight publications and writes
     CUTOFF
       3. under the write queue, pause every Neo4j writer (commit, extraction,
-         generation, embedding, maintenance, gc, policy and receipt publication);
-         redirect new remember to spool
+         generation, embedding, maintenance, gc, policy, remembers and receipt publication)
       4. record structure_revision, ingest_seq, schema/Neo4j versions and the
          policy_revision, receipt retention configuration and exact live container
          image digest plus committed Payload hash manifest; record the highest
@@ -1768,8 +1742,8 @@ overwrite/force mode—so a prior complete or partial archive is never reused.
          extraction generation's fact_language_policy, grouping_version and
          judge_profile_id, so a restore can prove it came back on the same
          contract;
-         fsync backup.state=CUTOFF, then release the object lease. Upload and
-         spool append may proceed; GC and Neo4j writers remain paused
+         fsync backup.state=CUTOFF, then release the object lease. Upload may
+         proceed; GC and Neo4j writers remain paused
     DUMP
       5. fsync backup.state=STOPPING; stop the Neo4j service; fsync
          backup.state=DB_STOPPED
@@ -1777,7 +1751,7 @@ overwrite/force mode—so a prior complete or partial archive is never reused.
          digest** against the stopped volume: neo4j-admin database dump;
          fsync dump and backup.state=DUMPED
       7. restart Neo4j and pass health checks; fsync backup.state=DB_STARTED;
-         only now resume writers and spool drain
+         only now resume writers
     COPY
       8. copy exactly each manifested object data+metadata sidecar, config.jsonc
          and neo4j.auth; write SHA-256 and size for every archive member
@@ -1787,17 +1761,14 @@ overwrite/force mode—so a prior complete or partial archive is never reused.
 ```
 
 Neo4j Community 5.26 requires the database to be offline for `database dump`.
-Recall is unavailable during stop/dump/start; remember remains available via
-the fsynced live spool. Those post-cutoff spool entries are intentionally not
-part of this point-in-time backup and drain into the live database after
-restart. Copying objects after restart is safe because the manifest is fixed
+Recall and remember are unavailable during stop/dump/start. Copying objects after restart is safe because the manifest is fixed
 at the cutoff and object files are immutable.
 
 The fixed live-root `backup.state` and destination operation state are atomic
 temp→fsync→rename→directory-fsync journals. On CLI
 or daemon restart, every state before DB_STARTED first inspects and, if
 needed, restarts Neo4j before releasing the gate; DUMPED preserves the dump.
-DB_STARTED/COPYING may resume copying from the manifest. Spool drain cannot
+DB_STARTED/COPYING may resume copying from the manifest. Writers cannot
 resume while the journal is CUTOFF, STOPPING or DB_STOPPED. No incomplete
 destination contains `backup.complete`, whose body pins the manifest hash.
 
@@ -1846,9 +1817,7 @@ either code is followed by `docker ps -a` for leftover owner-labelled containers
        write and fsync phase=STARTED, then remove journal/lock and fsync parent
 ```
 
-The old root, including its live spool, is preserved as rollback state.
-Post-backup live spool entries are not replayed into the point-in-time restore
-unless the operator later requests a separate, verified import. A failed
+The old root is preserved as rollback state. A failed
 preflight or staging verify leaves the live root untouched. Because staging,
 live and rollback are siblings with equal `st_dev`, activation cannot fail
 with `EXDEV`.
