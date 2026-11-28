@@ -1117,6 +1117,8 @@ Episodes.
 
 ## D50 — adjudication is shadow-first and operator repair is append-only
 
+**Status**: superseded by D60.
+
 **Decision**: for the frozen conformance prompt
 `scripts/research/adjudication-prompt.md` (SHA-256
 `94a74ca2825e17d09188ae0af97c915c7a79a64a45ac998e2f584d8878c3275b`),
@@ -1369,7 +1371,7 @@ its key is read from a file under `~/.config/anamnesis` and never logged.
 The custody and restart semantics of `extraction-state.json` (D46, D49, D50,
 D55) don't change.
 
-D43 through D47, D49 and D50 stay normative. D56 supersedes the parts of
+D43 through D47 and D49 stay normative. D50 was later superseded by D60. D56 supersedes the parts of
 docs/05 §2 and of docs/01 "The embedding stream" that name Episode vectors,
 and the per-Episode extraction call shape in docs/02.
 
@@ -1507,3 +1509,18 @@ two accounts of one person active in one room at the same time stay apart.
 The scan ignores policy because accounts are operator data; text sent to the
 judge passes extraction policy. Entity links and Person-aware extraction and
 recall remain later work.
+
+## D60 — Production Facts come only from extraction
+
+**Date**: 2026-11-28
+
+**Decision**: Remove the D50 shadow adjudicator, its proposal and review
+contracts, and the unused bound generation identity receipt. No production
+producer creates shadow proposals and no RPC reaches the adjudicator.
+Production Facts come only from the extraction pipeline, including its D53
+relation judge. Cutover and coverage keep their existing unbound contracts.
+
+Remove the unused HubArc path and drop its index and the obsolete D50
+constraints on store initialization. Keep ConductingArc maintenance and its
+bounded probes. Saturated sources contribute no outgoing traversal; adding
+a qualified hub shortlist is deferred.

@@ -203,8 +203,8 @@ function locateEvidence(claim: Claim, context: Context): Locus | null {
 }
 
 /** Pure W2 + static W1 prerequisite. This is intentionally not materialization
- * permission: review, policy/head/candidate revalidation and write fencing remain
- * separate. Known-echo classification is reserved for L4 exact-delivery review. */
+ * permission: policy/head/candidate revalidation and write fencing remain
+ * separate. */
 export function validateSemanticClaim(input: unknown, retainedContext: unknown) {
   const { claim, context } = parseContract(input, retainedContext);
   const source = context.episode, origin = checkLineage(source), ancestry = origin.lineage;
@@ -235,7 +235,7 @@ export function validateSemanticClaim(input: unknown, retainedContext: unknown) 
     authority: { primary_episode_id: source.id, source_episode_ids: [source.id], source_count_total: 1, sources_truncated: false },
     evidence: locus, mechanically_grounded: locus !== null,
     confidence: claim.confidence, confidence_basis: "source_fidelity" as const,
-    semantic_writes: false as const, materialization_gate: "independent_shadow_review_required" as const,
+    semantic_writes: false as const,
   };
 }
 export type ValidatedSemanticClaim = ReturnType<typeof validateSemanticClaim>;

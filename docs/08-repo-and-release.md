@@ -44,9 +44,8 @@ anamnesis/
 
 Harnesses — whatever injects or retrieves text — live in separate repos owned
 by the operator and attach over the UDS RPC contract. `remember`/`recall`,
-`commit`, `policy.set`, `policy.revoke`, `adjudication.review`,
-`adjudication.correct`, `embedding.retry`, `embedding.skip` and
-`embedding.cancel` are API-only; the CLI never wraps them (D39, D43, D50,
+`commit`, `policy.set`, `policy.revoke`, `embedding.retry`, `embedding.skip` and
+`embedding.cancel` are API-only; the CLI never wraps them (D39, D43,
 D51). `gen` gains one control action, `gen(action=qualify)`, which appends an
 `EmbeddingQualification` record and never activates a profile by itself (D51). A harness supplies `origin_role` and, for an assistant turn that
 received anamnesis context, `lineage_mode: "receipts"` with its parent recall
@@ -68,14 +67,11 @@ discriminator and this exact control-record inventory:
 
 ```text
 records: Episode lineage properties;
-         AdjudicationAttempt, AdjudicationProposal, AdjudicationReview,
-         AdjudicationConsumption, AdjudicationCorrection,
-         AdjudicationCorrectionMap;
          TranslationMapping;
          EmbeddingCoverage, EmbeddingWork,
          EmbeddingResolution, EmbeddingQualification, EmbeddingBuild,
          EmbeddingBuildSource
-RPCs:    adjudication.review, adjudication.correct, embedding.retry,
+RPCs:    embedding.retry,
          embedding.skip, embedding.cancel, gen(action=qualify)
 ```
 
@@ -152,9 +148,6 @@ integration: Neo4j container (service) → core/recall tests · policy suppressi
                selection_digest == Episode.context_digests · unknown-lineage Episode and its outputs
                ineligible · complete vs incomplete synthesis support unions · same_scope_l1b vs
                same_scope_group · null subject_keys with no literal fallback
-             · shadow-adjudication and operator-correction: no Fact or edge in shadow · persisted
-               source_head_revision_key/policy_revision/proposed_claim_digest · W1 stale rejection on each
-               stored premise · correction map under policy including denied-invalidator markers
              · embedding identity/failure/coverage: three canonical fingerprints · exact index DDL and options
                · every failure transition incl. worker_lost and cancellation · current-watermark cutover
                barrier · zero-skip production default · embedding_coverages carrying both simultaneously
@@ -164,7 +157,7 @@ publication: reject any Markdown link from shipped files whose target contains `
 gds-solver: Neo4j+GDS container → 20 synthetic solver validations               (docs/07 §2)
 ```
 
-The four D48–D51 integration groups above are the scenarios the eventual code
+The three D48, D49 and D51 integration groups above are the scenarios the eventual code
 must satisfy, written down now so their machine values cannot drift. None of
 those fixtures exists in the repository today, and listing one here is not
 evidence that the behavior works (docs/07 §6).
@@ -195,14 +188,13 @@ independently of the code version. Three more versions are recorded on data,
 not on packages: the `m₀` prior/calibration version on each derived
 generation (a prior change is a new generation, never a rewrite), the
 `tokenizer_id` version or digest on each receipt that used a token budget,
-and the policy revision on each receipt (D44, D45, D47). Four more live on
+and the policy revision on each receipt (D44, D45, D47). Three more live on
 data as well: `fact_language_policy` with its prompt digest,
 `extractor_profile_id` and validator version on each extraction generation,
-`grouping_version` on each duplicate-group key, `judge_profile_id` with the
-frame prompt digest on each adjudication attempt, and the
+`grouping_version` on each duplicate-group key, and the
 `embedding_model_id` / `vector_index_id` / `embedding_profile_id` triple on
-vector properties and indexes (D48–D51). None of them is a package version:
-changing any one means a new generation, a new proposal or a new build, never
+vector properties and indexes (D48, D49, D51). None of them is a package version:
+changing any one means a new generation or a new build, never
 an in-place rewrite.
 
 ## Naming

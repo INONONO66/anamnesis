@@ -194,7 +194,7 @@ are additional and reported separately. Link counts are generator targets,
 not inferred exact counts. Record actual counts, hardware/runtime, warm/cold
 state, concurrency, query distribution, budget units and policy-rule count.
 Record internal per-stage ConductingArc probe rows, coverage/publication state,
-saturation counts, per-role link-ID seeks, stale-row exclusions, link/HubArc pool
+saturation counts, per-role link-ID seeks, stale-row exclusions, link pool
 reads, seed-probe timeouts and missing witness-cache exclusions. Assert
 ≤ 70,144 seed probe inspections, ≤ 708,608 envelope probe inspections and
 ≤ 1,417,216 envelope probe-plus-pool reads per attempt (≤ 1,487,360 including
@@ -209,7 +209,6 @@ operators, not just returned counts; planner hints alone do not prove order.
 Non-hub captured-row resolution must use the row's static role branch and
 that role's unique relationship id index (at most one physical link per row),
 then verify endpoints/role/generation, with no second adjacency expansion.
-HubArc raw range reads are at most 32 plus at most 32 such link-ID checks.
 If any required cache/index/ordered plan is unavailable, assert whole-PPR
 degradation to channel-only fusion; native adjacency is never an alternative.
 Docs/05 targets p50 < 100 ms and p95 < 250 ms at a **1M-Element** reference
@@ -242,7 +241,6 @@ These are unmeasured design targets, not a claim of resident GDS execution.
 | policy/conflict/occurrence contracts (D43/D46) | every PR once implemented | blocks merge: no denied serving/conduction/feedback, bounded companions and explicit incomplete/redacted state |
 | language and evidence contracts (D48) | every PR once implemented | blocks merge: required immutable `content_language`; an `en` generation rejecting `language_policy_mismatch` with no per-claim source fallback; a projection-derived name (`Jihyun`, `(Sato)`) rejected as an Entity alias and as `normalized_name`; Latin `a`/`c`/`e`/`o`/`p`/`x` distinguished byte-for-byte from their Cyrillic homoglyphs in identifiers, so a homoglyph swap fails `evidence_mismatch` rather than matching; literal `evidence_quote` of 1..8,192 bytes with the derived `[start,end)` span and a repeated quote without a valid span rejected; `RecallRequest.query` byte-identical on the BM25 and vector channels with no second generated query |
 | lineage and grouping contracts (D49) | every PR once implemented | blocks merge: version-1 verify/retry/journal-replay/rebuild/backup round trips byte-stable with zero SETs while a changed version-1 field still conflicts, a re-spool of that same revision from a version-2-aware daemon draining as the same version-1 no-op because the stored row's version wins, a versionless acknowledged journal record still creating the version-1 Episode it promised, and version-2 `origin_role`-only or lineage-body-only changes under one `revision_key` rejecting `revision_conflict`; bounded parents (≤4), roots (≤16) and depth (≤8) with overflow storing `unknown` + `echo_lineage_truncated`; the receipt's stored `selection_digest` equal to the value `Episode.context_digests` copies; an unknown-lineage assistant **Episode** and every output derived from it ineligible for candidates, synthesis and invalidation; a complete synthesis support union storing `context_derived` with `max(support.echo_depth)` and no added hop, and an incomplete or over-cap union storing `unknown` + truncated; echo fields absent from every score, ordering and conflict decision; `same_scope_l1b` (equal non-null `correction_scope_text` with differing corrected value) accepted where `same_scope_group` (complete byte-identical RFC-8785 `scope`) is refused, and neither predicate substituted for the other; `subject_keys` null rather than a literal fallback; symmetric non-transitive `known_conflict` |
-| adjudication and correction contracts (D50) | every PR once implemented | blocks merge: shadow mode writes no Fact or edge; a failed call leaves no proposal; attempt and proposal both persisting `source_head_revision_key` and `policy_revision`, and the proposal persisting the complete `proposed_claim_digest` over the enumerated L1 object; W1 rejecting on a changed stored head key, a changed stored policy revision, a claim that no longer reproduces the digest, or a changed candidate digest, without inferring proposal-time state from the current graph; single-use consumption; a correction map covering every correction under policy, including a denied invalidator whose content-free marker is still repairable by ID; correction appending without deleting history and never fabricating user prose; A-prime keeping `A.time` |
 | embedding identity, failure and coverage contracts (D51) | every PR once implemented | blocks merge: the three canonical fingerprints recomputing to `711660f8…96e13e9`, `0dfe3d3a…bef81a9` and `16d404a7…795405b`, with a quantization or HNSW change producing different IDs; emitted DDL matching `vec_episode_<indexhex>` / `vec_fact_g<N>_<indexhex>` / `vec_rel_g<N>_<indexhex>` and the exact options object (`vector-2.0`, 1024, cosine, quantization disabled, `hnsw.m=16`, `ef_construction=100`); every failure transition including `worker_lost` lease loss and `PENDING|RUNNING|RETRY_WAIT|BLOCKED → CANCELLED`, with `malformed_response` and `client_error` blocking immediately and only the four transient classes retrying three times at `[1000, 10000]` ms; coverage stopping at the hole; a vector-channel recall whose active profile has both an `(episode,0)` and an `(extraction,N)` partition simultaneously BLOCKED with different cursors and different omission digests recording **both** rows in `embedding_coverages`, sorted `episode` before `extraction`, each with its own `required_ingest_seq` (current `Meta.ingest_seq` for the Episode row, the active generation's current `covered_ingest_seq` for the extraction row) and exact `lag`, on the response diagnostics and the durable receipt alike, with a one-row array only when no active extraction generation exists and a missing applicable row refusing the vector channel instead of serving a partial array; cutover refused unless target-model episode coverage equals **current** `Meta.ingest_seq` and extraction coverage equals the active generation's current `covered_ingest_seq`; the zero-skip production default rejecting any nonzero skip that no qualification declared; authenticated retry/skip/cancel records; production activation refused on ONLINE status or operator attestation alone |
 | utility/calibration ablations (§7) | versioned evaluation runs | report held-out effect and uncertainty, never rewrite immutable m0 |
 | scale benches | before release | report |
@@ -320,17 +318,8 @@ operator surface, never an ordinary-serving bypass.
 
 ### What the frozen screens do and do not establish
 
-Two development-scoped comparisons back the current defaults, and neither is a
-deployment result.
+One development-scoped comparison backs the query default. It is not a deployment result.
 
-- [research/adjudication-conformance](research/adjudication-conformance.md)
-  measures strict-format conformance on 36 synthetic cases against a frozen
-  prompt. It selects a development adjudicator for that one role and prompt;
-  it certifies no extractor, transfers to no other role and supplies no
-  production error bound. Two disclosed gold choices are arguable and the set
-  has no production-shaped negatives, so unattended invalidation stays blocked
-  behind independent labels with declared false-invalidation,
-  missed-update, candidate-completeness, transport and parse bounds (D50).
 - [research/retrieval-fusion](research/retrieval-fusion.md) compared
   original-query union recall with equal-weight two-query RRF on a small
   source-informed development set: 20/20 versus 19/20 Hit@1, saturated Hit@3,
@@ -372,8 +361,7 @@ Require exactly min(degree,256) globally link-ID-ordered ConductingArc rows,
 generation/policy predicate before the raw cap. At 257, put hidden/denied
 links among the first 256 and an eligible link at 257: it must never refill
 the probe. Non-hubs resolve only <256 captured rows via the correct role's
-unique link-ID index before sorting; hubs read at most 32 HubArcs and verify
-their physical links by the same bounded path. Missing shortlists produce
+unique link-ID index before sorting; saturated sources produce
 dangling rows, whereas missing/incomplete ConductingArc coverage or indexes
 drops the entire PPR channel as degree_probe_unavailable, not degree zero.
 Assert no native adjacency query executes in any missing-cache case.
@@ -396,7 +384,7 @@ Inject captured stale rows for deleted links, wrong peer/source, wrong role
 and mismatched generation metadata (including HAS_MEMBER's extraction pin).
 Prove that each lookup is the recorded role's indexed ID seek, that endpoint/
 role/generation validation excludes mismatches without refill, and that stale
-rows still occupy the raw probe slots. Repeat for HubArc tuples. Detect
+rows still occupy the raw probe slots. Detect
 missing coverage rows during verify, invalidate coverage and require rebuild;
 never infer complete degree from a partially rebuilt source. No cached tuple
 is authority, a semantic candidate, conductor or output in these fixtures.

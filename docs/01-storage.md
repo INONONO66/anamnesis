@@ -13,7 +13,7 @@ permits a different kind of write.
              rebuild's explicit old/new target mappings; originals alone do not suffice (§4)
              Fact · Entity · Community · derived links · embedding
   caches     SET allowed. Can be dropped and regenerated at any time
-             hit/utility cache · active policy · Entity witness properties · session topology · Episode room/space · REPLIES_TO · ConductingArc · ConductingArcCoverage · HubArc · ProfileCache · m_cache · selectors
+             hit/utility cache · active policy · Entity witness properties · session topology · Episode room/space · REPLIES_TO · ConductingArc · ConductingArcCoverage · ProfileCache · m_cache · selectors
              (embedding, extraction and materialization operational state are not graph
              layers; they live in `embedding-state.json`, `extraction-state.json` and
              `materialization-state.json` beside the runtime root, §4, §6)
@@ -21,11 +21,7 @@ permits a different kind of write.
              durable until explicit receipt retention expiry, not semantic Episodes
              append-only InvalidationEvidence metadata, retained while its
              invalidation outcome can affect a supported historical snapshot
-             Episode lineage properties, AdjudicationAttempt/Proposal/
-             Review/Correction records and EmbeddingResolution/Qualification records;
-             retained regeneration authority, never receipt-TTL data (§4)
-             mutable RoomAssignment table, changed only by explicit operator import (D58)
-```
+             Episode lineage properties
 
 Two things live on the filesystem outside Neo4j (§6): **payload bytes**
 (`objects/`, durable — part of the data authority together with the Neo4j
@@ -571,47 +567,6 @@ snapshot visibility, validity, Hit attribution or source authority, and no
 online operation traverses parents: replay reads the materialized Episode
 properties and policy checks at most 16 roots.
 
-### 3.4 Adjudication control records (D50)
-
-Shadow adjudication persists its premises so an accepted proposal can be
-revalidated from its own stored shape rather than from current graph state:
-
-```text
-  (:AdjudicationAttempt {attempt_id, target_generation, episode_id,
-                         source_head_revision_key, policy_revision,
-                         candidate_digest, judge_profile_id, started_at,
-                         finished_at, outcome, error_code?, error_digest?})
-  (:AdjudicationProposal {proposal_id, target_generation, episode_id,
-                          source_head_revision_key, policy_revision,
-                          proposed_claim_digest, candidate_digest, verdict,
-                          target_ids[0..8], evidence_ids[1..32],
-                          effective_time_basis, reason, judge_profile_id})
-```
-
-`source_head_revision_key` is the exact origin-head revision key (the newest
-`Episode.revision_key` for the `origin_key` by `ingest_seq`, §1) captured before the
-bounded candidate read and the model call, and `policy_revision` is the
-integer captured at that same point; both are 64-lowercase-hex or nonnegative
-safe integers respectively. The proposal copies them, plus its target,
-Episode, candidate digest and judge profile, byte-for-byte from its successful
-attempt and never samples current state to fill them. `proposal_id` equals
-that `attempt_id`.
-
-`proposed_claim_digest = sha256(UTF-8(RFC-8785(validated complete L1 claim
-object)))`. The covered object is the one enumerated in docs/02 §5.2 and
-includes content and `content_language`, sub-kind, modality, confidence, the
-evidence quote/kind/span, the resolved `time_value`/`time_utc`/`time_precision`,
-the complete validated Entity mentions in extraction order, `speaker_key`,
-`subject_keys`, `predicate_text`, `scope`, `scope_complete`, and the local
-correction fields `corrects_local_claim_index`, `correction_scope_text` and
-`mode`. Every key is present and absent optional values are JSON `null`.
-`AdjudicationCorrection` and the correction RPC reference exactly this digest.
-
-W1 compares those stored values directly under the write lock (docs/02 §5).
-`verify` checks the same chain: every proposal has its attempt, the persisted
-premises agree, at most one terminal review exists per proposal, and no
-consumption row exists without an ACCEPTED proposal.
-
 ## 4. Derived layer and generations
 
 The derived layer is split into three streams.
@@ -666,15 +621,11 @@ rows (see **The embedding stream** below).
 
 An extraction generation's immutable configuration additionally pins
 `fact_language_policy ∈ {source, en}`, the extraction prompt artifact digest,
-`extractor_profile_id`, the grouping/scope schema version, the adjudication
-`judge_profile_id` in use for its proposals, and the validator version.
+`extractor_profile_id`, the grouping/scope schema version, the relation judge
+profile, and the validator version.
 Changing the language policy is a replacement generation with the normal
-cutover and rollback path, never an in-place rewrite (D48). Cutover carries
-forward every `AdjudicationCorrection` as an `AdjudicationCorrectionMap`
-whose `{old_id, new_id}` pairs must match the same assertion occurrence:
-exact primary and source Episode IDs, effective time, sub-kind, modality,
-meaning-bearing properties and resolved Entity name/kind snapshots.
-Exact-copy reconciliations also require content equality. A `source ↔ en`
+cutover and rollback path, never an in-place rewrite (D48). Exact-copy
+reconciliations also require content equality. A `source ↔ en`
 generation may differ in content only under an explicit one-to-one
 `TranslationMapping {mapping_id, from_generation, to_generation, from_fact_id,
 to_fact_id, source_episode_ids[1..16], source_span, mapper_profile_id,
@@ -682,7 +633,7 @@ prompt_digest, decision_digest}`. That mapping is a versioned pairwise
 judgment over the same exact source evidence, not a hash-based equivalence
 claim and never a global Fact or Entity identity claim; a missing span, a
 changed authority or frame, or any duplicate, fuzzy, one-to-many or
-many-to-one mapping blocks activation (D48, D50).
+many-to-one mapping blocks activation (D48).
 
 Generation partitioning is physical and Neo4j-realizable:
 
@@ -748,7 +699,6 @@ activation gate below; suppression is never a reason to discard a marker.
        ConductingArc coverage COMPLETE for every retained physical partition,
        invalidation marker coverage and target mappings complete,
        source-validity/invalidation outcomes preserved at every supported T,
-       every AdjudicationCorrection carried by a complete correction map and
        every content-changing language pair carried by a one-to-one
        TranslationMapping
   6. In that same transaction transition BUILDING→ACTIVE (or
@@ -1446,19 +1396,18 @@ Non-hubs resolve only the captured <256 rows through the appropriate role's
 unique relationship id index. Verify physical existence, both endpoint IDs,
 role and copied generation fields before use; stale rows are discarded with
 no refill and counted in captured diagnostics. They still occupy the raw
-probe slots. HubArc consumers perform the same bounded link-ID verification
-for their at most 32 tuples. There is no second adjacency expansion (docs/06).
+probe slots.
 
 Every physical link CREATE/DELETE, NEXT_EPISODE topology rewire and generation
 GC creates/deletes its endpoint rows in the **same transaction**, including
-hidden-generation writes. Link deletion also removes matching HubArcs.
+hidden-generation writes.
 Generation opening publishes COMPLETE empty coverage atomically before its
 first link append; subsequent appends preserve complete coverage atomically.
 Generation cutover requires complete coverage, and GC removes a partition's
 coverage record only after its last physical link and cache row are gone.
 
 Maintenance/restore reconstructs ConductingArc solely from the retained
-physical graph, not policy-filtered serving exports or HubArc shortlists.
+physical graph, not policy-filtered serving exports.
 Mark affected partitions UNAVAILABLE under the write-queue barrier before
 clearing/rebuilding; a resumable paged rebuild may run offline from recall,
 then catch up under that barrier and verify complete endpoint coverage before
@@ -1553,10 +1502,6 @@ unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_
           · InvalidationEvidence.id
           · InvalidationMarker(generation, target_id, evidence_id)
           · Fact(generation, meaning_digest, primary_episode_id) (`fact_identity`)
-          · AdjudicationAttempt.attempt_id · AdjudicationProposal.proposal_id
-          · AdjudicationReview.review_id · AdjudicationConsumption.proposal_id
-          · AdjudicationCorrection.correction_id
-          · AdjudicationCorrectionMap(correction_id, to_generation)
           · TranslationMapping(from_generation, to_generation, from_fact_id)
           · TranslationMapping(from_generation, to_generation, to_fact_id)
           <role>.idem_key (7) · <role>.id (7; indexed per-role link-ID resolution)
@@ -1569,13 +1514,13 @@ unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_
           · EmbeddingQualification.qualification_id
           · EmbeddingBuild.embedding_profile_id
           · EmbeddingBuildSource(embedding_model_id, stream, generation)
-          · HubArc(hub_id, link_id) · Meta.key (single node, key = 'meta')
+          · Meta.key (single node, key = 'meta')
 range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Element.schema · Element.generation
           composite Episode(session_key, time_utc, ingest_seq)
           composite Episode(origin_key, ingest_seq) (`episode_origin_head`: newest revision per origin)
           composite Entity(witness_generation, witness_policy_revision) (`entity_witness`)
           composite Fact(generation, primary_episode_id, time_utc, id)
-          composite HubArc(hub_id, rank) · Outbox.processed_at
+          Outbox.processed_at
           composite EmbeddingVector(fact_id, profile_id) (missing-vector discovery, §4)
           composite ConductingArc(source_id, link_id)
           composite Fact-INVALIDATES(target_id, generation, effective_time_utc, id)
@@ -1583,7 +1528,6 @@ range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Elemen
           composite InvalidationMarker(target_id, generation, effective_time_utc, evidence_id)
           composite ConflictAdjacency(generation, fact_id, peer_id)
           composite EmbeddingWork(embedding_model_id, stream, generation, state, ingest_seq, item_ordinal)
-          composite AdjudicationProposalState(target_generation, state, proposal_id)
           composite Fact(generation, duplicate_group_key)
           RecallReceipt.expires_at
 fulltext  Episode.content (global) · Fact/Entity content (one index per generation)
@@ -1621,7 +1565,7 @@ uniqueness likewise supplies the relationship RANGE indexes used by bounded
 link resolution. EXPLAIN/PROFILE must prove these access paths (docs/07).
 No O(1) claim is made for a native degree COUNT. DegreeProbe counts only the
 captured ConductingArc rows: <256 is exact under complete, consistent coverage;
-256 saturates and uses only HubArc traversal. Seed damping uses that same
+256 saturates; that source contributes no traversal rows until a qualified shortlist exists. Seed damping uses that same
 capped physical value, min(deg,256), never an unbounded count (docs/05–06).
 
 ## 8. Immutability discipline
@@ -1657,7 +1601,6 @@ SET allowed
                                                  per-entry embedding state machine (§4)
   EmbeddingBuild.{state, qualification_id, activated_at}
                                                  BUILDING→ACTIVE/INACTIVE/BLOCKED/CANCELLED/RETIRED lifecycle
-  AdjudicationProposalState.state                SHADOW→ACCEPTED/REJECTED, rebuilt from append-only reviews
   Meta.{structure_revision, policy_revision, ingest_seq,
          last_server_time, writer_epoch, active_*,
          target_embedding_profile,
@@ -1666,17 +1609,14 @@ CREATE/DELETE allowed in caches
   session NEXT_EPISODE                         local rewire or full topology rebuild
   ConductingArc                                atomic physical link create/delete/rewire/GC; retained-graph rebuild
   ConductingArcCoverage                        per-partition completeness publication and lifecycle
-  HubArc                                       maintenance rebuild
   ProfileCache                                 dreaming rebuild
   ActivePolicy                                 fold immutable policy Episode events
   ConflictAdjacency                            bounded conflict completion and policy-aware summaries
   InvalidationMarker                           replay retained content-free evidence/target mappings
-  AdjudicationCorrectionMap                    per-build old/new correction mapping (§4)
   TranslationMapping                           per-build one-to-one language pairing (§4)
 DELETE allowed in retained control state
   expired RecallReceipt / RecallFeedback        explicit receipt TTL; never removes Hit outcomes
-                                                Episode lineage properties, adjudication attempt/proposal/review/
-                                                correction and embedding resolution/qualification
+                                                Episode lineage properties and embedding resolution/qualification
                                                 records are retained authority and are never deleted here
 never SET on any Episode
   Episode.{episode_digest_version, digest,
@@ -1702,11 +1642,7 @@ agreement + utility sufficient-statistic replay + policy event/cache agreement
   arrays, `context_digests` equal to the parent receipts' stored
   `selection_digest` values, Fact lineage-copy agreement, and each synthesis
   reproducing the bounded support-union rule (§3.3)
-+ adjudication attempt/proposal/review/consumption/correction chain integrity,
-  every proposal's `source_head_revision_key`, `policy_revision` and
-  `candidate_digest` equal to its attempt's, one terminal review per proposal,
-  no consumption without an ACCEPTED proposal, and complete correction and
-  translation maps for every activated generation
++ complete translation maps for activated language-changing generations
 + embedding work/attempt/coverage agreement: one terminal attempt row per
   attempt, coverage cursor equal to the contiguous terminal prefix, recorded
   omission digest matching the resolved-no-vector set, and every resolution
@@ -1956,7 +1892,7 @@ runtime access state, not backed up; first start of the activated root creates
 a fresh 0600 token.
 
 Caches are rebuilt on demand (`anamnesis rebuild --hit-cache`, maintenance
-job for `m_cache` and shortlists); they are not part of what must be restored.
+job for `m_cache`); they are not part of what must be restored.
 ConductingArc is reconstructed from restored physical links and published
 complete by partition before PPR becomes available (§5), never replaced with
 a native adjacency fallback.

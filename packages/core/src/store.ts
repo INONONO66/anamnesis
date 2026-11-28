@@ -5,7 +5,6 @@ import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from 
 import { type SemanticSourceContext } from "@anamnesis/protocol";
 import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
 import { ExtractionClaimContext, ExtractionPipeline, ExtractionDisposition, FactRelationContext } from "@anamnesis/protocol";
-import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, SemanticResolution, SemanticReviewOutput } from "@anamnesis/protocol";
 import { z } from "zod";
 import { RpcEmbeddingRecoverParams, RpcEmbeddingAttempt, RpcEmbeddingRequeueParams, type RpcEmbeddingRequeueResult, RpcRecallParams, RpcRecallResult, type RpcProjectionParams, type RpcProjectionResult } from "@anamnesis/protocol";
 import { embeddingProfileId } from "./embedding.ts";
@@ -130,9 +129,8 @@ export class Store {
           CREATE (:PolicyAuthority {key:'installation', format:'episode-source-v1'})`);
       }
       if (!preserveLegacy) {
-        // Upgrade legacy selectors once. Never reset an established epoch on init.
         await tx.run(`MERGE (s:Meta {key:'extraction_selector'})
-          SET s.selector_version=coalesce(s.selector_version,0)`);
+          ON CREATE SET s.selector_version=0`);
         // Startup verifies a capped retained-graph snapshot; it never reconstructs
         // endpoint rows. Existing incomplete/oversized stores need explicit repair.
         const snapshot = await this.conducting.conductingSnapshotTx(tx, 10000);
@@ -284,30 +282,6 @@ export class Store {
 
   embeddingStatus(operationId: string, context: InstallationContext): Promise<RpcEmbeddingAttempt | { state: "unknown"; operation_id: string }> {
     return this.embeddings.embeddingStatus(operationId, context);
-  }
-
-  prepareSemanticReview(input: ProposeRetainedClaim, profile: string, context: InstallationContext) {
-    return this.materialization.prepareSemanticReview(input, profile, context);
-  }
-
-  /** Completion has retained pre-call premises. It does not accept booleans
-   * asserting independence, lineage, policy, or semantic permission. */
-  completeSemanticReview(proposalId: string, resolved: SemanticResolution, judged: SemanticReviewOutput, context: InstallationContext) {
-    return this.materialization.completeSemanticReview(proposalId, resolved, judged, context);
-  }
-
-  failSemanticReview(proposalId: string, error: string, context: InstallationContext): Promise<void> {
-    return this.materialization.failSemanticReview(proposalId, error, context);
-  }
-
-  reviewRetainedClaim(input: ReviewRetainedClaim, context: InstallationContext) {
-    return this.materialization.reviewRetainedClaim(input, context);
-  }
-
-  /** One accepted new occurrence. This path does not select a serving generation,
-   * infer approval from audit decisions, or merge into a previous generation. */
-  materializeRetainedClaim(input: MaterializeRetainedClaim, context: InstallationContext): Promise<MaterializationResult> {
-    return this.materialization.materializeRetainedClaim(input, context);
   }
 
   recall(input: z.input<typeof RpcRecallParams>, context: InstallationContext): Promise<RpcRecallResult> {

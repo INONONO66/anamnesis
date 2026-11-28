@@ -3,15 +3,14 @@ import neo4j, { Neo4jError, type ManagedTransaction } from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
 import { MemoryElement, MemoryLink, Generation, type ExtractionAttempt, type ModelTask } from "@anamnesis/protocol";
 import { SemanticClaimValidationError, validateSemanticClaim, type SemanticSourceContext, type ValidatedSemanticClaim } from "@anamnesis/protocol";
-import { canonicalExtractionBody, extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
+import { extractionBodyDigest, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
 import { ExtractionPipeline, ExtractionDisposition, ExtractionAuditError, FactRelationContext, type FactRelationCandidate } from "@anamnesis/protocol";
-import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticReviewPremises, SemanticResolution, SemanticReviewOutput, RetainedSemanticProposal, semanticReviewClaimBody } from "@anamnesis/protocol";
+import { MaterializationResult, FactRelationDecision, SemanticResolution } from "@anamnesis/protocol";
 import { ExtractionModelOutput } from "@anamnesis/protocol";
 import { z } from "zod";
 import { EmbeddingError, embeddingProfileId, validateVector } from "../embedding.ts";
-import { semanticClaimTime, validatedFactTime, sha256 } from "./digest.ts";
+import { semanticClaimTime, validatedFactTime } from "./digest.ts";
 import { type InstallationContext, type PolicyState } from "./policy.ts";
-import { type ElementProperties } from "./records.ts";
 import type { StoreCore } from "./core.ts";
 import type { ReceiptStore } from "./receipt-store.ts";
 import type { ExtractionStore } from "./extraction-store.ts";
@@ -60,7 +59,7 @@ export class MaterializationStore {
   constructor(private readonly core: StoreCore, private readonly receipts: ReceiptStore, private readonly extraction: ExtractionStore, private readonly elements: ElementStore) {}
 
   /** File writes precede graph commit. An interrupted transaction leaves an
-   * intent, not proof that Facts or proposal consumption committed. */
+   * intent, not proof that Facts committed. */
   private async committedOperationTx(tx: ManagedTransaction, entry: MaterializationStateEntry | undefined): Promise<MaterializationStateEntry | undefined> {
     if (!entry || entry.fact_ids.length === 0) return entry;
     const rows = await tx.run<{ count: number }>(`UNWIND $ids AS id
@@ -79,218 +78,17 @@ export class MaterializationStore {
   async sourceCustodyTx(tx: ManagedTransaction, generation: string, source: string): Promise<MaterializationStateEntry | undefined> {
     return this.committedOperationTx(tx, await this.core.materializationState.byOccurrence(extractionBodyDigest([generation, source])));
   }
-  /** Bound the entire new-occurrence candidate partition before handing any
-   * content to the semantic judge. Overflow is unknown, not an empty candidate set. */
-  private async semanticCandidatesTx(tx: ManagedTransaction, generation: string, policy: PolicyState) {
-    const rows = await tx.run<{ props: ElementProperties }>(`MATCH (f:Fact {generation:$generation})
-      USING INDEX f:Fact(generation,id) WHERE f.id IS NOT NULL
-      RETURN properties(f) AS props ORDER BY f.id LIMIT 129`, { generation });
-    if (rows.records.length > 128) throw new Error("semantic_candidates_unavailable");
-    const candidates = [];
-    for (const row of rows.records) {
-      const p = row.get("props");
-      const sources = z.array(z.uuidv7()).min(1).max(16).parse(p["source_episode_ids"]);
-      await this.core.authorizeEpisodesTx(tx, sources, policy);
-      candidates.push({ id: z.uuidv7().parse(p["id"]), content: z.string().parse(p["content"]), digest: extractionBodyDigest(p) });
-    }
-    return candidates;
-  }
-  private async semanticPremisesTx(tx: ManagedTransaction, request: ProposeRetainedClaim, profile: string, policy: PolicyState): Promise<SemanticReviewPremises> {
-    const source = await this.receipts.semanticEpisodeTx(tx, request.source_episode_id, policy);
-    const generation = await this.core.writableExtractionGenerationTx(tx, request.generation_id);
-    const selection = await this.extraction.extractionSelectionTx(tx);
-    if (generation.state === "active" && selection.generation_id !== generation.id) throw new Error("semantic_generation_unselected");
-    const head = await this.extraction.extractionHeadTx(tx, source.id);
-    if (head !== source.revision_key) throw new Error("stale_materialization");
-    const judge = await this.core.extractionAttempt(request.judge_attempt_id);
-    if (judge.state !== "succeeded" || judge.generation_id !== generation.id || judge.source_id !== source.id
-      || judge.source_revision !== source.revision_key || judge.body_digest !== source.content_digest
-      || judge.source_ingest_seq !== source.ingest_seq || judge.policy_context.revision !== policy.policy_revision) throw new Error("stale_materialization");
-    const decisions = await this.extraction.extractionDecisionsTx(tx, judge);
-    const decision = decisions[request.claim_index];
-    if (!decision || !["retain", "correct"].includes(decision.disposition)) throw new Error("audit_decision_refused");
-    const premise = await this.core.extractionJudgeInput(judge.id);
-    if (premise.source_head_revision !== head || premise.policy_revision !== policy.policy_revision) throw new Error("stale_materialization");
-    const candidates = await this.semanticCandidatesTx(tx, generation.id, policy);
-    return SemanticReviewPremises.parse({ request, request_digest: extractionBodyDigest(request), judge_profile_id: profile,
-      source, audit_evidence: decision.evidence, source_head_revision_key: head, policy_revision: policy.policy_revision,
-      generation_digest: extractionBodyDigest(generation), selection, candidates, candidate_digest: extractionBodyDigest(candidates) });
-  }
-  async prepareSemanticReview(input: ProposeRetainedClaim, profile: string, context: InstallationContext) {
-    const request = ProposeRetainedClaim.parse(input), digest = extractionBodyDigest(request);
-    return this.core.extractionTx(context, async (tx, policy) => {
-      await this.core.authorizeEpisodesTx(tx, [request.source_episode_id], policy);
-      const old = await tx.run(`MATCH (a:AdjudicationInput {id:$id})
-        OPTIONAL MATCH (p:AdjudicationProposal {id:a.id}) RETURN a.body AS body,p.body AS proposal`, { id: request.proposal_id });
-      if (old.records[0]) {
-        const premises = SemanticReviewPremises.parse(JSON.parse(old.records[0].get("body")));
-        if (premises.request_digest !== digest || premises.judge_profile_id !== profile) throw new Error("semantic_proposal_conflict");
-        if (!old.records[0].get("proposal")) throw new Error("semantic_review_incomplete");
-        return { created: false, premises, proposal: RetainedSemanticProposal.parse(JSON.parse(old.records[0].get("proposal"))) };
-      }
-      const premises = await this.semanticPremisesTx(tx, request, profile, policy);
-      await tx.run(`CREATE (:AdjudicationInput {id:$id,body:$body,started_at:$now})`, { id: request.proposal_id, body: canonicalExtractionBody(premises), now: this.core.clock() });
-      return { created: true, premises, proposal: null };
-    });
-  }
-  private async validateSemanticResolutionTx(tx: ManagedTransaction, premises: SemanticReviewPremises, resolution: SemanticResolution) {
-    for (const entity of resolution.entity_resolutions) {
-      if (entity.status === "unresolved") continue;
-      const rows = await tx.run(`MATCH (e:Element {id:$id}) RETURN e.schema AS schema,e.generation AS generation`, { id: entity.entity_id });
-      if (entity.status === "existing") {
-        if (rows.records[0]?.get("schema") !== SCHEMA_ID.ENTITY || rows.records[0]?.get("generation") !== premises.request.generation_id) throw new Error("semantic_entity_stale");
-      } else {
-        const keys = await tx.run(`MATCH (e:Entity {generation:$generation,entity_key:$key}) RETURN e.id LIMIT 1`, { generation: premises.request.generation_id, key: entity.entity_key });
-        if (rows.records.length || keys.records.length) throw new Error("semantic_entity_stale");
-      }
-    }
-  }
-  private semanticValidation(premises: SemanticReviewPremises, resolution: SemanticResolution, claim: ProposeRetainedClaim["semantic_claim"]) {
-    const validated = validateSemanticClaim(claim, { generation: premises.request.generation_id, fact_language_policy: "source",
-      entity_resolutions: resolution.entity_resolutions, attribution_speakers: resolution.attribution_speakers,
-      allow_no_single_locus: resolution.allow_no_single_locus,
-      episode: { ...premises.source, content_language: resolution.content_language } });
-    if (canonicalExtractionBody(validated.evidence) !== canonicalExtractionBody(premises.audit_evidence)) throw new Error("semantic_evidence_mismatch");
-    return validated;
-  }
-  /** Completion has retained pre-call premises. It does not accept booleans
-   * asserting independence, lineage, policy, or semantic permission. */
-  async completeSemanticReview(proposalId: string, resolved: SemanticResolution, judged: SemanticReviewOutput, context: InstallationContext) {
-    const id = z.uuidv7().parse(proposalId), resolution = SemanticResolution.parse(resolved), output = SemanticReviewOutput.parse(judged);
-    return this.core.extractionTx(context, async (tx, policy) => {
-      const rows = await tx.run(`MATCH (a:AdjudicationInput {id:$id}) RETURN a.body AS body`, { id });
-      if (!rows.records[0]) throw new Error("semantic_review_unavailable");
-      const premises = SemanticReviewPremises.parse(JSON.parse(rows.records[0].get("body")));
-      const terminal = await tx.run(`MATCH (a:AdjudicationAttempt {id:$id}) RETURN a.outcome AS outcome`, { id });
-      if (terminal.records[0] && terminal.records[0].get("outcome") !== "succeeded") throw new Error("semantic_review_terminal");
-      const current = await this.semanticPremisesTx(tx, premises.request, premises.judge_profile_id, policy);
-      if (canonicalExtractionBody(current) !== canonicalExtractionBody(premises)) throw new Error("semantic_review_stale");
-      await this.validateSemanticResolutionTx(tx, premises, resolution);
-      const validated = this.semanticValidation(premises, resolution, premises.request.semantic_claim);
-      if (output.disposition === "retain" && canonicalExtractionBody(output.semantic_claim) !== canonicalExtractionBody(premises.request.semantic_claim)) throw new Error("semantic_output_mismatch");
-      if (output.semantic_claim) this.semanticValidation(premises, resolution, output.semantic_claim);
-      const proposal = RetainedSemanticProposal.parse({ premises, resolution, output,
-        proposed_claim_digest: extractionBodyDigest(semanticReviewClaimBody(validated.claim, premises.source, resolution)),
-        output_claim_digest: extractionBodyDigest(output.semantic_claim) });
-      const old = await tx.run(`MATCH (p:AdjudicationProposal {id:$id}) RETURN p.body AS body`, { id });
-      const body = canonicalExtractionBody(proposal);
-      if (old.records[0]) {
-        if (old.records[0].get("body") !== body) throw new Error("semantic_proposal_conflict");
-        return proposal;
-      }
-      await tx.run(`CREATE (:AdjudicationAttempt {id:$id,outcome:'succeeded',input_body:$input,output_body:$output,finished_at:$now})
-        CREATE (:AdjudicationProposal {id:$id,body:$body,digest:$digest})`,
-        { id, input: canonicalExtractionBody(premises), output: canonicalExtractionBody({ resolution, output }), body, digest: extractionBodyDigest(proposal), now: this.core.clock() });
-      return proposal;
-    });
-  }
-  async failSemanticReview(proposalId: string, error: string, context: InstallationContext): Promise<void> {
-    const id = z.uuidv7().parse(proposalId);
-    await this.core.extractionTx(context, async tx => {
-      await tx.run(`MATCH (a:AdjudicationInput {id:$id})
-        MERGE (t:AdjudicationAttempt {id:$id}) ON CREATE SET t.outcome='validation_error',t.input_body=a.body,t.error_digest=$error,t.finished_at=$now`,
-        { id, error: sha256(error), now: this.core.clock() });
-    });
-  }
-  async reviewRetainedClaim(input: ReviewRetainedClaim, context: InstallationContext) {
-    const request = ReviewRetainedClaim.parse(input);
-    return this.core.extractionTx(context, async (tx, policy) => {
-      if (!context.client_binding) throw new Error("semantic_operator_binding_required");
-      const proposal = await this.retainedSemanticProposalTx(tx, request.proposal_id);
-      await this.core.authorizeEpisodesTx(tx, [proposal.premises.source.id], policy);
-      const body = canonicalExtractionBody({ ...request, operator_binding: context.client_binding });
-      const old = await tx.run(`MATCH (r:AdjudicationReview) WHERE r.proposal_id=$proposal OR r.review_id=$id RETURN r.body AS body`, { proposal: request.proposal_id, id: request.review_id });
-      if (old.records.length) {
-        if (old.records.length !== 1 || old.records[0]!.get("body") !== body) throw new Error("semantic_review_conflict");
-        return request;
-      }
-      await tx.run(`CREATE (:AdjudicationReview {review_id:$id,proposal_id:$proposal,body:$body,action:$action})`, { id: request.review_id, proposal: request.proposal_id, body, action: request.action });
-      return request;
-    });
-  }
-  private async retainedSemanticProposalTx(tx: ManagedTransaction, id: string): Promise<RetainedSemanticProposal> {
-    const rows = await tx.run(`MATCH (p:AdjudicationProposal {id:$id}) MATCH (a:AdjudicationAttempt {id:p.id})
-      RETURN p.body AS body,p.digest AS digest,a.outcome AS outcome,a.input_body AS input,a.output_body AS output`, { id });
-    const row = rows.records[0];
-    if (!row) throw new Error("retained_review_unavailable");
-    const proposal = RetainedSemanticProposal.parse(JSON.parse(row.get("body")));
-    if (proposal.premises.request.proposal_id !== id || row.get("digest") !== extractionBodyDigest(proposal) || row.get("outcome") !== "succeeded"
-      || row.get("input") !== canonicalExtractionBody(proposal.premises) || row.get("output") !== canonicalExtractionBody({ resolution: proposal.resolution, output: proposal.output })) throw new Error("semantic_proposal_corrupt");
-    return proposal;
-  }
-  private async materializationReplayTx(tx: ManagedTransaction, request: MaterializeRetainedClaim, digest: string, policy: PolicyState) {
-    const intent = await this.core.materializationState.get(request.operation_id);
-    if (intent && intent.request_digest !== digest) throw new Error("materialization_conflict");
-    const prior = await this.committedOperationTx(tx, intent);
-    const consumption = await tx.run<{ proposal: string; fact: string; link: string }>(`MATCH (c:AdjudicationConsumption {operation_id:$id})
-      MATCH (:Fact {id:c.fact_id})-[l:DERIVED_FROM {id:c.link_id}]->(:Episode)
-      RETURN c.proposal_id AS proposal,c.fact_id AS fact,l.id AS link`, { id: request.operation_id });
-    const consumed = consumption.records[0];
-    if (consumed) {
-      // Covered operations leave the bounded file. The retained review and its
-      // consumption still prove the original request and immutable Fact/link IDs.
-      if (!prior) {
-        const proposal = await this.retainedSemanticProposalTx(tx, consumed.get("proposal"));
-        const original = { ...proposal.premises.request, operation_id: request.operation_id, semantic_claim: proposal.output.semantic_claim };
-        if (extractionBodyDigest(original) !== digest) throw new Error("materialization_conflict");
-      }
-      await this.receipts.semanticEpisodeTx(tx, request.source_episode_id, policy);
-      return { intent, result: MaterializationResult.parse({
-        ...(prior?.result ?? { fact_id: consumed.get("fact"), link_id: consumed.get("link") }), created: false,
-      }) };
-    }
-    return { intent, result: null };
-  }
-  /** One accepted new occurrence. This path does not select a serving generation,
-   * infer approval from audit decisions, or merge into a previous generation. */
-  async materializeRetainedClaim(input: MaterializeRetainedClaim, context: InstallationContext): Promise<MaterializationResult> {
-    canonicalExtractionBody(input);
-    const request = MaterializeRetainedClaim.parse(input), digest = extractionBodyDigest(request);
-    let allocated: { fact_id: string; link_id: string; mention_ids: string[] } | undefined;
-    return this.core.extractionTx(context, async (tx, policy) => {
-      const { intent, result: replay } = await this.materializationReplayTx(tx, request, digest, policy);
-      if (replay) return replay;
-      if (!request.proposal_id) throw new Error("retained_review_unavailable");
-      const proposal = await this.retainedSemanticProposalTx(tx, request.proposal_id);
-      const { premises, resolution, output } = proposal;
-      const original = premises.request;
-      if (request.generation_id !== original.generation_id || request.source_episode_id !== original.source_episode_id
-        || request.judge_attempt_id !== original.judge_attempt_id || request.claim_index !== original.claim_index
-        || extractionBodyDigest(request.semantic_claim) !== proposal.output_claim_digest) throw new Error("semantic_candidate_mismatch");
-      const review = await tx.run(`MATCH (r:AdjudicationReview {proposal_id:$id}) RETURN r.body AS body`, { id: request.proposal_id });
-      if (!review.records[0]) throw new Error("retained_review_unavailable");
-      const accepted = ReviewRetainedClaim.extend({ operator_binding: z.uuidv7() }).parse(JSON.parse(review.records[0].get("body")));
-      if (accepted.action !== "accept" || accepted.proposal_id !== request.proposal_id || output.disposition === "suppress" || !output.semantic_claim) throw new Error("semantic_review_refused");
-      const consumed = await tx.run(`MATCH (c:AdjudicationConsumption {proposal_id:$id}) RETURN c.operation_id`, { id: request.proposal_id });
-      if (consumed.records.length) throw new Error("semantic_proposal_consumed");
-      const current = await this.semanticPremisesTx(tx, original, premises.judge_profile_id, policy);
-      if (canonicalExtractionBody(current) !== canonicalExtractionBody(premises)) throw new Error("semantic_review_stale");
-      await this.validateSemanticResolutionTx(tx, premises, resolution);
-      const validated = this.semanticValidation(premises, resolution, output.semantic_claim);
-      if (proposal.proposed_claim_digest !== extractionBodyDigest(semanticReviewClaimBody(original.semantic_claim, premises.source, resolution))) throw new Error("semantic_candidate_mismatch");
-      const occurrence = extractionBodyDigest([original.generation_id, original.source_episode_id, original.judge_attempt_id, original.claim_index]);
-      const existing = await this.committedOperationTx(tx, await this.core.materializationState.byOccurrence(occurrence));
-      if (existing && intent?.occurrence_key !== occurrence) throw new Error("claim_already_materialized");
-      allocated ??= { fact_id: uuidv7(), link_id: uuidv7(), mention_ids: validated.identity.entity_ids.map(() => uuidv7()) };
-      const result = await this.writeValidatedFactTx(tx, { validated, resolution, source: premises.source,
-        generation: request.generation_id, profile: premises.judge_profile_id, policy: policy.policy_revision,
-        operationId: request.operation_id, digest, occurrence, proposalId: request.proposal_id, allocated });
-      await tx.run(`CREATE (:AdjudicationConsumption {proposal_id:$proposal,operation_id:$id,fact_id:$fact,link_id:$link})`,
-        { proposal: request.proposal_id, id: request.operation_id, fact: result.fact_id, link: result.link_id });
-      return result;
-    });
-  }
-  /** Both admission paths write only a mechanically validated new occurrence.
+  /** Extraction writes only a mechanically validated new occurrence.
    * mergeLinkTx creates physical links and their real conducting rows atomically.
    * Relation adjudication is separate; this body never invalidates another Fact. */
   private async writeValidatedFactTx(tx: ManagedTransaction, input: {
-    validated: ValidatedSemanticClaim; resolution: SemanticResolution; source: SemanticReviewPremises["source"];
+    validated: ValidatedSemanticClaim; resolution: SemanticResolution; source: MaterializationPass["source"];
     generation: string; profile: string; policy: number; operationId: string; digest: string; occurrence: string;
-    proposalId: string | null; allocated: { fact_id: string; link_id: string; mention_ids: string[] };
+    allocated: { fact_id: string; link_id: string; mention_ids: string[] };
     /** Relation verdicts already applied for this Fact (D53); absent when no relation judge ran. */
     relations?: FactRelationDecision[];
   }): Promise<MaterializationResult> {
-    const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, proposalId, allocated, relations } = input;
+    const { validated, resolution, source, generation, profile, policy, operationId, digest, occurrence, allocated, relations } = input;
     const claim = validated.claim, { fact_id, link_id } = allocated;
     const merged = await tx.run<{ id: string }>(`MERGE (f:Fact {generation:$generation,meaning_digest:$meaning,primary_episode_id:$source})
       ON CREATE SET f.id=$id, f:Element RETURN f.id AS id`, { generation, meaning: validated.meaning_digest, source: source.id, id: fact_id });
@@ -311,14 +109,14 @@ export class MaterializationStore {
     await tx.run(`MATCH (f:Element:Fact {id:$id}) SET f.generation=$generation,f.content_language=$language,f.sub_kind=$subkind,f.modality=$modality,
       f.confidence=$confidence,f.meaning_digest=$meaning,f.primary_episode_id=$source,f.source_episode_ids=$sources,f.max_source_ingest_seq=$seq,
       f.echo_state=$echo,f.echo_depth=$depth,f.echo_lineage_truncated=false,f.parent_recall_ids=$parents,f.corroboration_root_episode_ids=$roots,
-      f.entity_ids=$entities,f.support_fact_ids=[],f.proposal_id=$proposal,f.policy_revision=$policy,f.semantic_profile_id=$profile`,
+      f.entity_ids=$entities,f.support_fact_ids=[],f.policy_revision=$policy,f.semantic_profile_id=$profile`,
       { id: fact_id, generation, language: claim.content_language, subkind: claim.sub_kind, modality: claim.modality,
         confidence: claim.confidence, meaning: validated.meaning_digest, source: source.id, sources: [source.id], seq: source.ingest_seq,
         echo: validated.identity.echo_state, depth: validated.identity.echo_depth, parents: validated.identity.parent_recall_ids,
-        roots: validated.identity.corroboration_root_episode_ids, entities: validated.identity.entity_ids, proposal: proposalId, policy, profile });
+        roots: validated.identity.corroboration_root_episode_ids, entities: validated.identity.entity_ids, policy, profile });
     await this.elements.mergeLinkTx(tx, MemoryLink.parse({ id: link_id, from: fact_id, to: source.id, role: "DERIVED_FROM", content: "semantic evidence", weight: 1 }));
-    await tx.run(`MATCH ()-[l:DERIVED_FROM]->() WHERE l.id=$id SET l.span=$span,l.evidence_text=$text,l.proposal_id=$proposal`,
-      { id: link_id, span: validated.evidence ? [validated.evidence.start, validated.evidence.end] : null, text: validated.evidence?.text ?? null, proposal: proposalId });
+    await tx.run(`MATCH ()-[l:DERIVED_FROM]->() WHERE l.id=$id SET l.span=$span,l.evidence_text=$text`,
+      { id: link_id, span: validated.evidence ? [validated.evidence.start, validated.evidence.end] : null, text: validated.evidence?.text ?? null });
     const createdEntities = new Set<string>();
     for (const entity of resolution.entity_resolutions) {
       if (entity.status !== "new" || !validated.identity.entity_ids.includes(entity.entity_id) || createdEntities.has(entity.entity_id)) continue;
@@ -417,7 +215,7 @@ export class MaterializationStore {
       }
       const allocated = { fact_id: uuidv7(), link_id: uuidv7(), mention_ids: validated.identity.entity_ids.map(() => uuidv7()) };
       const result = await this.writeValidatedFactTx(tx, { validated, resolution, source, generation: judge.generation_id, profile, policy: policy.policy_revision,
-        operationId: uuidv7(), digest, occurrence, proposalId: null, allocated, ...(judged ? { relations: judged.decisions } : {}) });
+        operationId: uuidv7(), digest, occurrence, allocated, ...(judged ? { relations: judged.decisions } : {}) });
       if (result.created) for (const link of judged?.links ?? [])
         await this.elements.mergeLinkTx(tx, MemoryLink.parse({ id: link.id, from: result.fact_id, to: link.to, role: link.role, content: link.content, weight: link.weight }));
       if (!factIds.includes(result.fact_id)) factIds.push(result.fact_id);
@@ -463,7 +261,7 @@ export class MaterializationStore {
    * the provider's verdict binds to a fixed digest. Returns the recorded judgements,
    * `[]` when there is nobody to compare against, or "pending" while the verdict is owed. */
   private async factRelationVerdictTx(tx: ManagedTransaction, input: {
-    occurrence: string; pipeline_id: string; source: SemanticReviewPremises["source"]; generation: string; validated: ValidatedSemanticClaim;
+    occurrence: string; pipeline_id: string; source: MaterializationPass["source"]; generation: string; validated: ValidatedSemanticClaim;
   }): Promise<FactRelationJudgement[] | "pending"> {
     const { occurrence, generation, validated } = input;
     const entry = await this.core.extractionJournal.get(input.pipeline_id);

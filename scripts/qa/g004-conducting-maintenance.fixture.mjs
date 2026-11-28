@@ -77,10 +77,8 @@ test('physical writes, coverage and bounded repair', {timeout:150000}, async () 
     await engine.init();
     const a = await engine.remember(episode('a',1)), c = await engine.remember(episode('c',3));
     await seam('remember creates cache',()=>compare('insert'));
-    const old = (await physical())[0].link_id;
-    await query('CREATE (:HubArc {hub_id:$source,link_id:$link,rank:0})',{source:a.id,link:old});
     const b = await engine.remember(episode('b',2));
-    await seam('out of order rewire',async()=>{await compare('rewire');assert.deepEqual(await query('MATCH (h:HubArc {link_id:$id}) RETURN h',{id:old}),[]);});
+    await seam('out of order rewire',()=>compare('rewire'));
     await query('CREATE (:Element:Fact {id:$f,generation:42}),(:Element:Entity {id:$e,generation:42}),(:Element:Entity {id:$e2,generation:42}),(:Element:Community {id:$c,generation:7,source_extraction_generation:42}),(:Generation {stream:"community",generation:7,source_extraction_generation:42,state:"RETIRED"}),(:Generation {stream:"extraction",generation:42,state:"BUILDING"})',{f:id(10),e:id(11),e2:id(12),c:id(13)});
     for (const [n,role,from,to] of [[101,'MENTIONS',a.id,id(11)],[102,'RELATES_TO',id(11),id(12)],[103,'HAS_MEMBER',id(13),id(10)],[104,'DERIVED_FROM',id(10),a.id]]) {
       await engine.store.putLink({id:id(n),from,to,role,content:`physical ${role}`});

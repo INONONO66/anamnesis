@@ -30,11 +30,8 @@ import {
 
 import { EmbeddingConfig, HttpEmbeddingProvider } from "./embedding.ts";
 import { ExtractionProviderConfig, HttpExtractionProvider, ExtractionProviderError, extractionInputBytes, splitExtractionWindow, validateModelOutput, validateSourceSpans, type ExtractionProvider, type ExtractionProviderInput } from "./extraction.ts";
-import { ExtractionModelOutput, LeaseModelTask, ModelTaskCAS, type CreateModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage, type Generation, type ExtractionCoverageRead } from "@anamnesis/protocol";
-import { bindGenerationProfile, type GenerationProfileInput, type GenerationIdentityReceipt } from "@anamnesis/protocol";
+import { ExtractionModelOutput, LeaseModelTask, ModelTaskCAS, type CreateModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage } from "@anamnesis/protocol";
 import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from "@anamnesis/protocol";
-import { MaterializeRetainedClaim, ProposeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, type SemanticReviewProvider } from "@anamnesis/protocol";
-import { validateSemanticClaim } from "@anamnesis/protocol";
 import type { RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcPolicyResult } from "@anamnesis/protocol";
 
@@ -55,7 +52,7 @@ export const RememberInput = z
   .superRefine(validateElementSemantics);
 export type RememberInput = z.input<typeof RememberInput>;
 
-export interface EngineOptions extends Partial<StoreOptions> { extractionProvider?: ExtractionProvider; semanticReviewProvider?: SemanticReviewProvider;
+export interface EngineOptions extends Partial<StoreOptions> { extractionProvider?: ExtractionProvider;
   /** Trusted runtime injection: a driver whose connect/acquisition deadlines are bounded, so a background turn that meets a dead Bolt endpoint fails fast instead of holding the daemon's dispatch slot. */
   driver?: Driver }
 
@@ -95,43 +92,12 @@ export function envConfig(): StoreOptions & Pick<EngineOptions, "extractionProvi
 export class Engine {
   readonly store: Store;
   private readonly extractionProvider: ExtractionProvider | undefined;
-  private readonly semanticReviewProvider: SemanticReviewProvider | undefined;
 
   constructor(opts: EngineOptions = {}) {
-    const { extractionProvider, semanticReviewProvider, driver, ...storeOptions } = { ...envConfig(), ...opts };
+    const { extractionProvider, driver, ...storeOptions } = { ...envConfig(), ...opts };
     this.extractionProvider = extractionProvider;
-    this.semanticReviewProvider = semanticReviewProvider;
     // Every configured extraction provider answers `judge_relations` (D53), so validated claims wait for verdicts.
     this.store = new Store({ ...storeOptions, relationJudge: extractionProvider !== undefined }, driver);
-  }
-
-  async materializeRetainedClaim(input: MaterializeRetainedClaim, context: InstallationContext) {
-    return this.store.materializeRetainedClaim(input, context);
-  }
-
-  async proposeRetainedClaim(input: ProposeRetainedClaim, context: InstallationContext) {
-    const provider = this.semanticReviewProvider;
-    if (!provider) throw new Error("semantic_review_not_configured");
-    const prepared = await this.store.prepareSemanticReview(input, provider.profileId, context);
-    if (!prepared.created) return prepared.proposal!;
-    try {
-      const resolution = SemanticResolution.parse(await provider.resolve(prepared.premises));
-      validateSemanticClaim(prepared.premises.request.semantic_claim, {
-        generation: prepared.premises.request.generation_id, fact_language_policy: "source",
-        entity_resolutions: resolution.entity_resolutions, attribution_speakers: resolution.attribution_speakers,
-        allow_no_single_locus: resolution.allow_no_single_locus,
-        episode: { ...prepared.premises.source, content_language: resolution.content_language },
-      });
-      const output = SemanticReviewOutput.parse(await provider.review({ premises: prepared.premises, resolution }));
-      return await this.store.completeSemanticReview(input.proposal_id, resolution, output, context);
-    } catch (error) {
-      await this.store.failSemanticReview(input.proposal_id, error instanceof Error ? error.message : String(error), context);
-      throw error;
-    }
-  }
-
-  async reviewRetainedClaim(input: ReviewRetainedClaim, context: InstallationContext) {
-    return this.store.reviewRetainedClaim(input, context);
   }
 
   async readExtractionSelection(context: InstallationContext) {
@@ -142,29 +108,12 @@ export class Engine {
     return this.store.cutoverExtractionGeneration(input, context);
   }
 
-  /** Cutover boundary for ordered profiles: the receipt is bound to the
-   * generation actually returned by the store, never to caller-supplied data. */
-  async cutoverExtractionGenerationBound(input: SelectExtractionGeneration, profile: GenerationProfileInput, context: InstallationContext): Promise<{ generation: Generation; receipt: GenerationIdentityReceipt }> {
-    const generation = await this.store.cutoverExtractionGeneration(input, context);
-    const bound = bindGenerationProfile({ generation_id: generation.id, generation_version: generation.incarnation }, profile);
-    return { generation, receipt: bound.receipt };
-  }
-
   async rollbackExtractionGeneration(input: SelectExtractionGeneration, context: InstallationContext) {
     return this.store.rollbackExtractionGeneration(input, context);
   }
 
   async readExtractionCoverage(input: ReadExtractionCoverage, context: InstallationContext) {
     return this.store.readExtractionCoverage(input, context);
-  }
-
-  /** Coverage-reader boundary requiring an exact profile/coverage binding.
-   * A missing or stale receipt cannot be manufactured from numeric ordering. */
-  async readExtractionCoverageBound(input: ReadExtractionCoverage, profile: GenerationProfileInput, context: InstallationContext): Promise<{ coverage: ExtractionCoverageRead; receipt: GenerationIdentityReceipt }> {
-    const coverage = await this.store.readExtractionCoverage(input, context);
-    const generation = await this.store.getExtractionGeneration(coverage.generation_id, context);
-    const bound = bindGenerationProfile({ generation_id: generation.id, generation_version: generation.incarnation }, profile);
-    return { coverage, receipt: bound.receipt };
   }
 
   async createModelTask(input: CreateModelTask, context: InstallationContext) {

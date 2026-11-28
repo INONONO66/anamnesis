@@ -19,7 +19,7 @@ changes.
                                                   ├─ write queue (serialized)
                                                   ├─ read pool  (recall, concurrent)
                                                   ├─ extraction worker (coverage-driven scan, extraction-state.json journal)
-                                                  ├─ maintenance (m_cache, hub shortlist — v0.2)
+                                                  ├─ maintenance (m_cache — v0.2)
                                                   └─ dreaming (community, synthesis, profile — v0.3)
 ```
 
@@ -92,7 +92,7 @@ A single integer on `(:Meta {key: 'meta', structure_revision})`.
 - generation selector switch (`active_*` SET)
 
 **Not incremented on:** Hit or RecallReceipt CREATE, policy control Episode
-CREATE (uses `policy_revision`), hit/utility-cache / `m_cache` / shortlist SET,
+CREATE (uses `policy_revision`), hit/utility-cache / `m_cache` SET,
 hidden-generation embedding backfill, extraction coverage advance, embedding
 ledger (`embedding-state.json`) and extraction journal
 (`extraction-state.json`) writes,
@@ -182,8 +182,6 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `commit {operation_id, recall_id, adopted?, reward?}` | Hit | Receipt-mode adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`), dispatched to `Runtime.commit` → `Engine.commitReceipt` (docs/04 §6). Receipt lookup, expiry and authorization run first (`unknown_recall`, `receipt_expired`, `policy_denied`); then idempotent on `operation_id`: an identical replay returns the stored result with `applied:false`, a different body rejects `idempotency_conflict` |
 | `policy.set {policy_id, selector, scope}` | policy Episode/cache | Explicit authenticated deny command; idempotent by policy ID and canonical body |
 | `policy.revoke {policy_id}` | policy Episode/cache | Explicit authenticated revocation of that immutable deny |
-| `adjudication.review {review_id, proposal_id, action: accept\|reject, reason}` | review record | Authenticated operator decision on one shadow proposal; `SHADOW → ACCEPTED\|REJECTED` only (§5.2) |
-| `adjudication.correct {correction_id, action, proposal_id?, target_generation, source_episode_id, proposed_claim_digest, candidate_digest, replacement_verdict?, target_ids[0..8], effective_time_basis, bad_evidence_ids[0..8], reason}` | operator Episode, correction record, replacement Fact | Authenticated append-only repair of an adjudicator mistake (§5.2) |
 | `embedding.retry {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Move the exact BLOCKED head back to PENDING (docs/01 §4) |
 | `embedding.skip {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Resolve one BLOCKED head as `RESOLVED_NO_VECTOR`; permanent vector exclusion for that source |
 | `embedding.cancel {operation_id, embedding_profile_id, reason}` | resolution record | Cancel a non-active target build under the write-queue barrier |
@@ -295,46 +293,11 @@ does not implicitly re-extract skipped assertions. Background rebuild removes
 denied derived material from serving indexes/caches, not immutable originals,
 operator raw access or old backups. There is no erase operation.
 
-### Adjudication and embedding control commands (D50, D51)
+### Embedding control commands (D51)
 
-These five methods and the `gen` action `qualify` are control-only. They
-require successful `hello` authentication, and no text, retrieved memory or
-model output can invoke them. Every one is idempotent by its own UUIDv7
-operation ID: a byte-identical canonical body is a no-op, and a different body
-under the same ID rejects (`review_conflict`, `correction_conflict` or
-`operation_conflict`).
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 11,
-  "method": "adjudication.review",
-  "params": {
-    "review_id": "0192f3b2-0000-7000-8000-000000000010",
-    "proposal_id": "0192f3b2-0000-7000-8000-000000000011",
-    "action": "accept",
-    "reason": "Verdict and target set match the source spans."
-  }
-}
-```
-
-`reason` is 1..512 Unicode scalars. A review performs only
-`SHADOW → ACCEPTED | REJECTED`; any second terminal review and every unlisted
-transition rejects atomically. Acceptance means the exact proposal may be
-consumed once by its named target generation, and it is an operator decision,
-not a human-gold label.
-
-`adjudication.correct` has `action ∈ {replace_wrong_invalidation,
-add_missed_invalidation, override_relation, unresolved}` with 1..512-scalar
-`reason` and distinct IDs. `replace_wrong_invalidation` requires exactly one
-target, 1..8 bad evidence IDs that all name that target, and an after verdict
-in `NEW | DUPLICATE_OCCURRENCE | ELABORATION | UNRESOLVED_CONTRADICTION`.
-`add_missed_invalidation` requires no bad evidence and an after verdict
-`CHANGE | CORRECTION`. `override_relation` applies only before a semantic
-write and takes any of the six verdicts. `unresolved` requires
-`UNRESOLVED_CONTRADICTION`, appends audit only and leaves the existing pair
-unchanged. The target generation and candidate digest must still be current
-under the write lock; a stale request rejects rather than being redirected.
+The three embedding operations require authenticated explicit calls. Each is
+idempotent by its UUIDv7 operation ID; reusing an ID with a different body
+rejects with `operation_conflict`.
 
 ```json
 {
@@ -358,7 +321,7 @@ BLOCKED tuple head; stale or non-head operations reject. A skip permanently
 excludes that source from the model's vector channel and is rejected when it
 would exceed an ACTIVE dependent profile's cumulative bound, whose default is
 zero. `embedding.cancel` may not target the active profile. Neo4j unavailable
-means all five return retryable `storage_unavailable` before any acceptance.
+means all three return retryable `storage_unavailable` before any acceptance.
 
 ### Payload upload state machine
 
@@ -746,11 +709,7 @@ decisions. LLM calls cannot sit inside a transaction.
           contradiction, resolved    → Fact + at most 8 INVALIDATES targets
                                         (mode: change | correction, docs/03 §5)
           contradiction, unresolved  → Fact + CONTRASTS F
-        In the shadow default (§5.2) this stage writes an AdjudicationAttempt
-        and, on a valid output, an immutable AdjudicationProposal instead of
-        the Fact-to-Fact relations above; only an authenticated accepted
-        proposal reaches W1. L4 is also the only stage that may mark a Fact a
-        known echo, and only against an exact delivered result ID in a
+        L4 may mark a Fact a known echo, and only against an exact delivered result ID in a
         complete parent receipt (docs/01 §3.3)
     ── write tx ─────────────────────────────────────────────────────────────
     W1. Re-validate:
@@ -761,15 +720,6 @@ decisions. LLM calls cannot sit inside a transaction.
         · newest Episode.revision_key for episode.origin_key still equals input_head
         · rerun the bounded reads and require the exact candidate_digest
         · every referenced candidate and replacement-context edge is unchanged
-        · for an accepted adjudication proposal, compare its **stored** fields
-          directly: target_generation still ACTIVE,
-          newest Episode.revision_key for episode.origin_key == proposal.source_head_revision_key,
-          Meta.policy_revision == proposal.policy_revision, the revalidated
-          claim reproduces proposal.proposed_claim_digest, and the repeated
-          bounded read reproduces proposal.candidate_digest. Never infer
-          proposal-time source or policy state from the current graph or from
-          the candidate digest; any mismatch is stale acceptance, produces no
-          output and no consumption row, and needs a new attempt (§5.2)
         · the Episode's lineage is complete: an assistant Episode with unknown
           or truncated lineage produces no semantic output, and neither does
           anything derived from it (echo_lineage_unavailable, docs/01 §3.3)
@@ -831,8 +781,7 @@ decisions. LLM calls cannot sit inside a transaction.
         (stage,target_generation,ingest_seq,model_key). With no derived
         vectors, the sequence gets its ordinal-0 sentinel and M's coverage
         cursor advances as a no-op
-    W5. append the AdjudicationConsumption row for any accepted proposal this
-        transaction consumed; advance next_ingest_seq/covered_ingest_seq to
+    W5. Advance next_ingest_seq/covered_ingest_seq to
         this committed sequence;
         if structural output was created in the ACTIVE generation,
         structure_revision += 1. BUILDING/CATCHING_UP writes do not bump it;
@@ -934,94 +883,10 @@ plan was true as a plan. What a caller does with `hedged` or `intended` results
 (filter, phrase, discount) is the caller's business; the engine's job is to
 not lose the distinction.
 
-### 5.2 Shadow adjudication and operator repair (D50)
+### 5.2 Fact write authority (D60)
 
-The adjudication default is **development-scoped and shadow-first**. For the
-frozen conformance prompt `scripts/research/adjudication-prompt.md` (SHA-256
-`94a74ca2825e17d09188ae0af97c915c7a79a64a45ac998e2f584d8878c3275b`) the
-default judge profile is `claude-opus-5` on Messages with thinking disabled,
-and `gpt-5.5` on Responses with reasoning effort `none` is the comparator.
-That choice is role-specific: it approves no extractor, transfers to no other
-role, and is not a global model ranking. It ships in shadow mode, so the L4
-stage emits proposed verdicts and audit records that create no Fact and no
-semantic link.
-
-```text
-  AdjudicationAttempt {attempt_id, target_generation, episode_id,
-                       source_head_revision_key, policy_revision,
-                       candidate_digest, judge_profile_id, started_at,
-                       finished_at, outcome, error_code?, error_digest?}
-                        immutable, one per call; outcome is succeeded |
-                        transport_error | parse_error | validation_error, and a
-                        failed call yields no proposal at all
-  AdjudicationProposal {proposal_id, target_generation, episode_id,
-                        source_head_revision_key, policy_revision,
-                        proposed_claim_digest, candidate_digest, verdict,
-                        target_ids[0..8], evidence_ids[1..32],
-                        effective_time_basis, reason, judge_profile_id}
-                        immutable, created only from a valid strict output;
-                        proposal_id equals its successful attempt_id
-  AdjudicationReview    append-only accept/reject; state SHADOW | ACCEPTED |
-                        REJECTED is materialized from these rows
-  AdjudicationConsumption  one row per accepted proposal, written in the same
-                        W5 transaction that used it (single use)
-```
-
-`source_head_revision_key` is the exact 64-lowercase-hex newest Episode
-`revision_key` for that origin by indexed `ingest_seq`
-captured before the bounded candidate read and the model call;
-`policy_revision` is the nonnegative safe integer captured at that same point.
-Both are **persisted premises**, not values reconstructed later from the
-graph, and the proposal copies them, the target, Episode, candidate digest and
-judge profile byte-for-byte from its successful attempt.
-
-Before the call, the worker mechanically validates the complete L1 claim,
-derives its canonical evidence span, resolves its time and materializes:
-
-```text
-  validated_l1_claim = {
-    content, content_language, sub_kind, modality, confidence,
-    evidence_quote: string | null,
-    evidence_kind: no_single_locus | null,
-    span: [start,end] | null,
-    time_value, time_utc, time_precision,
-    entities: 0..16 complete generation-schema-validated Entity mentions,
-    speaker_key, subject_keys, predicate_text, scope, scope_complete,
-    corrects_local_claim_index: integer | null,
-    correction_scope_text: string | null,
-    mode: change | correction | null
-  }
-  proposed_claim_digest = sha256(UTF-8(RFC-8785(validated_l1_claim)))
-```
-
-Every key is present, absent optional values are JSON `null`, `entities` stays
-in extraction order as the complete validated array (not display strings or
-post-resolution IDs), and fields declared sorted in §5.3 use that byte order.
-The three time fields are the resolved stored Fact time, never an unresolved
-hint. This digest adds no second evidence or time authority; bounds remain
-those of W2 and docs/01–docs/03.
-
-Because failures never become proposals, no denominator is silently invented
-for a later "accuracy" claim. Acceptance is an operator decision, not human
-gold, and it enables no unattended writing anywhere else. Unattended
-invalidation stays out of scope until a new decision supplies independent,
-production-shaped labels with declared false-invalidation, missed-update,
-candidate-completeness, transport and parse bounds; the 36 synthetic
-conformance cases and the 119 historical pseudo-label cases do not qualify
-([research/adjudication-conformance](research/adjudication-conformance.md)).
-
-**Operator repair** is authenticated, append-only audit authority. It never
-rewrites or deletes a historical Fact, edge or `InvalidationEvidence`. When a
-repair creates a replacement Fact, the daemon first appends a CREATE-only
-`anamnesis.operator-adjudication/1` Episode, excluded from ordinary search,
-extraction and PPR, whose deterministic renderer never impersonates user
-prose. Restoring a wrongly invalidated `A` appends `A-prime` in `A`'s ACTIVE
-generation under the docs/03 §5 replacement protocol: every bad edge is
-retained, at most 65 incoming evidence rows are inspected, and at most 64
-retained evidence IDs move forward as content-free markers. `A-prime` keeps
-`A.time`, so it serves every `T >= A.time` once the correction commits, while
-operator acceptance time stays audit-only. Ordinary recall labels the repaired
-provenance `operator_corrected` (docs/05 §6).
+Only the extraction pipeline materializes production Facts. The mechanical
+relation decisions in D53 remain part of that pipeline.
 
 ### 5.3 Bounded grouping predicates (D49)
 
@@ -1061,7 +926,7 @@ value it corrects; requiring a byte-identical complete scope there would make
 every real self-correction fail. Grouping uses `same_scope_group`, which
 admits nothing partial. Likewise `same_time` for L1b means the same immutable
 Episode ID, with "later" requiring the correcting span's `start` to exceed the
-draft's, while cross-Episode grouping and adjudication require the exact same
+draft's, while cross-Episode grouping and relation judging require the exact same
 `time_key`. `same_modality` is exact §5.1 enum equality.
 
 L1b suppresses an earlier local claim only when the later output sets
@@ -1124,21 +989,11 @@ envelope has what it needs from the first version that runs PPR.
   m_cache        compute m(now) for every Element → SET Element.m_cache
                  · used to order bounded envelope fanout (docs/06 §2), hence gates
                    inclusion as well as final ranking; capture staleness for replay
-  hub shortlist  for each Element with deg ≥ HUB_DEGREE (256): atomically rebuild
-                 at most 32 cache nodes
-                 (:HubArc {hub_id, rank: 0..31, link_id, neighbor_id, role,
-                            stream, generation?, source_extraction_generation?})
-                 ORDER BY w_role DESC, coalesce(neighbor.m_cache, neighbor.m0) DESC,
-                          neighbor.id DESC, link.id ASC
 ```
 
-Both are cache-layer SETs and do not bump `structure_revision`. `maintain`
-runs it on demand. Any topology rewire, relationship GC or other Link DELETE
-removes `HubArc {link_id}` in the same transaction; consumers never trust an
-arc whose physical/cache link no longer exists.
-Policy is checked on every consumption; stale mass/shortlists cannot bypass
-suppression. Policy reconciliation rebuilds affected shortlists/profile caches
-and generation indexes without denied material.
+Cache updates do not bump `structure_revision`. `maintain` runs maintenance on demand.
+Policy is checked on consumption. Saturated sources have no outgoing
+traversal until a shortlist is implemented and qualified (docs/06 §3).
 
 ## 7. Dreaming (v0.3)
 
@@ -1238,8 +1093,7 @@ no committable receipt and triggers no exposure. No memory content may be
 returned without current policy and durable receipt authority. This explicit
 exception does not permit returning a cached result or an unrecorded receipt.
 
-`commit`, `policy.set`, `policy.revoke`, `adjudication.review`,
-`adjudication.correct`, `embedding.retry`, `embedding.skip`,
+`commit`, `policy.set`, `policy.revoke`, `embedding.retry`, `embedding.skip`,
 `embedding.cancel` and `gen ... qualify` return retryable
 `storage_unavailable` when Neo4j is unavailable, before any
 feedback, policy, review, correction or resolution acceptance. With Neo4j
@@ -1258,7 +1112,7 @@ Personal, single-user, localhost. The boundary is the OS user.
 |---|---|
 | data directory | `~/.anamnesis/` mode 0700; files 0600 |
 | UDS | `sock` mode 0600 plus a per-install 32-byte capability in `socket.token` (0600), required by `hello`. This is portable in pure Node; no native peer-credential addon |
-| control commands | Policy changes, generation/maintenance/gc operations, adjudication review and correction, embedding retry/skip/cancel and qualification require authenticated explicit calls; never dispatch commands parsed from retrieved or ingested content |
+| control commands | Policy changes, generation/maintenance/gc operations, embedding retry/skip/cancel and qualification require authenticated explicit calls; never dispatch commands parsed from retrieved or ingested content |
 | provenance metadata | `origin_role`, `lineage_mode` and `parent_recall_ids` come from the authenticated adapter and are verified against the caller binding. Never infer lineage from prose, and never let ingested text claim independence (D49) |
 | request caps | length-prefixed RPC frame ≤ 1 MiB; decoded chunk ≤ 512 KiB; object ≤ 64 MiB; per connection 2 uploads/128 MiB temp; global 64 connections/32 uploads/1 GiB temp; spool ≤ 1 GiB and ≥ 2 GiB free-space floor |
 | policy caps | active denies ≤ 256; literal ≤ 512 Unicode scalars after NFC; resolved entity aliases ≤ 256 per policy per generation, lookup ≤ 257 entries; reject overflow atomically, never truncate; revoke remains allowed |
@@ -1309,7 +1163,6 @@ fallback; recall itself remains LLM-free.
 | remember | 1 (Episode, Payload, revision INVALIDATES, session topology, cache init) | +1 |
 | extract (one window) | read tx + write tx (re-validated), with per-Episode custody and attempts | +1 only when ACTIVE structural output is created |
 | embed backfill | 1 per bounded batch, terminal-prefix coverage cursor; the committed prefix stops at the first failure | +1 only for ACTIVE coverage |
-| adjudication.review / adjudication.correct | 1 bounded append-only control tx (review or correction, operator Episode, replacement Fact) | +1 only when a correction creates ACTIVE structural output |
 | embedding.retry / skip / cancel / qualify | 1 bounded control tx per operation; cancel takes the write-queue barrier | +1 only when a skip releases ACTIVE coverage |
 | recall impression | 1 bounded control transaction before response publication, under policy barrier | — |
 | policy.set / policy.revoke | 1 (immutable control Episode, active-policy publication, contiguous cursor no-ops) | policy_revision +1 for effective change; structure unchanged |

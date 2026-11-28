@@ -16,7 +16,7 @@ import { Generation, ExtractionAttempt, ModelTask, Coverage, ExtractionModelOutp
 import { SemanticClaim, SemanticClaimBatch } from "../src/semantic-claim.ts";
 import { EchoLineage, EpisodeLineageInput } from "../src/episode-lineage.ts";
 
-import { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, SemanticResolution, SemanticReviewOutput, SemanticReviewPremises, RetainedSemanticProposal } from "../src/materialization.ts";
+import { SemanticResolution } from "../src/materialization.ts";
 import { ExtractionJudgeInput, ExtractionDisposition, ExtractionPipeline, CreateExtractionPipeline } from '../src/extraction-audit.ts';
 
 export function protocolJsonSchemas() {
@@ -61,13 +61,7 @@ export function protocolJsonSchemas() {
     "extraction-selection": z.toJSONSchema(ExtractionSelection, { target: "draft-2020-12" }),
     "extraction-coverage-request": z.toJSONSchema(ReadExtractionCoverage, { target: "draft-2020-12" }),
     "extraction-coverage-read": z.toJSONSchema(ExtractionCoverageRead, { target: "draft-2020-12" }),
-    "materialization-propose": z.toJSONSchema(ProposeRetainedClaim, { target: "draft-2020-12" }),
-    "materialization-input": z.toJSONSchema(MaterializeRetainedClaim, { target: "draft-2020-12" }),
-    "materialization-review": z.toJSONSchema(ReviewRetainedClaim, { target: "draft-2020-12" }),
     "materialization-resolution": z.toJSONSchema(SemanticResolution, { target: "draft-2020-12" }),
-    "materialization-output": z.toJSONSchema(SemanticReviewOutput, { target: "draft-2020-12" }),
-    "materialization-premises": z.toJSONSchema(SemanticReviewPremises, { target: "draft-2020-12" }),
-    "materialization-proposal": z.toJSONSchema(RetainedSemanticProposal, { target: "draft-2020-12" }),
   };
 }
 

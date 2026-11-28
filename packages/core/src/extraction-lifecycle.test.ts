@@ -4,8 +4,6 @@ import { Engine } from "./engine.ts";
 const incarnation = "a".repeat(64);
 test("Engine exposes model-task admission and generation-bound serving seams", () => {
   expect(typeof Reflect.get(Engine.prototype, "createModelTask")).toBe("function");
-  expect(typeof Reflect.get(Engine.prototype, "cutoverExtractionGenerationBound")).toBe("function");
-  expect(typeof Reflect.get(Engine.prototype, "readExtractionCoverageBound")).toBe("function");
 });
 async function response(body: unknown, run: (provider: HttpExtractionProvider) => Promise<void>) {
   const server = Bun.serve({ port: 0, fetch: () => Response.json(body) });
