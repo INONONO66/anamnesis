@@ -13,7 +13,7 @@ import { extractionBodyDigest } from "../../packages/protocol/src/extraction.ts"
 const labelsToRemove = ["ModelTask", "ExtractionAttempt", "ExtractionPipeline", "ExtractionJudgeInput", "ExtractionDisposition"] as const;
 const constraintsToRemove = ["extraction_attempt_id", "extraction_disposition_key", "extraction_judge_input_id",
   "extraction_pipeline_id", "extraction_pipeline_judge", "model_task_id", "model_task_work_key"] as const;
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "g3-memory-only";
 
 test("five Episodes produce distinct Facts with no graph extraction ledgers and a pruned journal", async () => {

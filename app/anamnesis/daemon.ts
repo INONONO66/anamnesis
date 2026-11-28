@@ -7,7 +7,7 @@ import { RPC_LIMITS, RpcTcpAuth, type RpcRequest } from "@anamnesis/protocol";
 import { acquireInstallation, loadListenConfig, runtimeRoot, socketPath } from "./config.ts";
 import { daemonTiming, timingContext, timingHash } from "./timing.ts";
 import { Runtime } from "./runtime.ts";
-import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
+import type { InstallationContext } from "@anamnesis/core";
 import { FrameFault, Frames, RpcByteBudget, RpcFault, decodeRequest, encode, envelope, errorResponse, fault, type ByteAccount, type ByteReservation } from "./wire.ts";
 
 /** authorized: transport admission (always for the socket, bearer frame for TCP); authenticated: hello. */
@@ -134,31 +134,14 @@ export async function foreground(): Promise<void> {
       socket.once("close", resolve); socket.destroy();
     })));
   };
-  const auditPublication = (recall_id: string, state: RecallTransportInput["state"], context: InstallationContext) => {
-    enqueue(async () => {
-      let stage = "transport";
-      try {
-        await installation.assertOwned();
-        await runtime!.recordRecallTransport({ recall_id, state }, context);
-        if (state === "local_complete" && context.commit_mode === "auto") {
-          stage = "exposure";
-          await runtime!.exposeRecall(recall_id, context);
-        }
-      } catch (error) {
-        // Bytes cannot be unsent. Never emit a second RPC reply or feedback.
-        logEvent("error", "recall_publication_error", { recall_id, stage, code: fault(error).code, error: String(error) });
-      }
-    });
-  };
   const send = (connection: Connection, value: unknown, reservation: ByteReservation,
-    released = () => budget.release(reservation), recallId?: string, policyProtected = false, timing?: (event: string) => void) => {
+    released = () => budget.release(reservation), policyProtected = false, timing?: (event: string) => void) => {
     let finished = false;
     const disconnected = () => complete("delivery_unknown");
-    const complete = (state: RecallTransportInput["state"]) => {
+    const complete = (state: "delivery_unknown" | "local_complete") => {
       if (finished) return;
       timing?.(state);
       finished = true; connection.writes.delete(disconnected); publications.delete(disconnected); released();
-      if (recallId) auditPublication(recallId, state, connection.context!);
     };
     if (connection.socket.destroyed) { disconnected(); return; }
     try {
@@ -167,10 +150,8 @@ export async function foreground(): Promise<void> {
       if (connection.socket.writableLength + bytes.length > RPC_LIMITS.frame_bytes * 2) {
         connection.socket.destroy(); disconnected(); return;
       }
-      // Accounting and transport outcome are distinct. Only a successful local
-      // callback permits exposure; close/partial output always remains unknown.
       connection.writes.add(disconnected);
-      if (recallId || policyProtected) publications.set(disconnected, connection.socket);
+      if (policyProtected) publications.set(disconnected, connection.socket);
       timing?.("write_start");
       connection.socket.write(bytes, error => {
         complete(error || connection.socket.destroyed ? "delivery_unknown" : "local_complete");
@@ -236,7 +217,7 @@ export async function foreground(): Promise<void> {
       if ((reservation.pool === "ingress" && (!control || !budget.control(reservation))) ||
           pending >= RPC_LIMITS.queued_requests - (control ? 0 : 8) ||
           connection.pending >= RPC_LIMITS.queued_requests_per_connection - (control ? 0 : 2)) {
-        send(connection, errorResponse(request.id, new RpcFault("resource_exhausted", "serial request reservation is full", true)), reservation, undefined, undefined, false, timing);
+        send(connection, errorResponse(request.id, new RpcFault("resource_exhausted", "serial request reservation is full", true)), reservation, undefined, false, timing);
         return true;
       }
       pending++; connection.pending++;
@@ -257,12 +238,11 @@ export async function foreground(): Promise<void> {
             ? (result as { policy_revision: number }).policy_revision : request.method === "recall"
               ? (result as { diagnostics: { policy_revision: number } }).diagnostics.policy_revision : request.method === "graph.envelope"
                 ? (result as { pin: { policy_revision: number } }).pin.policy_revision : null;
-          const recallId = request.method === "recall" ? (result as { recall_id: string | null }).recall_id : null;
-          send(connection, { ...envelope(), policy_revision: policyRevision, id: request.id, method: request.method, result }, reservation, release, recallId ?? undefined, request.method.startsWith('extraction.audit.'), timing); sent = true;
+          send(connection, { ...envelope(), policy_revision: policyRevision, id: request.id, method: request.method, result }, reservation, release, request.method === "recall" || request.method === "projection" || request.method === "graph.envelope" || request.method.startsWith("extraction.audit."), timing); sent = true;
         } catch (error) {
           timing?.("dispatch_failed");
           const failure = fault(error);
-          send(connection, errorResponse(request.id, failure), reservation, release, undefined, false, timing); sent = true;
+          send(connection, errorResponse(request.id, failure), reservation, release, false, timing); sent = true;
           if (failure.code === "internal_error") logError(error);
           if (failure.code === "ownership_lost") { ownershipLost = true; stopping = true; setImmediate(() => { void stop().catch(logError); }); }
         } finally { if (!sent) release(); }
@@ -331,8 +311,8 @@ export async function foreground(): Promise<void> {
     const expected = Buffer.from(installation.token);
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new RpcFault("authentication_failed", "invalid installation token");
     connection.authenticated = true;
-    connection.context = Object.freeze({ principal: "installation", commit_mode: params.commit_mode, client_binding: randomUUID() });
-    return { version: 1, principal: "installation", commit_mode: params.commit_mode,
+    connection.context = Object.freeze({ principal: "installation", client_binding: randomUUID() });
+    return { version: 2, principal: "installation",
       data_incarnation: installation.incarnation, fs_epoch: installation.epoch, capabilities: runtime!.capabilities,
       limits: { frame_bytes: RPC_LIMITS.frame_bytes, chunk_bytes: RPC_LIMITS.chunk_bytes, object_bytes: RPC_LIMITS.object_bytes, content_bytes: RPC_LIMITS.content_bytes } };
   }
@@ -346,7 +326,7 @@ export async function foreground(): Promise<void> {
       case "remember.batch": return runtime.rememberBatch(request.params.deliveries, connection.context!);
       case "recall": return runtime.recall(request.params, connection.context!);
       case "projection": return runtime.projection(request.params, connection.context!);
-      case "commit": return runtime.commit(request.params, connection.context!);
+      case "report_outcome": return runtime.reportOutcome(request.params, connection.context!);
       case "graph.envelope": return runtime.graphEnvelope(request.params as { seed_ids: string[]; T?: number }, connection.context!);
       case "policy.set":
         await cancelPublications();

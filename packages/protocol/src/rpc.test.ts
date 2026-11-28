@@ -39,7 +39,7 @@ function response(method: string, result: unknown) {
 describe("strict versioned RPC requests", () => {
   test("admits all ingest-phase methods and normalizes Episode defaults", () => {
     const inputs = [
-      request("hello", { token: "installation-token", client: "harness", commit_mode: "receipt", version: RPC_VERSION }),
+      request("hello", { token: "installation-token", client: "harness", version: RPC_VERSION }),
       request("status", {}),
       request("shutdown", {}),
       request("object.begin", { sha256: hash, size: 0, media_type: "application/octet-stream" }),
@@ -54,7 +54,7 @@ describe("strict versioned RPC requests", () => {
   });
 
   test("requires hello version and installation token, not a client principal", () => {
-    const hello = { token: "installation-token", client: "harness", commit_mode: "auto", version: RPC_VERSION };
+    const hello = { token: "installation-token", client: "harness", version: RPC_VERSION };
     for (const invalid of [
       { ...hello, token: "" },
       { ...hello, version: RPC_VERSION + 1 },
@@ -83,12 +83,12 @@ describe("strict versioned RPC requests", () => {
   test("keeps the v1 method registry aligned with request and capability surfaces", () => {
     for (const method of ["hit-cache.verify", "hit-cache.rebuild"])
       expect(RpcMethod.safeParse(method).success).toBe(true);
-    expect(RPC_METHODS).toContain("commit");
+    expect(RPC_METHODS).toContain("report_outcome");
     expect(RPC_METHODS).toContain("hit-cache.verify");
     expect(RPC_METHODS).toContain("hit-cache.rebuild");
     expect(RPC_METHODS).toContain("projection");
     expect(RpcCapabilities.parse({
-      methods: [...RPC_METHODS], recall: false, commit: true, policy: false,
+      methods: [...RPC_METHODS], recall: false, policy: false,
       extraction: false, embeddings: false, projection: true, writer_fence: "database",
     }).methods).toEqual([...RPC_METHODS]);
   });
@@ -98,12 +98,11 @@ describe("strict versioned RPC requests", () => {
       expect(RpcRequest.safeParse(request(method, {})).success).toBe(false);
   });
 
-  test("admits receipt commits only with adopted or reward feedback in range", () => {
-    const ids = { operation_id: uuid, recall_id: "0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e10" };
-    expect(RpcRequest.safeParse(request("commit", { ...ids, adopted: ["0192f3a1-5e7b-7c3d-9f21-8a4b6c2d1e11"] })).success).toBe(true);
-    expect(RpcRequest.safeParse(request("commit", { ...ids, reward: -1 })).success).toBe(true);
-    for (const invalid of [ids, { ...ids, reward: 2 }, { ...ids, adopted: [uuid, uuid] }, { ...ids, adopted: [uuid], extra: true }])
-      expect(RpcRequest.safeParse(request("commit", invalid)).success).toBe(false);
+  test("outcome requires a finite reward and UUIDv7 key, and refuses client attribution", () => {
+    const ids = { usage_id: uuid, idempotency_key: uuid };
+    expect(RpcRequest.safeParse(request("report_outcome", { ...ids, reward: 42 })).success).toBe(true);
+    for (const invalid of [ids, { ...ids, reward: NaN }, { ...ids, reward: Infinity }, { ...ids, reward: 0, adopted: [] }, { ...ids, idempotency_key: "key", reward: 1 }])
+      expect(RpcRequest.safeParse(request("report_outcome", invalid)).success).toBe(false);
   });
 
   test("requires explicit revision CAS and original Episode semantics", () => {
@@ -175,7 +174,6 @@ describe("strict RPC responses", () => {
     const capabilities = {
       methods: ["hello", "status", "shutdown", "object.begin", "object.chunk", "object.commit", "remember"],
       recall: false,
-      commit: true,
       policy: false,
       extraction: false,
       embeddings: false,
@@ -185,7 +183,6 @@ describe("strict RPC responses", () => {
     const hello = {
       version: RPC_VERSION,
       principal: "installation",
-      commit_mode: "receipt",
       data_incarnation: uuid,
       fs_epoch: uuid,
       capabilities,

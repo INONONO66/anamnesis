@@ -10,7 +10,7 @@ import { extractionBodyDigest, type FactRelationContext } from "@anamnesis/proto
 
 const OUT = process.env["ANAMNESIS_G8_SURFACE_OUT"]
   ?? "/Users/ino/Develop/anamnesis/.omo/evidence/ulw/01a11b8c-9f0b-71f3-ac0c-cb1048614a4e/G003-g8-judge-vector/surface";
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "g8-relation-vector", incarnation = extractionBodyDigest(model);
 const profile = EmbeddingProfile.parse({ model: "g8-relation-vector-fixture", model_incarnation: "d".repeat(64), dimensions: 2,
   document_prefix: "", query_prefix: "", max_input_bytes: 8192, norm: "unit_l2", norm_tolerance: 0.001 });

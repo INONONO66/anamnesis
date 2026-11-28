@@ -1,7 +1,7 @@
 import { planSchemaMigration } from "./schema-migrations.ts";
 import { Driver } from "neo4j-driver";
 import { MemoryElement, MemoryLink, ExtractionAttempt, Generation, ModelTask, Coverage, type MemoryElementInput, type MemoryLinkInput, type LinkRole } from "@anamnesis/protocol";
-import { RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "@anamnesis/protocol";
+import { type RpcReportOutcomeParams, RpcPolicySetParams, RpcPolicyRevokeParams, type RpcPolicyResult } from "@anamnesis/protocol";
 import { type SemanticSourceContext } from "@anamnesis/protocol";
 import { CreateModelTask, ModelTaskCAS, LeaseModelTask, SettleModelTask, CompleteExtractionAttempt, AdvanceExtractionCoverage, SelectExtractionGeneration, ExtractionSelection, ReadExtractionCoverage, ExtractionCoverageRead, FactRelationJudgement, type ExtractionFailureDetail } from "@anamnesis/protocol";
 import { ExtractionClaimContext, ExtractionPipeline, ExtractionDisposition, FactRelationContext } from "@anamnesis/protocol";
@@ -11,7 +11,7 @@ import { embeddingProfileId } from "./embedding.ts";
 import { type ConductingArcProbe, type GraphEnvelope, type ConductingArcVerification } from "./store/conducting.ts";
 import { SCHEMA_STATEMENTS } from "./store/schema.ts";
 import { canonicalJson } from "./store/digest.ts";
-import { IssueReceiptInput, RecallReceipt, RecallTransportInput, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache } from "./store/receipts.ts";
+import type { HitCacheVerification, HitCacheRebuild, HitCache } from "./store/receipts.ts";
 import { type InstallationContext } from "./store/policy.ts";
 import { type ElementWriteOptions } from "./store/records.ts";
 import { StoreCore, type StoreOptions } from "./store/core.ts";
@@ -32,7 +32,7 @@ import type { AuthoritySnapshot } from "./store/conducting-store.ts";
 import type { PutResult } from "./store/element-store.ts";
 import type { IntegrityIssue } from "./store/integrity-store.ts";
 export { type ConductingArcProbe, type GraphEnvelope, type ConductingArcVerification } from "./store/conducting.ts";
-export { luceneQuery, IssueReceiptInput, RecallReceipt, RecallTransportInput, CommitReceiptInput, type CommitReceiptResult, type ReceiptStatus, type HitCacheVerification, type HitCacheRebuild, type HitCache, ReceiptHit } from "./store/receipts.ts";
+export { luceneQuery, type HitCacheVerification, type HitCacheRebuild, type HitCache } from "./store/receipts.ts";
 export { type InstallationContext } from "./store/policy.ts";
 export type { AuthoritySnapshot } from "./store/conducting-store.ts";
 export { GenerationReadinessError } from "./store/extraction-store.ts";
@@ -88,7 +88,24 @@ export class Store {
     return this.core.claimWriterEpoch();
   }
 
+  private async refuseReceiptEraRows(): Promise<void> {
+    const [boundary] = await this.core.run<{ legacy: boolean; hits: boolean }>(`RETURN
+      EXISTS { MATCH (n:RecallReceipt|RecallTransport|RecallFeedback|RecallOutcome) } AS legacy,
+      EXISTS { MATCH (h:Hit) WHERE NOT coalesce(
+        h.kind = 'outcome' AND size(keys(h)) = 7 AND
+        all(id IN [h.id, h.episode_id, h.usage_id] WHERE id =~ $uuid) AND
+        h.idem_key =~ '[0-9a-f]{64}' AND
+        h.t = toIntegerOrNull(h.t) AND 0 <= h.t <= 9007199254740991 AND
+        -0.2 <= h.credit <= 0.2, false) } AS hits`, { uuid: "(?i)[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}" });
+    if (boundary!.legacy) throw new Error("D62: legacy recall receipt found; readiness refused");
+    if (boundary!.hits) throw new Error("D62: incompatible Hit found; readiness refused");
+  }
+
   async init(): Promise<void> {
+    // D62 boundary, checked once: a store recorded before schema 2 may hold receipt-era rows, which are refused,
+    // never converted or dropped. The init transaction below records schema 2, so later starts skip the scan.
+    const [meta] = await this.core.run<{ version: number | null }>(`MATCH (m:Meta {key:'meta'}) RETURN m.schema_version AS version`);
+    if (meta && (meta.version ?? 0) < 2) await this.refuseReceiptEraRows();
     for (const stmt of SCHEMA_STATEMENTS) await this.core.run(stmt);
 
     if (this.core.embeddingProvider) {
@@ -143,11 +160,6 @@ export class Store {
     });
   }
 
-  /** Privileged server issuer, Episodes only; not semantic recall or a wire API. */
-  issueReceipt(input: IssueReceiptInput, context: InstallationContext): Promise<RecallReceipt> {
-    return this.receipts.issueReceipt(input, context);
-  }
-
   /** Retained provenance reader for lifecycle semantic adapters. No caller role,
    * lineage, source text or time replacement crosses this custody boundary. */
   semanticEpisode(sourceId: string, context: InstallationContext): Promise<Omit<SemanticSourceContext["episode"], "content_language">> {
@@ -162,28 +174,8 @@ export class Store {
     return this.receipts.revokePolicy(input, context);
   }
 
-  getReceipt(recallId: string): Promise<RecallReceipt | null> {
-    return this.receipts.getReceipt(recallId);
-  }
-
-  /** The transport append deliberately does not consult current policy: even a
-   * cancelled/denied publication must retain its truthful, content-free audit. */
-  recordRecallTransport(input: RecallTransportInput, context: InstallationContext) {
-    return this.receipts.recordRecallTransport(input, context);
-  }
-
-  /** Audit only, after persisted local completion. Replays are explicit and
-   * policy-checked; startup never infers delivery from receipt existence. */
-  exposeRecall(recallId: string, context: InstallationContext): Promise<{ applied: number }> {
-    return this.receipts.exposeRecall(recallId, context);
-  }
-
-  getReceiptStatus(operationId: string): Promise<ReceiptStatus> {
-    return this.receipts.getReceiptStatus(operationId);
-  }
-
-  commitReceipt(input: CommitReceiptInput, context: InstallationContext): Promise<CommitReceiptResult> {
-    return this.receipts.commitReceipt(input, context);
+  reportOutcome(input: RpcReportOutcomeParams, context: InstallationContext) {
+    return this.receipts.reportOutcome(input, context);
   }
 
   getHitCache(episodeId: string): Promise<HitCache | null> {

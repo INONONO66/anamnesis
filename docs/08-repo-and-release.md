@@ -35,7 +35,7 @@ anamnesis/
 │   │   └── scripts/export-schemas.ts
 │   ├── core/                   # Neo4j schema, write path, idempotency, generations, objects/ (docs/01–02)
 │   ├── dynamics/               # pure functions: R(t,S), S update, replay, utility U, CSR PPR, RRF, budget packing, ordering conventions (docs/04–06). No Neo4j dependency
-│   ├── recall/                 # candidates, seeds, envelope queries, policy filter, conflict bundles, assembly, receipts, degradation ladder (docs/05)
+│   ├── recall/                 # candidates, seeds, envelope queries, policy filter, conflict bundles, assembly, Usage, degradation ladder (docs/05)
 │   ├── daemon/                 # anamnesisd: UDS JSON-RPC, write queue, Outbox worker, dreaming schedule
 │   ├── client/                 # socket client + daemon spawn/discovery
 │   └── cli/                    # bin "anamnesis" — daemon ops only (up/down/status/verify/gen/gc/dream/bench/backup/restore)
@@ -48,7 +48,7 @@ by the operator and attach over the UDS RPC contract. `remember`/`recall`,
 `embedding.cancel` are API-only; the CLI never wraps them (D39, D43,
 D51). `gen` gains one control action, `gen(action=qualify)`, which appends an
 `EmbeddingQualification` record and never activates a profile by itself (D51). A harness supplies `origin_role` and, for an assistant turn that
-received anamnesis context, `lineage_mode: "receipts"` with its parent recall
+received anamnesis context, `lineage_mode: "receipts"` with its parent Usage
 IDs; the daemon verifies that against the authenticated caller and never
 infers lineage from text (D49). `gc` has `--objects`, `--derived` and
 `--embedding` modes and nothing else: there is no `gc --erase`, because policy
@@ -139,12 +139,12 @@ drift gate).
 bun install → typecheck (tsc) → bun test              (linux + macos, no container)
 contract: bun run schemas → git diff --exit-code
 dynamics gates: forgetting fixtures · utility attribution (Σ w_e = 1) · budget packing exactness · PPR convergence/conservation/determinism · RRF invariance · ordering conventions
-integration: Neo4j container (service) → core/recall tests · policy suppression fixtures · receipt exact-once fixtures
+integration: Neo4j container (service) → core/recall tests · policy suppression fixtures · outcome exact-once fixtures
              · language/evidence: immutable content_language · en-generation language_policy_mismatch with no
                per-claim fallback · projection-derived alias rejected · Latin/Cyrillic homoglyph distinction
                · literal quote + derived span · verbatim query on both channels
              · echo-lineage and grouping: dual digest-version round trip (version-1 write-free, version-2
-               role/lineage conflict) · bounded parents/roots/depth with overflow → unknown · receipt
+               role/lineage conflict) · bounded parents/roots/depth with overflow → unknown · Usage
                selection_digest == Episode.context_digests · unknown-lineage Episode and its outputs
                ineligible · complete vs incomplete synthesis support unions · same_scope_l1b vs
                same_scope_group · null subject_keys with no literal fallback
@@ -152,7 +152,7 @@ integration: Neo4j container (service) → core/recall tests · policy suppressi
                · every failure transition incl. worker_lost and cancellation · current-watermark cutover
                barrier · zero-skip production default · embedding_coverages carrying both simultaneously
                blocked (episode,0) and (extraction,N) rows with distinct cursors and omission digests
-               on diagnostics and receipt                                       (docs/07 §6)
+               in diagnostics                                       (docs/07 §6)
 publication: reject any Markdown link from shipped files whose target contains `.omo/`
 gds-solver: Neo4j+GDS container → 20 synthetic solver validations               (docs/07 §2)
 ```
@@ -187,8 +187,8 @@ over-engineering — they always ship together. Calibration constants
 independently of the code version. Three more versions are recorded on data,
 not on packages: the `m₀` prior/calibration version on each derived
 generation (a prior change is a new generation, never a rewrite), the
-`tokenizer_id` version or digest on each receipt that used a token budget,
-and the policy revision on each receipt (D44, D45, D47). Three more live on
+`tokenizer_id` version or digest in each response that used a token budget,
+and the policy revision on each Usage (D62). Three more live on
 data as well: `fact_language_policy` with its prompt digest,
 `extractor_profile_id` and validator version on each extraction generation,
 `grouping_version` on each duplicate-group key, and the

@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 const id=()=>{const b=randomBytes(16); b[6]=(b[6]&15)|112; b[8]=(b[8]&63)|128; const h=b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;};
 test('G004 real bounded ConductingArc probe and fail-closed envelope',async()=>{
  const uri=process.env.ANAMNESIS_TEST_NEO4J_URI, password=process.env.ANAMNESIS_TEST_NEO4J_PASSWORD; assert.ok(uri&&password);
- const context={ principal:'installation', commit_mode:'receipt' };
+ const context={ principal:'installation' };
  const d=neo4j.driver(uri,neo4j.auth.basic('neo4j',password),{disableLosslessIntegers:true}); const e=new Engine({uri,password,objectsRoot:'/tmp/g004-envelope-objects'});
  try { await d.executeQuery('MATCH (n) DETACH DELETE n'); await e.init(); await e.claimWriterEpoch();
   const source=id(), generation=id(), peers=Array.from({length:257},id), links=peers.map((peer,i)=>({source_id:source,link_id:id(),peer_id:peer,role:i%2?'MENTIONS':'NEXT_EPISODE',generation:i%2?generation:null}));

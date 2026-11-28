@@ -17,8 +17,7 @@ permits a different kind of write.
              (embedding, extraction and materialization operational state are not graph
              layers; they live in `embedding-state.json`, `extraction-state.json` and
              `materialization-state.json` beside the runtime root, §4, §6)
-  control    append-only RecallReceipt impressions and feedback acceptance records;
-             durable until explicit receipt retention expiry, not semantic Episodes
+  control    append-only Usage and UsageOutcome; never semantic Episodes
              append-only InvalidationEvidence metadata, retained while its
              invalidation outcome can affect a supported historical snapshot
              Episode lineage properties
@@ -80,7 +79,7 @@ kind-specific queries go through the kind label.
 | `speaker_key`, `subject_keys`, `time_key`, `duplicate_group_key` | Fact | `sha256(RFC-8785 {origin_source, origin_actor})` or null; 1–16 sorted resolved Entity IDs or null; the exact `{time_utc, time_precision}` pair; the local grouping key below when every component resolves (D49) |
 | `predicate_text`, `scope`, `scope_complete` | Fact | NFC case-preserving source-language relation (1–256 scalars), the closed bounded scope object below, and whether every scope component resolved. Meaning-bearing (D49) |
 | `echo_state`, `echo_of_element_id`, `echo_depth`, `echo_lineage_truncated` | Fact | `direct \| known_echo \| context_derived \| unknown`, the exact delivered result a known echo repeats, depth 0..8, and whether a bound truncated the lineage (§3.3) |
-| `parent_recall_ids`, `corroboration_root_episode_ids` | Fact | Sorted immutable 0..4 parent receipt IDs and 0..16 root Episode IDs copied from the Episode's lineage row. Provenance accounting only; never authority, candidates or a score term |
+| `parent_recall_ids`, `corroboration_root_episode_ids` | Fact | Sorted immutable 0..4 parent Usage IDs and 0..16 root Episode IDs copied from the Episode's lineage row. Provenance accounting only; never authority, candidates or a score term |
 | `modality` | every Fact, including synthesis | `asserted / reported / hedged / intended / hypothetical` — the speech act of this content (docs/02 §5.1). Required, meaning-bearing: part of identity, input to the forgetting prior, returned on recall |
 | `confidence` | Fact | Judge's belief in [0,1] that the claim is what the source says. Stored, input to `m₀`, **not** part of identity — model nondeterminism on a scalar must not fork Facts |
 | `prior_version`, `calibration_version`, `judge_version` | Fact | Immutable versions used to assign confidence and `m0`; generation configuration pins them. Raw validated judge output is retained in bounded `properties.audit` |
@@ -312,93 +311,31 @@ content-addressed files.
 
 ## 3. Hit ledger — attached to Episodes
 
-```text
-(:Hit {id, t, kind, kappa_eff, namespace, idem_key}) -[:HIT_OF]-> (:Element:Episode)
-```
+Only explicit outcomes create Hits. At rank j of n primaries, the share is
+(1/(j+1))/H_n. Split each share equally among its distinct direct source
+Episodes and sum shared contributions. Each Episode gets one outcome Hit of
+credit 0.2 r w; a report contributes at most 0.2 absolute utility. Empty
+selections record the verdict without Hits.
 
-| Property | Meaning |
-|---|---|
-| `id` | UUIDv7 (server-issued) |
-| `t` | Server time, ms epoch. **Not an event time** — forgetting runs on the now axis (docs/04 §4) |
-| `kind` | `recall_hit / re_mention / promotion / exposure / outcome` |
-| `kappa_eff` | Nonnegative adoption reinforcement coefficient (`recall_hit` only); zero for audit-only kinds. Outcome attribution uses `weight` and `reward`, not signed reinforcement |
-| `weight`, `reward` | Outcome only: conserved Episode credit `weight >= 0` and finite signed `reward` in [-1,1], with receipt rank/source attribution retained |
-| `attribution` | Bounded immutable contributing result IDs, original zero-based ranks and source shares; enough to audit the merged Episode weight |
-| `namespace` | Recall UUID or `extract:…` / `dream:…` producer namespace (audit) |
-| `idem_key` | `sha256(namespace, episode_id, kind)`. Unique — a retry is a no-op |
+Hit stores id, episode_id, usage_id, t, kind, credit and idem_key. HIT_OF links
+to the Episode. HitCache stores s, t_last_hit, hit_count, u_anchor and u_at.
 
-Hits **never point at Facts or Communities.** When a derived element is
-adopted, the hit is resolved to its source Episodes (docs/04 §5). Reason: a
-generation switch replaces derived IDs wholesale; an immutable ledger pointing
-at derived IDs would reset forgetting state on every switch
-([10-decision-log](10-decision-log.md) D1). Every Hit, whatever its producer,
-is written through the single commit path (docs/04 §6).
+### 3.1 Usage and UsageOutcome (D62)
 
-Only confirmed `recall_hit` updates Episode `s` and `t_last_hit`.
-`re_mention`, `promotion`, and `exposure` are audit-only; `outcome` updates a
-separate rebuildable utility cache, never mass, stability or the accessibility
-clock. `hit_count` counts all ledger entries for replay agreement, not adoption
-count. Episode `S0` is initialized from its original immutable `m0` at ingestion.
-Derived accessibility takes the maximum source retention, not the most recently
-hit source. This deliberately refreshes sibling Facts sharing an Episode;
-Episode-only attribution cannot claim per-Fact selectivity (D45).
+Each successful recall, including an empty result, creates a Usage and returns
+its server-issued usage_id. Usage stores the ordered {id,sources} selection,
+created_at, policy_revision, lineage rows and their selection_digest, and the
+connection binding. A Usage has no TTL or copy of the response or query.
 
-### 3.1 Durable RecallReceipt control records (D45, D47)
-
-`RecallReceipt` is not an `Element`, Episode, searchable memory, or graph
-conductor. An append-only impression is durably written before publishing a
-normal recall response, including auto mode. The sole unavailable-store
-exception is a diagnostic-only empty response with `recall_id:null`, no
-committable receipt and no memory content (docs/02 §9). It records `recall_id`, authenticated
-client binding, creation/expiry times, delivered primary and companion IDs,
-actual zero-based primary ranks, immutable source Episode snapshots, bounded
-derived result snapshots, policy/config/generation versions, captured channel
-and ranking state, budget and exact result/context digests (docs/05). It also
-stores an immutable
-`selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
-{element_id, root_episode_ids, echo_depth, complete} records))`, which is the
-exact value a later Episode's lineage copies into `context_digests` (§3.3); without
-it the lineage would name a digest the receipt schema never retained. It
-does not duplicate complete raw Episode text. A recorded impression means response
-publication was attempted, not proof that the peer consumed socket bytes.
-
-Append-only `RecallFeedback` acceptance records freeze adopted IDs and outcome
-attribution; they never modify the impression. Adoption is exactly once per
-`(recall_id, source_episode_id)`; outcome acceptance is exactly once per
-`recall_id`, atomically with all its Episode outcome Hits. Identical retries
-are no-ops; conflicting duplicate reward is rejected. Empty attribution still
-retains a receipt-level outcome, not a Hit without an Episode. Expired or
-unknown receipts reject feedback, never silently accept it. Receipt TTL is
-an explicit positive `receipt_ttl_ms` server configuration (default 3,600,000
-ms), recorded as `expires_at = created_at + receipt_ttl_ms` on each receipt
-and exposed to the client. `now >= expires_at` rejects even retries; it is a
-feedback window, not a negative label. Expiry permits retention cleanup of receipts/acceptance records only,
-not their durable Hit events. Utility remains rebuildable from retained
-outcome Hits after the receipt expires.
-
-Episode lineage (§3.3) copies the bounded authority it needs out of a parent
-receipt at `remember` time and stores it on the Episode itself.
-Receipt TTL therefore still governs only the feedback window: a parent
-receipt's later expiry cannot change a child Episode's recorded lineage, and
-replay reads the Episode lineage properties rather than the receipt.
-
-For the outcome-bearing request's adopted set, if present, otherwise the
-delivered primary set (an earlier adoption-only call does not supply a missing
-field):
-
-```text
-  a_j = (1 / (rank_j + 1)) / sum_l(1 / (rank_l + 1))   rank base = 0
-  b_je = 1 / |sources(j)|                            e in sources(j)
-  w_e = sum_j a_j * b_je                             sum_e w_e = 1 if nonempty
-  U(e) = (nu * mu0 + sum_h weight_h * reward_h) / (nu + sum_h weight_h)
-  nu = 4, mu0 = 0                                    illustrative defaults
-```
-
-No extra cap discards outcome credit. A supplied empty adopted set means no
-item attribution; missing is distinct from empty, just as reward zero differs
-from no reward. Fact utility is the mean source utility, an explicitly coupled
-heuristic, not independent evidence. One whole-recall verdict is one utility
-proxy, not many independent truth labels (docs/04).
+report_outcome takes {usage_id,idempotency_key,reward}. Both IDs are UUIDv7;
+clamp finite reward to [-1,1] and normalize negative zero. Authorize all source
+Episodes under current policy before accepting or replaying a verdict. Create
+one UsageOutcome and its Episode Hits atomically. Return {reward,applied}; an
+identical normalized retry returns applied:false. A reused key with different
+usage or reward raises idempotency_conflict; another key on the same usage
+raises outcome_already_reported. Missing usage, denied source and unavailable
+storage raise unknown_usage, policy_denied and storage_unavailable respectively.
+Socket completion never writes to the graph.
 
 ### 3.2 Suppression policy authority (D43)
 
@@ -496,17 +433,17 @@ most 64 delivered results as
 ```
 
 The daemon verifies the caller/client binding and writes these properties
-atomically on the Episode. `context_digests` copies the parent receipts' stored
-`selection_digest` values, so lineage never depends on recomputing an expired
-selection: each receipt persists
+atomically on the Episode. `context_digests` copies the parent Usage nodes’ stored
+`selection_digest` values, so lineage never depends on recomputing an old
+selection: each Usage persists
 `selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
 {element_id, root_episode_ids, echo_depth, complete} records))` at creation
 (§3.1). Parent and digest arrays have equal length; each digest is paired with
 its parent ID, then sorted by recall ID. Roots are the sorted distinct union of
 the referenced snapshots' roots, and depth is `1 + max(item.echo_depth)`.
 `lineage_complete=true` only when every referenced item is complete and neither cap
-truncates the result. Parent receipts must still exist when `remember`
-validates them; their later expiry cannot change the copied lineage. The
+truncates the result. Parent Usage nodes must still exist when `remember`
+validates them; later parent loss cannot change the copied lineage. The
 canonical body digest (`lineage_digest`) is part of the **version-2** Episode
 digest: an exact retry is a no-op and a changed body under one revision key is
 `revision_conflict`. Lineage properties exist only for version-2 Episodes; an
@@ -557,7 +494,7 @@ ineligible for semantic candidates, for synthesis and for invalidation
 (`echo_lineage_unavailable`). An unknown synthesis is retained under the same
 rule. Only a new source revision with complete bounded metadata changes that
 state. A later user-authored statement
-is a new direct occurrence; adopting a receipt is usage evidence, not
+is a new direct occurrence; reporting an outcome is usage evidence, not
 semantic corroboration. Lineage never supplies or changes Fact event time,
 snapshot visibility, validity, Hit attribution or source authority, and no
 online operation traverses parents: replay reads the materialized Episode
@@ -986,14 +923,7 @@ not. Status reports profile, stream/generation, ingest sequence, source ID,
 attempt count, bounded error code and digest, and first/last failure time,
 with no source text.
 
-Whenever recall selects the vector channel, the durable `RecallReceipt`
-records `embedding_profile_id` once plus one `embedding_coverages` row for
-each applicable partition of the active profile: `(episode,0)` always, and
-`(extraction, active[extraction])` when an active extraction generation
-exists. Rows carry `stream`, `generation`, `health`, `covered_ingest_seq`,
-`required_ingest_seq`, `lag` and `omission_digest`, so two simultaneously
-BLOCKED partitions with different cursors and different omission digests stay
-separately replayable (docs/05 §9).
+Recall diagnostics identify the selected embedding profile and channel state. Usage stores only the final ordered primary/source selection and lineage (§3); it does not store vectors or diagnostics.
 
 #### Operator recovery
 
@@ -1492,7 +1422,7 @@ audit log lines are the durable record of what happened.
 ```text
 unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_key · Entity.entity_key · Payload.hash · Hit.idem_key
           · ExtractionGeneration.id · ExtractionCoverage.key
-          · RecallReceipt.recall_id · RecallFeedback.id · RecallOutcome.recall_id
+          · Usage.usage_id · UsageOutcome.usage_id · UsageOutcome.idempotency_key
           · ActivePolicy.policy_id · ConflictAdjacency(generation, fact_id, peer_id)
           · InvalidationEvidence.id
           · InvalidationMarker(generation, target_id, evidence_id)
@@ -1524,7 +1454,6 @@ range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Elemen
           composite ConflictAdjacency(generation, fact_id, peer_id)
           composite EmbeddingWork(embedding_model_id, stream, generation, state, ingest_seq, item_ordinal)
           composite Fact(generation, duplicate_group_key)
-          RecallReceipt.expires_at
 fulltext  Episode.content (global) · Fact/Entity content (one index per generation)
 vector    :ExtractionG<N>.embedding_m_<modelhex> (vec_fact_g<N>_<indexhex>)   (not shipped)
            · RELATES_TO.embedding_g<N>_m_<modelhex> (vec_rel_g<N>_<indexhex>)   (not shipped)
@@ -1541,10 +1470,7 @@ scheduler resumes from.
 The global Episode memory indexes use a semantic-only technical label that
 excludes policy/control Episodes; an audit query may still use `:Element`.
 Active policy filtering is required even before reconciliation finishes.
-Outcome acceptance records carry both `RecallFeedback` and `RecallOutcome`
-labels; the unique recall ID prevents duplicate outcome acceptance. Adoption
-may arrive in multiple feedback records; unique Episode Hit keys enforce its
-per-recall/source exact-once rule without forbidding later adoption batches.
+The two UsageOutcome constraints enforce one verdict per Usage and one meaning per idempotency key. A unique Hit key prevents duplicate source credit.
 
 Every ingest-derived Outbox sets every unique-key component:
 `target_generation=0` for global Episode work and `model_key='-'` for
@@ -1609,10 +1535,7 @@ CREATE/DELETE allowed in caches
   ConflictAdjacency                            bounded conflict completion and policy-aware summaries
   InvalidationMarker                           replay retained content-free evidence/target mappings
   TranslationMapping                           per-build one-to-one language pairing (§4)
-DELETE allowed in retained control state
-  expired RecallReceipt / RecallFeedback        explicit receipt TTL; never removes Hit outcomes
-                                                Episode lineage properties and embedding resolution/qualification
-                                                records are retained authority and are never deleted here
+retained authority                           Usage, UsageOutcome, Hit, Episode lineage, and embedding qualification records
 never SET on any Episode
   Episode.{episode_digest_version, digest,
            origin_role, lineage_digest}        version-1 rows stay byte-identical; verify, retry,
@@ -1630,11 +1553,11 @@ version-1 serializer and no SET of `episode_digest_version`, `digest`,
 `origin_role` or `lineage_digest` on any Episode + Payload existence and
 hash + bounded Fact authority/list↔link agreement + Hit ledger ↔ cache replay
 agreement + utility sufficient-statistic replay + policy event/cache agreement
-+ unexpired receipt/feedback exact-once constraints and captured attribution
++ UsageOutcome exact-once constraints and captured attribution
 + invalidation evidence/marker replay and generation validity preservation
 + lineage properties for version-2 Episodes only, none required or
   materialized for a version-1 Episode, `lineage_digest` agreement with the stored body, bounded parent/root
-  arrays, `context_digests` equal to the parent receipts' stored
+  arrays, `context_digests` equal to the parent Usage nodes’ stored
   `selection_digest` values, Fact lineage-copy agreement, and each synthesis
   reproducing the bounded support-union rule (§3.3)
 + complete translation maps for activated language-changing generations
@@ -1711,7 +1634,7 @@ digests instead of inventories: Element IDs ordered by `e.id`, physical
 `e.digest` values ordered by Episode `e.id`. Each SHA-256 covers the canonical
 JSON array, including its brackets and commas; invalidation outcome hashes retain
 the existing `extractionBodyDigest` derivation. Keyset pages of 5,000 rows are
-streamed inside the same write transaction holding the receipt lock and writer
+streamed inside the same write transaction holding the policy lock and writer
 fence. There is no authority collection size cap; the manifest keeps only counts,
 digests, the small sorted unique retained-generation list and cutoff coverage.
 
@@ -1731,7 +1654,7 @@ overwrite/force mode—so a prior complete or partial archive is never reused.
          in-flight publications and writes
     CUTOFF
       3. under the write queue, pause every Neo4j writer (commit, extraction,
-         generation, embedding, maintenance, gc, policy, remembers and receipt publication)
+         generation, embedding, maintenance, gc, policy, remembers and Usage creation)
       4. record structure_revision, ingest_seq, schema/Neo4j versions and the
          policy_revision, receipt retention configuration and exact live container
          image digest plus committed Payload hash manifest; record the highest

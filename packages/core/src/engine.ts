@@ -16,12 +16,6 @@ import {
   type IntegrityIssue,
   type PutResult,
   type StoreOptions,
-  type IssueReceiptInput,
-  type RecallReceipt,
-  type RecallTransportInput,
-  type CommitReceiptInput,
-  type CommitReceiptResult,
-  type ReceiptStatus,
   type HitCache,
   type HitCacheVerification,
   type HitCacheRebuild,
@@ -32,7 +26,7 @@ import { EmbeddingConfig, HttpEmbeddingProvider } from "./embedding.ts";
 import { ExtractionProviderConfig, HttpExtractionProvider, ExtractionProviderError, extractionInputBytes, splitExtractionWindow, validateModelOutput, validateSourceSpans, type ExtractionProvider, type ExtractionProviderInput } from "./extraction.ts";
 import { ExtractionModelOutput, LeaseModelTask, ModelTaskCAS, type CreateModelTask, type CompleteExtractionAttempt, type SelectExtractionGeneration, type ReadExtractionCoverage } from "@anamnesis/protocol";
 import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionAuditError } from "@anamnesis/protocol";
-import type { RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
+import type { RpcReportOutcomeParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcPolicyResult } from "@anamnesis/protocol";
 
 export const RememberInput = z
@@ -294,20 +288,8 @@ export class Engine {
     return this.store.projection(input, context);
   }
 
-  async issueReceipt(input: IssueReceiptInput, context: InstallationContext): Promise<RecallReceipt> {
-    return this.store.issueReceipt(input, context);
-  }
-
-  async recordRecallTransport(input: RecallTransportInput, context: InstallationContext) {
-    return this.store.recordRecallTransport(input, context);
-  }
-
-  async exposeRecall(recallId: string, context: InstallationContext) {
-    return this.store.exposeRecall(recallId, context);
-  }
-
-  async commitReceipt(input: CommitReceiptInput, context: InstallationContext): Promise<CommitReceiptResult> {
-    return this.store.commitReceipt(input, context);
+  reportOutcome(input: RpcReportOutcomeParams, context: InstallationContext) {
+    return this.store.reportOutcome(input, context);
   }
 
   async setPolicy(input: RpcPolicySetParams, context: InstallationContext): Promise<RpcPolicyResult> {
@@ -316,14 +298,6 @@ export class Engine {
 
   async revokePolicy(input: RpcPolicyRevokeParams, context: InstallationContext): Promise<RpcPolicyResult> {
     return this.store.revokePolicy(input, context);
-  }
-
-  async getReceipt(recallId: string): Promise<RecallReceipt | null> {
-    return this.store.getReceipt(recallId);
-  }
-
-  async getReceiptStatus(operationId: string): Promise<ReceiptStatus> {
-    return this.store.getReceiptStatus(operationId);
   }
 
   async getHitCache(episodeId: string): Promise<HitCache | null> {

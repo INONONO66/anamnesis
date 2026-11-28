@@ -22,7 +22,7 @@ test("producer and replay are bit-identical across Bun and Node on fixed single/
   const node = JSON.parse(Buffer.concat(chunks).toString()) as ReturnType<typeof numericFixture>;
   const bun = numericFixture();
   expect(node).toHaveLength(5096);
-  // Utility/weights/ledger identity remain exact; never widen their comparison.
+  // Adoption clocks and counts remain exact; never widen their comparison.
   expect(node.map(({ stability, ...rest }) => rest)).toEqual(bun.map(({ stability, ...rest }) => rest));
   const differences = bun.flatMap((value, index) => value.stability === node[index]!.stability ? []
     : [{ index, bun: value.stability, node: node[index]!.stability }]);
@@ -30,7 +30,7 @@ test("producer and replay are bit-identical across Bun and Node on fixed single/
   expect(differences.slice(0, 8)).toEqual([]);
   // Machine-consumed version/golden pair detects changes to operation order.
   expect({ version: ADOPTION_NUMERIC_VERSION, sha256: createHash("sha256").update(JSON.stringify(bun) + "\n").digest("hex") })
-    .toEqual({ version: "binary64-adoption-v1", sha256: "56c6b90573b00be6c894fcb78fa57266c90f60b45a19c81abb2ea8b54b7715e2" });
+    .toEqual({ version: "binary64-adoption-v1", sha256: "2ecf99d29ef13174f7192498576188e89e6d9cddc1dabafc1a6728d76acb5be8" });
 }, 15000);
 
 test("bounded adoption kernel follows the independent 80-digit equation oracle", async () => {
@@ -40,7 +40,7 @@ test("bounded adoption kernel follows the independent 80-digit equation oracle",
   let maximumRelativeError = 0;
   for (const row of references) {
     const state = { stability: row.stability, lastHit: 0, hitCount: 0 };
-    const actual = adopt(state, row.at, row.kappa);
+    const actual = adopt(state, row.at, row.kappa, 1);
     const relativeError = Math.abs(actual.stability - row.expected) / row.expected;
     maximumRelativeError = Math.max(maximumRelativeError, relativeError);
     // docs/06's 1e-12 transcendental comparison bound is used ONLY against an
@@ -57,5 +57,5 @@ test("bounded adoption kernel follows the independent 80-digit equation oracle",
 test("numeric kernel rejects inputs outside its proven domain and keeps clock regression inert", () => {
   for (const [s, elapsed, kappa] of [[0, 1, 1], [3651, 1, 1], [NaN, 1, 1], [1, Infinity, 1], [1, -1, 1], [1, 1, 2]])
     expect(() => adoptionGain(s!, elapsed!, kappa!)).toThrow(RangeError);
-  expect(adopt({ stability: 1.5, lastHit: 10, hitCount: 7 }, 5, 1)).toEqual({ stability: 1.5, lastHit: 10, hitCount: 7 });
+  expect(adopt({ stability: 1.5, lastHit: 10, hitCount: 7 }, 5, 1, 1.5)).toEqual({ stability: 1.5, lastHit: 10, hitCount: 7 });
 });

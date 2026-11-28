@@ -20,7 +20,7 @@ import { loadProviderConfig } from "../../app/anamnesis/config.ts";
 import { RpcClient } from "../../app/anamnesis/client.ts";
 
 const execute = promisify(execFile);
-const context = { principal: "installation", commit_mode: "auto" } as const;
+const context = { principal: "installation" } as const;
 const image = "neo4j@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d";
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms)); // Script-only bounded readiness/backoff.

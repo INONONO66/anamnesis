@@ -8,7 +8,7 @@ import { z } from "zod";
 import { type EmbeddingProvider } from "../embedding.ts";
 import { type Tokenizers } from "../recall.ts";
 import { sha256, canonicalJson } from "./digest.ts";
-import { receiptTime, RecallReceipt, ReceiptError } from "./receipts.ts";
+import { receiptTime, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, PolicyEvent, policySelector, policyBody, type PolicyState, requireInstallation } from "./policy.ts";
 import { type QueryParameters, recordsToObjects } from "./records.ts";
 import { EmbeddingLedger } from "./embedding-ledger.ts";
@@ -156,29 +156,6 @@ export class StoreCore {
           && (deny.selector.source === undefined || deny.selector.source === row.get("source"))) throw new ReceiptError("policy_denied");
       }
     }
-  }
-  async authorizeReceiptTx(tx: ManagedTransaction, receipt: RecallReceipt, policy: PolicyState, context: InstallationContext): Promise<void> {
-    if (receipt.principal !== context.principal) throw new ReceiptError("unauthenticated");
-    // Null identifies an old, unauthorised bootstrap receipt, not revision zero.
-    if (receipt.policy_revision === null || receipt.policy_revision > policy.policy_revision) throw new ReceiptError("policy_unavailable");
-    // A primary may be a Fact (D56); its receipt row already names the DERIVED_FROM source Episodes, which carry the authority.
-    const superseded = await this.supersededSourcesTx(tx,
-      [...new Set(receipt.serving?.response.results.flatMap(item => item.provenance.supersedes.map(prior => prior.id)) ?? [])]);
-    await this.authorizeEpisodesTx(tx, [...new Set([...receipt.primaries.flatMap(item => item.sources), ...superseded])], policy);
-  }
-  /** A served prior revision is an Episode (its own authority) or a Fact, whose authority is its DERIVED_FROM source Episodes. */
-  private async supersededSourcesTx(tx: ManagedTransaction, ids: string[]): Promise<string[]> {
-    if (ids.length === 0) return [];
-    const rows = await tx.run<{ id: string; episode: boolean; sources: string[] }>(
-      `MATCH (e:Element) WHERE e.id IN $ids OPTIONAL MATCH (e)-[:DERIVED_FROM]->(s:Element:Episode)
-       RETURN e.id AS id,e:Episode AS episode,collect(s.id) AS sources`, { ids });
-    if (rows.records.length !== ids.length) throw new ReceiptError("invalid_selection");
-    return rows.records.flatMap(row => {
-      if (row.get("episode")) return [row.get("id")];
-      const sources = row.get("sources");
-      if (sources.length === 0) throw new ReceiptError("invalid_selection");
-      return sources;
-    });
   }
   async withReadTx<Result>(
     work: (tx: ManagedTransaction) => Promise<Result>,

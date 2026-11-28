@@ -1,49 +1,9 @@
 import { expect, test } from "bun:test";
 import { Store } from "./store.ts";
 import { EmbeddingError, EmbeddingProfile, HttpEmbeddingProvider, embeddingProfileId, httpStatusReason, validateVector } from "./embedding.ts";
-import { admittedBudget, packRecall, renderContext, recallResponseBytes, canonicalContext } from "./recall.ts";
-import { createHash } from "node:crypto";
-import { receiptBodyDigestInput, canonicalReceiptJson } from "./receipt-digest.ts";
+import { admittedBudget, packRecall, renderContext, recallResponseBytes } from "./recall.ts";
 import { countBudget } from "./dynamics/budget.ts";
 import { RpcEmbeddingAttempt, RpcRecallParams, RpcRecallResult, RpcRecallItem, RpcRequest, RpcOutputBudget } from "../../protocol/src/rpc.ts";
-
-test("receipt digest projection preserves receipt-only and embedding serving fields", () => {
-  const base = { recall_id: id(998), primary_ids: [id(1)], receipt_ttl_ms: 3600000 };
-  const serving = { response: { context_text: "é🙂", diagnostics: { now: 7, T: 7 }, results: [] }, query: "é🙂", query_vector: [1, 0] };
-  const receipt = receiptBodyDigestInput({ ...base, serving });
-  const reordered = receiptBodyDigestInput({ serving: { query_vector: [1, 0], query: "é🙂", response: { diagnostics: { T: 7, now: 7 }, context_text: "é🙂", results: [] } }, ...base });
-  expect(canonicalContext(receipt)).toBe(canonicalReceiptJson(receipt));
-  expect(canonicalContext(receipt)).toBe(canonicalContext(reordered));
-  expect(canonicalContext(receipt)).toContain('"serving"');
-  expect(canonicalContext(receipt)).toContain('é🙂');
-  expect(canonicalContext(receipt)).not.toContain('selection_digest');
-});
-
-test("persisted receipt projections retain exact bytes across serialization, not across distinct recalls", () => {
-  const selection = [{ element_id: id(1), root_episode_ids: [], echo_depth: 0, complete: false }];
-  const selectionBytes = canonicalContext(selection);
-  expect(selectionBytes).toBe('[{"complete":false,"echo_depth":0,"element_id":"0192f3a1-5e7b-7c3d-9f21-000000000001","root_episode_ids":[]}]');
-  const body = { recall_id: id(999), primary_ids: [id(1)], receipt_ttl_ms: 3600000,
-    serving: { response: { ...base({ unit: "utf8_bytes", limit: 65536 }), results: [item(1)], expires_at: 3600123,
-      diagnostics: { ...base({ unit: "utf8_bytes", limit: 65536 }).diagnostics, now: 123, T: 123 } } } };
-  const bodyBytes = canonicalContext(body);
-  const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
-  const receipt = { ...body, lineage_selection: selection, selection_digest: hash(selectionBytes), body_digest: hash(bodyBytes) };
-  let persisted = canonicalContext(receipt);
-  for (let i = 0; i < 3; i++) {
-    const restored = JSON.parse(persisted);
-    const { recall_id, primary_ids, receipt_ttl_ms, serving } = restored;
-    const bytes = canonicalContext({ recall_id, primary_ids, receipt_ttl_ms, serving });
-    expect(Buffer.from(bytes)).toEqual(Buffer.from(bodyBytes));
-    expect(hash(bytes)).toBe(restored.body_digest);
-    expect(canonicalContext(restored.lineage_selection)).toBe(selectionBytes);
-    expect(hash(canonicalContext(restored.lineage_selection))).toBe(restored.selection_digest);
-    expect(canonicalContext(restored)).toBe(persisted);
-    persisted = JSON.stringify(restored);
-  }
-  expect(hash(canonicalContext({ ...body, recall_id: id(998) }))).not.toBe(hash(bodyBytes));
-  expect(hash(canonicalContext([{ ...selection[0], root_episode_ids: [id(1)], complete: true }]))).not.toBe(hash(selectionBytes));
-});
 
 test("embedding recovery and hybrid recall have real core and wire entry points", () => {
   expect(typeof Reflect.get(Store.prototype, "recoverEmbedding")).toBe("function");
@@ -105,7 +65,7 @@ function item(n: number, content = "A\né🙂"): RpcRecallItem {
       supersedes_redacted: false, contrasts: [], warnings: [] }, channels: ["bm25"] };
 }
 function base(budget: RpcOutputBudget): RpcRecallResult {
-  return { recall_id: id(999), expires_at: 100, results: [], companions: [], entities: [], context_text: "", used_budget: 0,
+  return { usage_id: id(999), results: [], companions: [], entities: [], context_text: "", used_budget: 0,
     renderer: "canonical-jsonl-v1", budget, diagnostics: { pipeline: "derived-hybrid-v1", now: 0, T: 0, policy_revision: 0,
       channels_used: ["bm25"], vector_reason: "not_configured", embedding_profile_id: null, candidate_count: 2, skipped_bundles: 0,
       ppr_used: false, identity_mode: "exact_episode_id" } };

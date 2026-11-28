@@ -21,7 +21,7 @@ export class IdentityRuntime {
   constructor(private readonly options: IdentityRuntimeOptions) {
     this.scheduler = new IdentityScheduler(options.engine.store.identity, {
       provider: options.provider, owners: options.owners,
-      context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
+      context: Object.freeze({ principal: "installation", client_binding: randomUUID() }),
       wake: () => this.wake(),
     });
   }

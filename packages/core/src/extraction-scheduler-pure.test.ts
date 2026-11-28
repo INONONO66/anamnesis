@@ -7,7 +7,7 @@ import { ExtractionAttempt, type Coverage, type ExtractionPipeline, type Generat
 
 const uuid = (n: number) => `01993000-0000-7000-8000-${String(n).padStart(12, "0")}`;
 const HEX = "a".repeat(64), GEN = uuid(1);
-const context: InstallationContext = { principal: "installation", commit_mode: "receipt", client_binding: uuid(2) };
+const context: InstallationContext = { principal: "installation", client_binding: uuid(2) };
 const provider: ExtractionProvider = { model: "qa-scheduler", modelIncarnation: HEX, extract: () => Promise.reject(new Error("provider must not be called")) };
 const PARTITIONS = ["episodes", "active_extraction"] as const;
 const WINDOW = 256;

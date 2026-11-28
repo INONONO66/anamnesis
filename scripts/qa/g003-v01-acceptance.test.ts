@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { resolve, join, dirname } from "node:path";
-import { pathToFileURL } from "node:url";
 import { startProcess } from "./runtime-scenarios.ts";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -66,7 +65,6 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
   for (const [source, name] of [
     ["app/anamnesis/main.ts", "dist/anamnesis-daemon.mjs"],
     ["app/anamnesis/client.ts", "dist/anamnesis-client.mjs"],
-    ["packages/core/src/receipt-digest.ts", "dist/receipt-digest.mjs"],
     ["app/anamnesis/g003-v01-acceptance.fixture.mjs", "fixture.mjs"],
   ] as const) {
     const output = join(evidence, name);
@@ -80,7 +78,7 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
   await record("node-command.json", { command: ["node", ...command], workspace: evidence, concurrency: 1 });
   const result = await startProcess("node", command, {
     deadlineMs: 240000,
-    env: { ...process.env, G003_V01_EVIDENCE: evidence, RECEIPT_DIGEST_BUNDLE: pathToFileURL(join(evidence, "dist/receipt-digest.mjs")).href },
+    env: { ...process.env, G003_V01_EVIDENCE: evidence },
     onOutput: text => process.stdout.write(text),
   }).done;
   await record("node-result.json", result);
@@ -94,18 +92,18 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
   const checkpoints = result.output.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line));
   const matching = (checkpoint: string) => checkpoints.filter(item => item.checkpoint === checkpoint);
   for (const checkpoint of [
-    "policy-publication", "failed-send", "auto-exposure", "denied-target", "denied-provenance",
-    "partial-and-crash", "audit-failure", "shutdown-pending-publication",
-    "receipt-hashes", "verified", "whole-context-exact-fit-one-below-zero",
-    "1MiB-response-bound", "receipt-survives-restart", "GREEN-real-daemon", "g003-v01-surfaces",
+    "policy-publication", "failed-send",
+    "partial-and-crash", "shutdown-pending-publication",
+    "verified", "whole-context-exact-fit-one-below-zero",
+    "1MiB-response-bound", "usage-survives-restart", "GREEN-real-daemon", "g003-v01-surfaces",
   ]) expect(matching(checkpoint)).toHaveLength(1);
-  expect(matching("publication-scenario-pass")).toHaveLength(8);
-  expect(matching("publication-cleanup")).toHaveLength(8);
+  expect(matching("publication-scenario-pass")).toHaveLength(4);
+  expect(matching("publication-cleanup")).toHaveLength(4);
   expect(matching("publication-scenarios-complete")).toEqual([
-    { checkpoint: "publication-scenarios-complete", passed: 8, failed: 0, skipped: 0, concurrency: 1 },
+    { checkpoint: "publication-scenarios-complete", passed: 4, failed: 0, skipped: 0, concurrency: 1 },
   ]);
   expect(matching("GREEN-real-daemon")[0].bundle_sha256).toBe(bundles["dist/anamnesis-daemon.mjs"]!.sha256);
-  await record("acceptance.json", { publication: { passed: 8, failed: 0, skipped: 0, concurrency: 1 },
+  await record("acceptance.json", { publication: { passed: 4, failed: 0, skipped: 0, concurrency: 1 },
     checkpoints: checkpoints.filter(item => item.checkpoint), bundles, fixtures, sources_unchanged: true });
   console.log(JSON.stringify({ checkpoint: "v01-current-build", evidence, bundles, sources_unchanged: true }));
 }, 620000);

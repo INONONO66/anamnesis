@@ -12,7 +12,7 @@ const uuid = () => `01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 import { Engine } from '../../packages/core/src/engine.ts';
 import { canonicalExtractionBody, extractionBodyDigest } from '../../packages/protocol/src/extraction.ts';
 import { RpcResponse } from '../../packages/protocol/src/rpc.ts';
-const context = { principal: 'installation', commit_mode: 'receipt' };
+const context = { principal: 'installation' };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const incarnation = hash('g004-http-fixture-v1');
 const options = { uri: process.env.ANAMNESIS_TEST_NEO4J_URI, password: process.env.ANAMNESIS_TEST_NEO4J_PASSWORD };
@@ -340,8 +340,8 @@ test('real Node UDS authenticates ingestion/policy, keeps extraction false, and 
   try {
     await ready; p = peer(runtimeRoot + '/anamnesis.sock');
     assert.equal((await p.request('policy.set', { policy_id: uuid(), selector: { source: runtimeRoot }, scope: 'content' })).error.data.code, 'unauthenticated');
-    assert.equal((await p.request('hello', { version: 1, client: 'installation', token: 'wrong', commit_mode: 'receipt' })).error.data.code, 'authentication_failed');
-    const hello = ok(await p.request('hello', { version: 1, client: 'qa-not-authority', token: 'g004-installation-token', commit_mode: 'receipt' }));
+    assert.equal((await p.request('hello', { version: 2, client: 'installation', token: 'wrong' })).error.data.code, 'authentication_failed');
+    const hello = ok(await p.request('hello', { version: 2, client: 'qa-not-authority', token: 'g004-installation-token' }));
     assert.equal(hello.principal, 'installation'); assert.equal(hello.capabilities.extraction, false);
     const episode = { schema: 'anamnesis.original-message/1', content: 'Aé🙂Z', mass: 1, properties: {}, time: { value: '2026-09-01T00:00:00Z', precision: 'second' }, origin: { source: runtimeRoot, session: runtimeRoot, actor: 'qa', record: 'one' } };
     const remembered = ok(await p.request('remember', { episode, source_revision: 'one', expected_previous_revision_key: null }));

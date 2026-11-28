@@ -4,13 +4,14 @@ import { v7 as uuidv7 } from "uuid";
 import { z } from "zod";
 import { solvePpr } from "../dynamics/ppr.ts";
 import { normalizedRrf } from "../dynamics/ranking.ts";
+import { decayedUtility } from "../dynamics/state.ts";
 import { initialStability, retention } from "../dynamics/retention.ts";
 import { RpcRecallParams, RpcRecallResult, type RpcRecallItem } from "@anamnesis/protocol";
 import { EmbeddingError, embeddingProfileId, validateVector } from "../embedding.ts";
 import { countBudget } from "../dynamics/budget.ts";
-import { admittedBudget, packRecall, canonicalContext, RecallError, renderContext, type RecallBundle } from "../recall.ts";
-import { sha256, tupleHash } from "./digest.ts";
-import { luceneQuery, receiptTime, IssueReceiptInput, ReceiptError } from "./receipts.ts";
+import { admittedBudget, packRecall, RecallError, renderContext, type RecallBundle } from "../recall.ts";
+import { tupleHash } from "./digest.ts";
+import { luceneQuery, receiptTime, ReceiptError } from "./receipts.ts";
 import { type InstallationContext, PolicyEvent, policySelector, type PolicyState, requireInstallation } from "./policy.ts";
 import { type ElementNode, nodeProps, toElement } from "./records.ts";
 import { toUtc } from "./schema.ts";
@@ -58,15 +59,15 @@ async function episodeChannelsTx(tx: ManagedTransaction, scope: RecallScope, req
 
 /** Every candidate Episode as a ranked item: retention-decayed mass, RRF relevance across channels and cached utility. */
 async function rankedEpisodesTx(tx: ManagedTransaction, nodes: Map<string, ElementNode>, lists: RecallLists, now: number): Promise<RpcRecallItem[]> {
-  const cacheRows = await tx.run<{ id: string; s: number | null; last: number | null; utility: number | null }>(
+  const cacheRows = await tx.run<{ id: string; s: number | null; last: number | null; anchor: number | null; at: number | null }>(
     `UNWIND $ids AS id OPTIONAL MATCH (c:HitCache {episode_id:id})
-     RETURN id,c.s AS s,c.t_last_hit AS last,c.utility AS utility`, { ids: [...nodes.keys()] });
+     RETURN id,c.s AS s,c.t_last_hit AS last,c.u_anchor AS anchor,c.u_at AS at`, { ids: [...nodes.keys()] });
   const caches = new Map(cacheRows.records.map(row => [row.get("id"), row]));
   const ranked: RpcRecallItem[] = [];
   for (const [id, node] of nodes) {
     const props = nodeProps(node), e = toElement(props), cache = caches.get(id)!;
     const mass = served(e.mass * retention(Math.max(0, now - (cache.get("last") ?? Number(props["ingested_at"]))) / 86400000, cache.get("s") ?? initialStability(e.mass)));
-    const relevance = served(normalizedRrf(lists, id)), utility = served(cache.get("utility") ?? 0);
+    const relevance = served(normalizedRrf(lists, id)), utility = served(decayedUtility(cache.get("anchor") ?? 0, cache.get("at") ?? now, now));
     const item = { id, kind: "Episode", schema: e.schema, epistemic: "observed", content: e.content, time: e.time,
       mass, utility, relevance, score: served(recallScore(relevance, mass, utility)), sources: [id],
       provenance: { derived_from: [{ id, kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false, contrasts: [], warnings: [] },
@@ -179,24 +180,24 @@ export class RecallStore {
       const id = String(node.properties["id"]), cached = factItems.get(id);
       if (cached) return cached;
       const sourceRows = await tx.run(`MATCH (f:Element:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode)
-        WHERE ${FACT_VALID} AND ${RECALL_ALLOWED} RETURN e.id AS source ORDER BY e.id LIMIT 2`, { ...scope, id });
-      const sourceId = sourceRows.records[0]?.get("source");
-      if (typeof sourceId !== "string") return null;
-      try { await this.core.authorizeEpisodesTx(tx, [z.uuidv7().parse(sourceId)], policy); }
+        WHERE ${FACT_VALID} WITH DISTINCT e, (${RECALL_ALLOWED}) AS allowed RETURN e.id AS source,allowed ORDER BY source LIMIT 17`, { ...scope, id });
+      if (!sourceRows.records.length || sourceRows.records.length > 16 || sourceRows.records.some(row => !row.get("allowed"))) return null;
+      const sources = sourceRows.records.map(row => z.uuidv7().parse(row.get("source"))), sourceId = sources[0]!;
+      try { await this.core.authorizeEpisodesTx(tx, sources, policy); }
       catch (error) { if (error instanceof ReceiptError && error.code === "policy_denied") return null; throw error; }
       const fact = toElement(nodeProps(node));
-      const cacheRows = await tx.run<{ mass: number; ingested: number; s: number | null; last: number | null; utility: number | null }>(
+      const cacheRows = await tx.run<{ mass: number; ingested: number; s: number | null; last: number | null; anchor: number | null; at: number | null }>(
         `MATCH (:Element:Fact {id:$id})-[:DERIVED_FROM]->(e:Element:Episode) OPTIONAL MATCH (c:HitCache {episode_id:e.id})
-         RETURN DISTINCT e.id AS source,e.mass AS mass,e.ingested_at AS ingested,c.s AS s,c.t_last_hit AS last,c.utility AS utility`, { id });
+         RETURN DISTINCT e.id AS source,e.mass AS mass,e.ingested_at AS ingested,c.s AS s,c.t_last_hit AS last,c.u_anchor AS anchor,c.u_at AS at`, { id });
       const caches = cacheRows.records;
       const mass = served(fact.mass * Math.max(...caches.map(cache => retention(Math.max(0, now - (cache.get("last") ?? cache.get("ingested"))) / 86400000,
         (cache.get("s") ?? initialStability(cache.get("mass"))) * SIGMA_FACT))));
-      const utility = served(caches.reduce((sum, cache) => sum + (cache.get("utility") ?? 0), 0) / caches.length);
+      const utility = served(caches.reduce((sum, cache) => sum + (decayedUtility(cache.get("anchor") ?? 0, cache.get("at") ?? now, now)), 0) / caches.length);
       const relevance = served(normalizedRrf(factLists, id));
       const item = RpcRecallResult.shape.results.element.parse({ id, kind: "Fact", schema: SCHEMA_ID.CLAIM, epistemic: "derived",
-        content: fact.content, time: fact.time!, mass, utility, relevance, score: served(recallScore(relevance, mass, utility)), sources: [z.uuidv7().parse(sourceId)],
+        content: fact.content, time: fact.time!, mass, utility, relevance, score: served(recallScore(relevance, mass, utility)), sources: sources,
         window: { source: sourceId, before: [], after: [] },
-        provenance: { derived_from: [{ id: z.uuidv7().parse(sourceId), kind: "Episode", visible_at_T: true }], supersedes: [], supersedes_redacted: false,
+        provenance: { derived_from: sources.map(id => ({ id, kind: "Episode", visible_at_T: true })), supersedes: [], supersedes_redacted: false,
           contrasts: [], warnings: [] }, channels: Object.keys(lists).filter(name => lists[name]!.some(candidate => candidate.id === id))
           .concat(factLists.ppr!.some(candidate => candidate.id === id) ? ["ppr"] : []) });
       factItems.set(id, item); return item;
@@ -219,7 +220,7 @@ export class RecallStore {
   async recall(input: z.input<typeof RpcRecallParams>, context: InstallationContext): Promise<RpcRecallResult> {
     requireInstallation(context);
     const request = RpcRecallParams.parse(input), budget = admittedBudget(request.budget, this.core.tokenizers, this.core.recallDefaultBytes);
-    const now = receiptTime.parse(this.core.clock()), T = request.T ?? now, recallId = uuidv7();
+    const now = receiptTime.parse(this.core.clock()), T = request.T ?? now, usageId = uuidv7();
     const from = request.time?.from, to = request.time?.to ?? T;
     if (to > T || (from !== undefined && from > to)) throw new RecallError("invalid_params");
     const provider = this.core.embeddingProvider, profileId = provider ? embeddingProfileId(provider.profile) : null;
@@ -258,7 +259,7 @@ export class RecallStore {
         bundles.push({ primary, companions: primary.provenance.contrasts.map(id => factItems.get(id)!), optional });
       }
       const packed = packRecall(bundles, {
-        recall_id: recallId, expires_at: now + 3600000, results: [], companions: [], entities: [], context_text: "", used_budget: 0,
+        usage_id: usageId, results: [], companions: [], entities: [], context_text: "", used_budget: 0,
         budget, renderer: "canonical-jsonl-v1", diagnostics: { pipeline: "derived-hybrid-v1", now, T,
           policy_revision: policy.policy_revision, channels_used: Object.keys(lists).filter(name => lists[name]!.length > 0) as RpcRecallResult["diagnostics"]["channels_used"],
           vector_reason: vectorReason, embedding_profile_id: profileId, candidate_count: candidates.length, skipped_bundles: 0,
@@ -273,8 +274,7 @@ export class RecallStore {
       const result = RpcRecallResult.parse(chronological ? { ...packed, results: chronological, context_text,
         used_budget: countBudget(context_text, budget.unit, budget.unit === "tokens" ? this.core.tokenizers.get(budget.tokenizer_id) : undefined) } : packed);
       await this.core.authorizeEpisodesTx(tx, [...new Set(result.results.flatMap(item => item.sources))], policy);
-      await this.receipts.issueReceiptTx(tx, IssueReceiptInput.parse({ recall_id: recallId, primary_ids: result.results.map(item => item.id) }), context, policy,
-        { response: result, context_digest: sha256(result.context_text), result_digest: sha256(canonicalContext({ results: result.results, companions: result.companions })), query: request.query, query_vector: queryVector, candidates: candidates.map(({ id, score, relevance, mass, utility }) => ({ id, score, relevance, mass, utility })) });
+      await this.receipts.createUsageTx(tx, result, context);
       return result;
     });
   }

@@ -17,7 +17,7 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TOKEN = "installation-token-fixture";
 const BEARER = `listen-bearer-${randomUUID()}`;
 const HOST = "127.0.0.1";
-const hello = { token: TOKEN, client: "tcp-test", commit_mode: "receipt", version: 1 };
+const hello = { token: TOKEN, client: "tcp-test", version: 2 };
 const deadline = (ms = 15_000) => AbortSignal.timeout(ms);
 const frame = (value: unknown) => {
   const body = Buffer.from(JSON.stringify(value));
@@ -113,7 +113,7 @@ test("TCP peer presenting the bearer completes hello and status while UDS is unc
     const local = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
     try {
       const status = await remote.request("status", {});
-      expect(status.version).toBe(1);
+      expect(status.version).toBe(2);
       expect(status.storage).toBe("unavailable");
       expect(status.data_incarnation).toBe(ready.data_incarnation);
       expect((await local.request("status", {})).data_incarnation).toBe(status.data_incarnation);
@@ -140,7 +140,7 @@ test("ops CLI in ANAMNESIS_RPC_TCP mode reaches a remote daemon and refuses a no
       const ok = await ops();
       expect(ok.code).toBe(0);
       const status = JSON.parse(ok.stdout.trim().split("\n").at(-1)!);
-      expect(status.version).toBe(1);
+      expect(status.version).toBe(2);
       expect(status.storage).toBe("unavailable");
 
       await chmod(installationFile, 0o644);
@@ -183,7 +183,7 @@ test("wrong or missing bearer is refused with unauthorized and the TCP connectio
 
     // The bearer requirement is TCP-only; the socket keeps its hello-only contract.
     const local = await RpcClient.connect(join(daemon.root, "anamnesis.sock"), TOKEN);
-    try { expect((await local.request("status", {})).version).toBe(1); } finally { await local.close(); }
+    try { expect((await local.request("status", {})).version).toBe(2); } finally { await local.close(); }
     expect(daemon.output()).not.toContain(BEARER);
     expect(daemon.output()).not.toContain(wrong);
   });

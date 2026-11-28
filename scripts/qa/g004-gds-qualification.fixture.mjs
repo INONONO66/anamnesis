@@ -59,7 +59,7 @@ async function udsEvidence(root, options) {
     await ready; p = peer(join(root, 'anamnesis.sock'));
     const denied = await p.request('graph.envelope', { seed_ids: [FIXED20.nodes[1]], T: PIN20.T });
     assert.equal(denied.error.data.code, 'unauthenticated');
-    const hello = await p.request('hello', { version: 1, client: 'g004-qualification', token: 'g004-oracle-fixture-token', commit_mode: 'receipt' });
+    const hello = await p.request('hello', { version: 2, client: 'g004-qualification', token: 'g004-oracle-fixture-token' });
     assert.ok(hello.result); assert.equal(hello.result.capabilities.extraction, false);
     const envelope = await p.request('graph.envelope', { seed_ids: [FIXED20.nodes[1]], T: PIN20.T });
     // No ready coverage is published. Never feed a refused/malformed/partial
@@ -98,7 +98,7 @@ test('real Node fixed-20 oracle, owned Neo4j capture, unavailable GDS and UDS re
     const arcRows = FIXED20.nodes.flatMap((source_id, i) => FIXED20.targets.slice(FIXED20.offsets[i], FIXED20.offsets[i + 1]).map((to, j) => ({ source_id, peer_id: FIXED20.nodes[to], link_id: `01900000-0000-7000-9000-${(FIXED20.offsets[i] + j).toString(16).padStart(12, '0')}`, role: FIXED20.roles[FIXED20.offsets[i] + j] })));
     // Disposable synthetic access metadata only, NOT physical-link authority or
     // a production completeness publication. Direct Store reads are not enabled recall.
-    const context = { principal: 'installation', commit_mode: 'receipt', client_binding: 'g004-qualification' };
+    const context = { principal: 'installation', client_binding: 'g004-qualification' };
     const generation = { id: '01900000-0000-7000-9000-000000000500', stream: 'extraction', incarnation: 'a'.repeat(64), state: 'active', covered_ingest_seq: 0, created_at: 1, updated_at: 1 };
     await engine.store.createExtractionGeneration(generation, context);
     for (const partition of ['episodes', 'active_extraction']) await engine.store.recordExtractionCoverage({ generation_id: generation.id, partition, expected_covered_ingest_seq: 0, covered_ingest_seq: 0 }, context);

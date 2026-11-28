@@ -4,7 +4,6 @@ import type { Engine } from "./engine.ts";
 
 const RECALL_CONTEXT: InstallationContext = {
   principal: "installation",
-  commit_mode: "receipt",
   client_binding: uuidv7(),
 };
 

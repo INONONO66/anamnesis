@@ -10,7 +10,7 @@ import { canonicalJson, sha256 } from "./store/digest.ts";
 import { CONDUCTING_ROLES } from "./store/schema.ts";
 import type { ConductingArcRow } from "./store/conducting.ts";
 
-const context = { principal: "installation", commit_mode: "receipt" } as const;
+const context = { principal: "installation" } as const;
 const id = (n: number) => `01900000-0000-7000-8000-${n.toString(16).padStart(12, "0")}`;
 const T = Date.parse("2027-01-01T00:00:00Z");
 const byCodepoint = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);

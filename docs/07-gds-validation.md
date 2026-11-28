@@ -168,11 +168,7 @@ trades against the latency budget and is the last resort.
 
 ### Query distribution
 
-Sample seed distributions from retained RecallReceipts, preserving chosen
-channels, unavailable-channel reasons, output budget and policy/config versions.
-Do not evaluate only adopted or successful recalls. Report snapshot selection,
-privacy/redaction changes and receipt expiry/missingness; none is a negative
-label. Fixed-seed synthetic queries complement, not replace, this distribution.
+Sample from held-out recall requests and capture channels, budget and policy/config versions in the evaluation harness. Include unreported Usages and disclose sampling and redaction; missing outcomes are not negative labels.
 
 ## 4. Scale benches (v0.3)
 
@@ -187,7 +183,7 @@ Synthetic graph generator `anamnesis bench gen --episodes N`:
 | N | Nodes | Links | Measures |
 |---|---|---|---|
 | 100k | ~0.421M Elements | ~2M | recall p50/p95, envelope tx distribution, structural torn and policy-retry rates |
-| 1M | ~4.21M Elements | ~20M | same + page cache, cold start, dreaming, receipt-write latency and size |
+| 1M | ~4.21M Elements | ~20M | same + page cache, cold start, dreaming, Usage write latency and size |
 
 Counts follow N+3N+0.2N+0.01N=4.21N; ledger, policy and cache/control nodes
 are additional and reported separately. Link counts are generator targets,
@@ -237,10 +233,10 @@ These are unmeasured design targets, not a claim of resident GDS execution.
 | solver validation, 20 synthetic | every PR (GDS container) | blocks merge |
 | solver validation, real dumps | nightly | auto-files an issue |
 | envelope validation | nightly | report. Persistent overlap@20 < 0.8 → issue |
-| budget/receipt contracts (D44-D45) | every PR once implemented | blocks merge: exact renderer count, rank packing, source credit conservation, expiry/restart/idempotency |
+| budget/Usage contracts (D44/D62) | every PR once implemented | blocks merge: exact renderer count, rank packing, source credit conservation, restart/idempotency |
 | policy/conflict/occurrence contracts (D43/D46) | every PR once implemented | blocks merge: no denied serving/conduction/feedback, bounded companions and explicit incomplete/redacted state |
 | language and evidence contracts (D48) | every PR once implemented | blocks merge: required immutable `content_language`; an `en` generation rejecting `language_policy_mismatch` with no per-claim source fallback; a projection-derived name (`Jihyun`, `(Sato)`) rejected as an Entity alias and as `normalized_name`; Latin `a`/`c`/`e`/`o`/`p`/`x` distinguished byte-for-byte from their Cyrillic homoglyphs in identifiers, so a homoglyph swap fails `evidence_mismatch` rather than matching; literal `evidence_quote` of 1..8,192 bytes with the derived `[start,end)` span and a repeated quote without a valid span rejected; `RecallRequest.query` byte-identical on the BM25 and vector channels with no second generated query |
-| lineage and grouping contracts (D49) | every PR once implemented | blocks merge: version-1 verify/retry/rebuild/backup round trips byte-stable with zero SETs while a changed version-1 field still conflicts, and version-2 `origin_role`-only or lineage-body-only changes under one `revision_key` rejecting `revision_conflict`; bounded parents (≤4), roots (≤16) and depth (≤8) with overflow storing `unknown` + `echo_lineage_truncated`; the receipt's stored `selection_digest` equal to the value `Episode.context_digests` copies; an unknown-lineage assistant **Episode** and every output derived from it ineligible for candidates, synthesis and invalidation; a complete synthesis support union storing `context_derived` with `max(support.echo_depth)` and no added hop, and an incomplete or over-cap union storing `unknown` + truncated; echo fields absent from every score, ordering and conflict decision; `same_scope_l1b` (equal non-null `correction_scope_text` with differing corrected value) accepted where `same_scope_group` (complete byte-identical RFC-8785 `scope`) is refused, and neither predicate substituted for the other; `subject_keys` null rather than a literal fallback; symmetric non-transitive `known_conflict` |
+| lineage and grouping contracts (D49) | every PR once implemented | blocks merge: version-1 verify/retry/rebuild/backup round trips byte-stable with zero SETs while a changed version-1 field still conflicts, and version-2 `origin_role`-only or lineage-body-only changes under one `revision_key` rejecting `revision_conflict`; bounded parents (≤4), roots (≤16) and depth (≤8) with overflow storing `unknown` + `echo_lineage_truncated`; the Usage node's stored `selection_digest` equal to the value `Episode.context_digests` copies; an unknown-lineage assistant **Episode** and every output derived from it ineligible for candidates, synthesis and invalidation; a complete synthesis support union storing `context_derived` with `max(support.echo_depth)` and no added hop, and an incomplete or over-cap union storing `unknown` + truncated; echo fields absent from every score, ordering and conflict decision; `same_scope_l1b` (equal non-null `correction_scope_text` with differing corrected value) accepted where `same_scope_group` (complete byte-identical RFC-8785 `scope`) is refused, and neither predicate substituted for the other; `subject_keys` null rather than a literal fallback; symmetric non-transitive `known_conflict` |
 | embedding identity, failure and coverage contracts (D51) | every PR once implemented | blocks merge: the three canonical fingerprints recomputing to `711660f8…96e13e9`, `0dfe3d3a…bef81a9` and `16d404a7…795405b`, with a quantization or HNSW change producing different IDs; emitted DDL matching `vec_episode_<indexhex>` / `vec_fact_g<N>_<indexhex>` / `vec_rel_g<N>_<indexhex>` and the exact options object (`vector-2.0`, 1024, cosine, quantization disabled, `hnsw.m=16`, `ef_construction=100`); every failure transition including `worker_lost` lease loss and `PENDING|RUNNING|RETRY_WAIT|BLOCKED → CANCELLED`, with `malformed_response` and `client_error` blocking immediately and only the four transient classes retrying three times at `[1000, 10000]` ms; coverage stopping at the hole; a vector-channel recall whose active profile has both an `(episode,0)` and an `(extraction,N)` partition simultaneously BLOCKED with different cursors and different omission digests recording **both** rows in `embedding_coverages`, sorted `episode` before `extraction`, each with its own `required_ingest_seq` (current `Meta.ingest_seq` for the Episode row, the active generation's current `covered_ingest_seq` for the extraction row) and exact `lag`, on the response diagnostics and the durable receipt alike, with a one-row array only when no active extraction generation exists and a missing applicable row refusing the vector channel instead of serving a partial array; cutover refused unless target-model episode coverage equals **current** `Meta.ingest_seq` and extraction coverage equals the active generation's current `covered_ingest_seq`; the zero-skip production default rejecting any nonzero skip that no qualification declared; authenticated retry/skip/cancel records; production activation refused on ONLINE status or operator attestation alone |
 | utility/calibration ablations (§7) | versioned evaluation runs | report held-out effect and uncertainty, never rewrite immutable m0 |
 | scale benches | before release | report |
@@ -277,7 +273,7 @@ candidate capture fixed:
 Do not tune on the evaluation split. Split chronologically and by source/
 session groups so shared-source siblings and repeat occurrences cannot leak
 across training and evaluation. Report grouped uncertainty, support counts,
-missing/expired receipt rate and channel/degradation cohorts. Exposure-only
+unreported Usage rate and channel/degradation cohorts. Exposure-only
 rows and missing reward are not negative labels; reward zero is observed.
 Without randomized exposure or documented propensity capture, report
 associations, not causal benefit. No automatic prior refit from a few outcome
@@ -288,21 +284,14 @@ only through authenticated operator configuration/generation commands.
 Intrinsic m0 calibration changes require a **new derived generation**.
 Accessibility/utility replay uses versioned dynamics and retained Hit events;
 it does not overwrite immutable m0. Accessibility initialization remains
-Episode S0(original m0) at ingestion, and only adoption changes S/t_last_hit.
-Outcome-only leaves those values unchanged. Adoption+negative must be compared
-with adoption-only, not no event. Include zero/missing outcomes, already-negative
-U receiving a less-negative reward, S_max saturation, shared sources and empty
-adoption sets in numerical checks.
+Episode S0(original m0) at ingestion. Test signed stability updates, zero and missing outcomes, utility saturation, shared sources and empty selections.
 
 Replay reports distinguish three levels:
 
 1. **Numeric replay**: captured CSR, seeds, config and runtime reproduce the
    local solver; record iterate delta, actual fixed-point residual if computed,
    mass conservation and error bounds.
-2. **Receipt reconstruction**: retained immutable source IDs and bounded
-   derived snapshots reconstruct delivered primaries/companions, actual ranks,
-   renderer, exact used_budget and result/context digests. Receipt expiry
-   closes feedback, not the retained Hit outcome replay needed for U.
+2. **Usage attribution**: retained primary order and source IDs reconstruct the report shares. Reproducing exact delivery requires the harness to capture the response separately.
 3. **Full retrieval reproduction**: additionally capture candidate/index/
    coverage state, stage/source ConductingArc rows/counts/saturation and
    publication state, stale-row exclusions, Entity
@@ -413,7 +402,7 @@ Boundary validation uses parsed values and resident arithmetic, not prose
 snapshots: malformed budget numbers/units/tokenizers, UTF-8 vs scalar counts,
 zero/exact-fit/oversized skipped bundles, shared-companion deduplication and
 post-budget ranks, 64-primary/256-companion caps, full-response 1 MiB cap, and
-receipt TTL equality/restart/duplicate outcomes. For conflicts exercise raw
+reward clamping, restart and duplicate outcomes. For conflicts exercise raw
 adjacency sizes 0, 4, 5, 64 and 65 with denied/invalid peers; at most 64 peers
 are inspected, at most four included, totals are null when truncated, and
 unknown remainder always carries the mandatory incomplete warning. Policy

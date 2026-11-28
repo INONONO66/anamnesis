@@ -17,7 +17,7 @@ const profile = { model: "g7-wiring-fixture-v1", model_incarnation: "a".repeat(6
   document_prefix: "document: ", query_prefix: "query: ", max_input_bytes: 65536, norm: "unit_l2", norm_tolerance: 0.001 };
 const extraction = { model: "g7-extraction-fixture", model_incarnation: "b".repeat(64) };
 type Item = { id: string; kind: string; mass: number };
-type Recall = { recall_id: string | null; results: Item[]; companions: Item[] };
+type Recall = { usage_id: string | null; results: Item[]; companions: Item[] };
 type Client = { request(method: string, params: unknown): Promise<any>; close(): Promise<void> };
 
 /** Deterministic local provider: one whole-text claim per Episode, every claim retained, a fixed vector per input. */
@@ -46,7 +46,7 @@ function providerServer(): { server: Server; sockets: Set<Socket> } {
   return { server, sockets };
 }
 
-test("receipt-mode commit reinforces the adopted Episode on the real daemon over UDS", async () => {
+test("report_outcome reinforces selected Episodes on the real daemon over UDS", async () => {
   const uri = process.env["ANAMNESIS_TEST_NEO4J_URI"], password = process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"];
   if (!uri || !password) throw new Error("isolated graph credentials required");
   const { RpcClient } = await import(`${ROOT}dist/anamnesis-client.mjs`);
@@ -76,18 +76,18 @@ test("receipt-mode commit reinforces the adopted Episode on the real daemon over
     await query("MATCH (n) DETACH DELETE n");
     const ready = daemonEvent("listening");
     await Promise.race([ready, exited.then(([code]) => { throw Error(`daemon exit ${code}`); })]);
-    const rpc: Client = await RpcClient.connect(`${root}/anamnesis.sock`, token, "receipt"); clients.push(rpc);
+    const rpc: Client = await RpcClient.connect(`${root}/anamnesis.sock`, token); clients.push(rpc);
     const record = async (name: string, body: unknown) => writeFile(`${OUT}/${name}.json`, JSON.stringify(body, null, 2) + "\n");
     const failure = (pending: Promise<unknown>) => pending.then(() => null,
       (error: { code: string; message: string; retryable: boolean }) => ({ data_code: error.code, message: error.message, retryable: error.retryable }));
     const cache = async () => Object.fromEntries((await query("MATCH (c:HitCache) RETURN c.episode_id AS id,c.s AS s ORDER BY id"))
       .map(row => [String(row["id"]), row["s"] as number | null]));
 
-    const helloRequest = { token: "<redacted>", client: "node-client", commit_mode: "receipt", version: 1 };
+    const helloRequest = { token: "<redacted>", client: "node-client", version: 2 };
     const status = await rpc.request("status", {});
     await record("00-capabilities", { hello_request: helloRequest, status_request: {}, status_response: status });
-    expect(status.capabilities.commit).toBe(true);
-    expect(status.capabilities.methods).toContain("commit");
+    expect(status.capabilities).not.toHaveProperty("commit");
+    expect(status.capabilities.methods).toContain("report_outcome");
 
     const remember = async (record: string, content: string) => {
       const result = await rpc.request("remember", { episode: { schema: "anamnesis.original-message/1", content,
@@ -101,45 +101,36 @@ test("receipt-mode commit reinforces the adopted Episode on the real daemon over
     await query("MATCH (e:Element:Episode) WHERE e.id IN $ids SET e.ingested_at=$at", { ids: [a.id, b.id], at: backdated });
     const recallRequest = { query: "ledger reinforcement marker", limit: 10 };
     const first: Recall = await rpc.request("recall", recallRequest);
-    expect(first.recall_id).not.toBeNull();
+    expect(first.usage_id).not.toBeNull();
     expect(first.results.map(item => item.id)).toEqual(expect.arrayContaining([a.id, b.id]));
     const before = await cache();
 
-    const commitRequest = { operation_id: uuidv7(), recall_id: first.recall_id, adopted: [a.id] };
-    const commitResponse = await rpc.request("commit", commitRequest);
-    await record("01-commit-adopt", { recall_request: recallRequest, recall_response: first, request: commitRequest, response: commitResponse });
-    expect(commitResponse).toEqual({ ...commitRequest, reward: null, applied: true });
+    const request = { idempotency_key: uuidv7(), usage_id: first.usage_id, reward: 1 };
+    const response = await rpc.request("report_outcome", request);
+    await record("01-outcome", { request, response });
+    expect(response).toEqual({ reward: 1, applied: true });
     const after = await cache();
-    const hits = (await query("MATCH (h:Hit {kind:'recall_hit'}) RETURN count(h) AS n"))[0]!["n"] as number;
-    await record("02-hitcache-before-after", { episodes: { A: a.id, B: b.id }, before, after, recall_hit_count: hits });
-    expect(after[a.id]!).toBeGreaterThan(before[a.id] ?? 0);
-    expect(hits).toBeGreaterThanOrEqual(1);
+    const hits = await query("MATCH (h:Hit {usage_id:$id}) RETURN h.episode_id AS episode,h.credit AS credit ORDER BY credit DESC", { id: first.usage_id });
+    expect(hits.map(h => h["episode"])).toEqual(first.results.map(item => item.id));
+    expect(hits.reduce((total, hit) => total + Number(hit["credit"]), 0)).toBeCloseTo(0.2, 14);
+    expect(after[a.id]!).toBeGreaterThan(1.5);
+    expect(after[b.id]!).toBeGreaterThan(1.5);
+    await record("02-cache", { before, after, hits });
+    expect((await failure(rpc.request("report_outcome", { ...request, usage_id: uuidv7() })))?.data_code).toBe("unknown_usage");
 
-    const unknownRequest = { ...commitRequest, operation_id: uuidv7(), recall_id: uuidv7() };
-    const invalidRequest = { ...commitRequest, operation_id: uuidv7(), adopted: [uuidv7()] };
-    const conflictRequest = { ...commitRequest, reward: 0 };
-    const errors = [
-      { case: "unknown_recall", request: unknownRequest, response: await failure(rpc.request("commit", unknownRequest)) },
-      { case: "invalid_selection", request: invalidRequest, response: await failure(rpc.request("commit", invalidRequest)) },
-      { case: "idempotency_conflict", request: conflictRequest, response: await failure(rpc.request("commit", conflictRequest)) },
-    ];
-    const emptyRequest = { operation_id: uuidv7(), recall_id: first.recall_id };
-    await record("03-errors", { cases: errors, observed_only: [{ case: "empty_commit_docs_04_389", request: emptyRequest, response: await Promise.resolve().then(() => rpc.request("commit", emptyRequest)).then(() => null, (error: Error) => ({ thrown_client_side: error.name, message: error.message })) }] });
-    expect(errors.map(error => error.response?.data_code)).toEqual(["unknown_recall", "invalid_selection", "idempotency_conflict"]);
-
-    const silent: Client = await RpcClient.connect(`${root}/anamnesis.sock`, token, "receipt"); clients.push(silent);
+    const silent: Client = await RpcClient.connect(`${root}/anamnesis.sock`, token); clients.push(silent);
     const quietBefore = await cache();
     const silentRecall: Recall = await silent.request("recall", recallRequest);
     const quietAfter = await cache();
-    await record("04-no-commit-noop", { recall_request: recallRequest, recall_id: silentRecall.recall_id, before: quietBefore, after: quietAfter });
-    expect(silentRecall.recall_id).not.toBeNull();
+    await record("04-no-commit-noop", { recall_request: recallRequest, recall_id: silentRecall.usage_id, before: quietBefore, after: quietAfter });
+    expect(silentRecall.usage_id).not.toBeNull();
     expect(quietAfter).toEqual(quietBefore);
 
     const last: Recall = await rpc.request("recall", recallRequest);
     const mass = (result: Recall, id: string) => result.results.find(item => item.id === id)?.mass;
     await record("05-recall-mass-pair", { recall_request: recallRequest, ingested_at_backdated_to: backdated,
       before_commit: { A: mass(first, a.id), B: mass(first, b.id) }, after_commit: { A: mass(last, a.id), B: mass(last, b.id) }, response: last });
-    expect(mass(last, a.id)!).toBeGreaterThan(mass(last, b.id)!);
+    for (const id of [a.id, b.id]) expect(mass(last, id)!).toBeGreaterThan(mass(first, id)!);
 
     await rpc.request("shutdown", {});
     expect((await exited)[0]).toBe(0);

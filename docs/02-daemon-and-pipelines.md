@@ -79,7 +79,7 @@ A single integer on `(:Meta {key: 'meta', structure_revision})`.
 - selected model's global Episode or ACTIVE-generation embedding coverage advances
 - generation selector switch (`active_*` SET)
 
-**Not incremented on:** Hit or RecallReceipt CREATE, policy control Episode
+**Not incremented on:** Hit or Usage/UsageOutcome CREATE, policy control Episode
 CREATE (uses `policy_revision`), hit/utility-cache / `m_cache` SET,
 hidden-generation embedding backfill, extraction coverage advance, embedding
 ledger (`embedding-state.json`) and extraction journal
@@ -122,7 +122,7 @@ hold the write queue; only bounded control publication uses its barrier.
 atomically appends its control Episode, publishes the rebuilt active-policy
 cache, and increments this revision under the write queue. A recall pins the
 revision before reads, checks every stage against that policy, and rechecks
-under a short publication barrier before durable receipt creation and socket
+under a short publication barrier before Usage creation and socket
 publication. Policy commands and response publication serialize at this
 barrier: once a policy command acknowledges, no later response is published
 under its predecessor policy. Already-delivered bytes cannot be withdrawn.
@@ -130,10 +130,10 @@ under its predecessor policy. Already-delivered bytes cannot be withdrawn.
 On mismatch, retry the recall under current policy; if that retry also races,
 reject `policy_changed`. `diagnostics.torn` never permits torn-policy serving.
 Feedback, extraction, embedding and dreaming likewise revalidate policy before
-their transaction commits. A commit based on an old receipt must revalidate
+their transaction commits. A report about a prior Usage must revalidate
 the recorded results and sources under current policy; reject it atomically
 if any credited item/source is now denied. No denied Hit is written, even
-when the receipt's original policy allowed it. Policy cache unavailable means
+when the original policy allowed it. Policy cache unavailable means
 retryable `policy_unavailable`, not an empty-policy fallback. Background reconciliation is not
 the immediate enforcement mechanism.
 
@@ -148,7 +148,7 @@ from B's effective time onward, even though B cannot be returned.
 
 `structure_revision` alone is not a replay token. Captured index/candidate,
 cache, policy, config, generation, and channel-degradation state determine
-the numeric result; receipts retain bounded replay evidence (D47, docs/05).
+the numeric result. Usage captures the ordered sources of included primaries (D62).
 
 ## 2. RPC
 
@@ -159,15 +159,15 @@ zod in `packages/protocol`; server and clients share the same schema.
 
 | Method | Writes | Meaning |
 |---|---|---|
-| `hello {client, commit_mode, token}` | — | Authenticate the UDS session; `commit_mode: auto \| receipt` (docs/04 §6). Receipt mode yields receipts whose feedback channel is the `commit` RPC (no exposure Hits; those are auto-mode only); `capabilities.commit:true` advertises it |
+| `hello {client, version:2, token}` | — | Authenticate the connection. `capabilities.methods` advertises `report_outcome`. |
 | `object.begin {sha256, size, media_type}` | temp file | Start or resume a bounded payload upload; existing hash is a no-op |
 | `object.chunk {upload_id, seq, bytes_b64}` | temp file | Append one raw chunk ≤ 512 KiB in sequence |
 | `object.commit {upload_id}` | objects/ | Verify size/hash, fsync and atomically publish the object |
 | `remember {episode, payload_hash?}` | yes | Ingest one Episode referencing an already committed object. Idempotent |
 | `remember.batch {deliveries[1..32]}` | yes | `remember` for each delivery in order, in one serial turn; one result per delivery. A non-retryable refusal (`{state: refused, code, message}`) answers that delivery alone; any other failure fails the request at that delivery, so a later delivery is never admitted before an earlier one, and the deliveries already admitted answer as stored when sent again |
-| `recall {query, session?, T?, limit?, budget?}` | dispatcher receipt | Read-only semantic handler; dispatcher durably appends control impression before publication (docs/05) |
+| `recall {query, session?, T?, limit?, budget?}` | Usage | Store the ordered selection in the recall transaction before protected publication. |
 | `projection {T?}` | — | Read-only snapshot of every Entity of the writable generation with at least one VALID Fact at T (`FACT_VALID`, content deny policies applied); Facts by `time_utc` DESC then id, Entities by name then id. Consumed by `anamnesis-ops projection write <dir>` (docs/01 §4); `capabilities.projection:true` advertises it |
-| `commit {operation_id, recall_id, adopted?, reward?}` | Hit | Receipt-mode adoption report (`recall_hit`) and/or signed outcome verdict (`outcome`, `reward ∈ [−1,1]`), dispatched to `Runtime.commit` → `Engine.commitReceipt` (docs/04 §6). Receipt lookup, expiry and authorization run first (`unknown_recall`, `receipt_expired`, `policy_denied`); then idempotent on `operation_id`: an identical replay returns the stored result with `applied:false`, a different body rejects `idempotency_conflict` |
+| `report_outcome {usage_id, idempotency_key, reward}` | UsageOutcome, Hit | Revalidate current policy, then accept or replay the clamped reward; see docs/04 §6. |
 | `policy.set {policy_id, selector, scope}` | policy Episode/cache | Explicit authenticated deny command; idempotent by policy ID and canonical body |
 | `policy.revoke {policy_id}` | policy Episode/cache | Explicit authenticated revocation of that immutable deny |
 | `embedding.retry {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Move the exact BLOCKED head back to PENDING (docs/01 §4) |
@@ -368,7 +368,7 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
        source_revision = adapter-issued stable revision token
        payload_hash = committed object hash if present
        revision_key = sha256(origin_key, source_revision)
-       Do not resolve role/lineage or read parent receipts here. Step 3a
+       Do not resolve role/lineage or read parent Usage here. Step 3a
        first selects the existing row's digest version; callers cannot
        supply or downgrade that version.
     2. If payload_hash: require the committed object to exist and match its metadata
@@ -381,7 +381,7 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
                        never the version-2 RFC-8785 body. Same digest → no-op,
                        return existing id, created = false before validating
                        newly supplied role/lineage metadata or reading any
-                       parent receipt, including expired parents. Any changed
+                       parent Usage, even if the parent is gone. Any changed
                        version-1 field → reject revision_conflict. Newly
                        supplied origin_role or lineage values sit outside
                        version-1 identity: they create no lineage properties, repair
@@ -396,7 +396,7 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
                        origin_role = user | assistant | tool | document | operator
                        lineage_mode = direct | receipts; receipts requires
                        1..4 distinct parent_recall_ids, each an existing
-                       receipt bound to this authenticated caller.
+                       Usage bound to this authenticated caller.
                        Resolve the bounded Episode lineage body under docs/01 §3.3;
                        lineage_digest = sha256(RFC-8785 canonical body).
                        Set server-selected episode_digest_version = 2 and
@@ -422,7 +422,7 @@ see [the implemented contract](../app/anamnesis/episode-lineage.md).
          f2. SET lineage properties on this newly created version-2
             Episode (docs/01 §3.3); an existing version-1 Episode never reaches
             this step:
-            copy each parent receipt's bounded delivered snapshot, pair the
+            copy each parent Usage's bounded delivered snapshot, pair the
             parent IDs with their selection digests, sort by recall ID, store
             the sorted distinct root union and 1 + max(item.echo_depth).
             Every parent's created_at must precede this ingestion. Either cap
@@ -597,7 +597,7 @@ decisions. LLM calls cannot sit inside a transaction.
         · require ingest_seq = Generation.next_ingest_seq
         capture input_head = newest Episode.revision_key for episode.origin_key
         capture policy_revision; control Episodes complete as no-ops
-        content-denied input creates no derived output or re_mention Hit
+        content-denied input creates no derived output
     ── extraction LLM (outside a tx) ────────────────────────────────────────
     L1. Episode → at most 32 claims[], in Episode order:
           {content, content_language, sub_kind, modality, confidence,
@@ -667,13 +667,13 @@ decisions. LLM calls cannot sit inside a transaction.
         unavailable, #265):
           new                        → Fact + DERIVED_FROM Episode + MENTIONS
           duplicate of F             → new occurrence Fact + DERIVED_FROM Episode,
-                                        RELATES_TO F; optional audit re_mention
+                                        RELATES_TO F
           elaboration of F           → Fact + RELATES_TO F
           contradiction, resolved    → Fact + at most 8 INVALIDATES targets
                                         (mode: change | correction, docs/03 §5)
           contradiction, unresolved  → Fact + CONTRASTS F
         L4 may mark a Fact a known echo, and only against an exact delivered result ID in a
-        complete parent receipt (docs/01 §3.3)
+        complete parent Usage (docs/01 §3.3)
     ── write tx ─────────────────────────────────────────────────────────────
     W1. Re-validate:
         · policy_revision unchanged
@@ -735,8 +735,7 @@ decisions. LLM calls cannot sit inside a transaction.
         reject oversized output rather than discarding required audit fields.
         SET each mentioned
         Entity's visible_from_utc to min(current, mention source time)
-    W3. Optional re_mention audit Hits through the commit path (docs/04 §6),
-        namespace extract:<episode_id>; no change to S or t_last_hit
+    W3. Extraction creates no Hits.
     W4. For each distinct M in {active model, target model if set},
         CREATE Outbox
         {stage: embed_derived, target_generation, ingest_seq, fact_ids,
@@ -1029,12 +1028,7 @@ tries again next cycle.
 
 - No LLM calls. Candidates, seeds, PPR, RRF and assembly are deterministic
   numeric work.
-- No semantic memory writes. The numeric recall handler is read-only; the RPC
-  dispatcher's explicit control-publication exception appends a bounded durable
-  RecallReceipt before publishing the response (docs/01 §3.1); failure rejects
-  publication rather than returning a commit-capable but untracked result.
-  Auto-mode exposure is audit-only, after the response, through the commit
-  path and a fresh policy check (docs/05 §10).
+- Recall creates one Usage in its serving transaction. Socket completion has no durable side effects.
 - No GDS calls.
 
 ## 9. Connection states and degradation
@@ -1044,27 +1038,18 @@ tries again next cycle.
 | Neo4j up, embed up | normal | normal | normal | normal |
 | Neo4j up, embed down | normal | vector channel dropped (`channels_used`) | embed stage backs up (transient retry, then a BLOCKED head) | dreaming phase 2 skipped |
 | Neo4j up, embedding head BLOCKED | normal | that model's coverage frozen; active profile serves its prior prefix, BM25/session unaffected | that model's publication paused until an authenticated retry or skip | unchanged |
-| Neo4j cold start (≤ warmup_wait 20 s) | retryable `storage_unavailable` | wait, then empty success `neo4j_unavailable` | paused | paused |
-| Neo4j down | retryable `storage_unavailable` | empty success `neo4j_unavailable` | paused | paused |
+| Neo4j cold start (≤ warmup_wait 20 s) | retryable `storage_unavailable` | retryable `storage_unavailable` | paused | paused |
+| Neo4j down | retryable `storage_unavailable` | retryable `storage_unavailable` | paused | paused |
 | LLM down | normal | normal | backs up (retry) | maintenance normal; dreaming phase 1 summary fallback, phase 2 skipped |
 
-When Neo4j is unavailable, recall's diagnostic-only empty success includes
-`recall_id:null`, `results: []`, `entities: []`, `companions: []`,
-`context_text: ""`, `used_budget: 0` and reason `neo4j_unavailable`. It contains
-no committable receipt and triggers no exposure. No memory content may be
-returned without current policy and durable receipt authority. This explicit
-exception does not permit returning a cached result or an unrecorded receipt.
+A successful recall always has a durable Usage, even for an empty result. Storage loss returns `storage_unavailable`.
 
-`commit`, `policy.set`, `policy.revoke`, `embedding.retry`, `embedding.skip`,
+`report_outcome`, `policy.set`, `policy.revoke`, `embedding.retry`, `embedding.skip`,
 `embedding.cancel` and `gen ... qualify` return retryable
 `storage_unavailable` when Neo4j is unavailable, before any
 feedback, policy, review, correction or resolution acceptance. With Neo4j
 available, missing/unrebuildable policy cache returns retryable
-`policy_unavailable`; failure to persist a receipt returns retryable
-`receipt_unavailable` before any memory delivery. Invalid contracts and policy
-races remain explicit errors. `recall_id:null` is never accepted by `commit`;
-unknown non-null receipt IDs reject `unknown_recall`. Do not confuse inability
-to read the store with evidence that a receipt is unknown or expired.
+`policy_unavailable`. Missing Usage returns `unknown_usage` only after a successful store lookup.
 
 ## 10. Security boundary
 
@@ -1087,7 +1072,7 @@ Personal, single-user, localhost. The boundary is the OS user.
 ### Egress payloads
 
 No endpoint receives the database, payload bytes, credentials, Hit ledger or
-unrelated memories. Policy/control events and RecallReceipts never enter model
+unrelated memories. Policy/control events and Usages never enter model
 requests. Enforce
 current policy before egress and recheck before publishing model output;
 already-sent remote input cannot be withdrawn. Every encoded outbound request
@@ -1129,8 +1114,7 @@ fallback; recall itself remains LLM-free.
 | recall impression | 1 bounded control transaction before response publication, under policy barrier | — |
 | policy.set / policy.revoke | 1 (immutable control Episode, active-policy publication, contiguous cursor no-ops) | policy_revision +1 for effective change; structure unchanged |
 | policy reconciliation | bounded serving-view rebuild; preserve invalidation evidence/markers, no new extraction judgment | hidden work —; activation +1 only after validity-preservation gate |
-| standalone commit / exposure | 1 (feedback acceptance + Episode Hits + appropriate adoption/utility caches); revalidate policy | — |
-| re_mention / promotion | joins the owning extraction/dreaming write tx | Hit portion — |
+| `report_outcome` | 1 (current-policy check, verdict, Episode Hits and caches) | — |
 | generation build/catch-up | bounded write tx per Episode | — while hidden |
 | generation switch / caught-up rollback | one cutover tx under write queue | +1 |
 | maintenance | 1 per batch (cache SET) | — |

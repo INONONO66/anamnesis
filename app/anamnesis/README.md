@@ -1,8 +1,9 @@
 # anamnesis daemon and ops CLI
 
 This directory holds the anamnesis daemon and its operator CLI
-(`anamnesis-ops`). The daemon serves the remember, recall, policy and commit
-RPCs; extraction and embedding capabilities reflect configured providers.
+(`anamnesis-ops`). The daemon serves the remember, recall, policy and
+`report_outcome` RPCs; every recall records one usage that `report_outcome`
+can credit once (D62). Extraction and embedding capabilities reflect configured providers.
 Production runs it under the systemd units in `deploy/vm/`, which start
 `ops foreground` ([deploy](../../docs/deploy.md)). `ops up` starts the local
 `managed` supervisor instead. Don't supervise one root both ways.
@@ -100,8 +101,7 @@ The client has no Bolt connection or Bun runtime dependency.
   row read back from Neo4j, with its real ID and ingest sequence. The retry
   must match the RPC-body digest, which binds fields such as mass that the
   core digest does not cover, and the stored core digest must verify. Matching
-  only a revision key never makes a retry successful. These replies are not
-  recall receipts.
+  only a revision key never makes a retry successful.
 - `remember` and `remember.batch` write directly to Neo4j during the request.
   If storage is unavailable, the failed write is not accepted; the client
   receives retryable `storage_unavailable` and retries the same input. In a

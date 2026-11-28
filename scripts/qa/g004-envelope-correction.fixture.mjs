@@ -8,7 +8,7 @@ import { connect } from 'node:net';
 import { join } from 'node:path';
 import neo4j from 'neo4j-driver';
 import { Engine } from '../../packages/core/src/engine.ts';
-const context = { principal: 'installation', commit_mode: 'receipt' };
+const context = { principal: 'installation' };
 const id = n => `01900000-0000-7000-8000-${n.toString(16).padStart(12, '0')}`;
 const T = Date.parse('2026-01-01T00:00:00Z');
 const output = process.env.G004_CORRECTION_OUTPUT;
@@ -43,7 +43,7 @@ async function uds(root, check) {
  try {
   await ready; p = peer(join(root, 'anamnesis.sock'));
   const denied = await p.request('graph.envelope', { seed_ids:[id(1)], T });
-  const hello = await p.request('hello', { version:1, client:'g004-correction', token:'envelope-correction-owned-token', commit_mode:'receipt' });
+  const hello = await p.request('hello', { version: 2, client:'g004-correction', token:'envelope-correction-owned-token' });
   const result = await p.request('graph.envelope', { seed_ids:[id(1)], T });
   await save('uds.json', { runtime:process.version, denied, hello, result });
   await check({ denied, hello, result, p });

@@ -232,7 +232,7 @@ export class EmbeddingStore {
     });
   }
 
-  async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation", commit_mode: "auto" }):
+  async drainEmbeddingOutbox(limit = 100, context: InstallationContext = { principal: "installation" }):
     Promise<EmbeddingDrain | { drained: 0; reason: "embeddings_disabled" }> {
     const due = await this.dueEmbeddings(limit);
     return due === null ? { drained: 0, reason: "embeddings_disabled" } : this.embedOutbox(due, context);
@@ -275,7 +275,7 @@ export class EmbeddingStore {
   }
 
   /** One provider call per listed Fact that still lacks this profile's vector, each committed on its own. */
-  async embedOutbox(ids: readonly string[], context: InstallationContext = { principal: "installation", commit_mode: "auto" }): Promise<EmbeddingDrain> {
+  async embedOutbox(ids: readonly string[], context: InstallationContext = { principal: "installation" }): Promise<EmbeddingDrain> {
     const provider = this.core.embeddingProvider;
     if (!provider) throw new RecallError("embedding_not_configured");
     const profileId = embeddingProfileId(provider.profile);

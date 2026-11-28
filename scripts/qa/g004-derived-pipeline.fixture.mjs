@@ -13,7 +13,7 @@ import {HttpExtractionProvider} from '../../packages/core/src/extraction.ts';
 import {RpcResponse} from '../../packages/protocol/src/rpc.ts';
 const uuid=()=>`01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 const hash=text=>createHash('sha256').update(text).digest('hex');
-const context={principal:'installation',commit_mode:'receipt'};
+const context={principal:'installation'};
 const incarnation=hash('g004-claim-judge-audit-v1');
 const options={uri:process.env.ANAMNESIS_TEST_NEO4J_URI,password:process.env.ANAMNESIS_TEST_NEO4J_PASSWORD};
 const dispositions=['retain','suppress','correct','unknown'];
@@ -191,7 +191,7 @@ test('real daemon UDS authenticates audit boundaries and recovers UNKNOWN withou
  try{
   await ready;p=peer(root+'/anamnesis.sock');const id=uuid();
   assert.equal((await p.request('extraction.audit.status',{pipeline_id:id})).error.data.code,'unauthenticated');
-  const hello=ok(await p.request('hello',{version:1,client:'qa',token:'pipeline-token',commit_mode:'receipt'}));assert.equal(hello.capabilities.extraction,true);
+  const hello=ok(await p.request('hello',{version: 2,client:'qa',token:'pipeline-token'}));assert.equal(hello.capabilities.extraction,true);
   assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:id})),{state:'unknown',pipeline_id:id});
   // The scheduler adopted the fixture's catching-up generation and owns the Episode's work key; a second admission fails closed.
   await entered;const created=await recorded('extraction.task.created',event=>event.source_id===f.source.id&&event.kind==='claim');
@@ -203,7 +203,7 @@ test('real daemon UDS authenticates audit boundaries and recovers UNKNOWN withou
   p.socket.destroy();f.events.emit('release');
   const judged=await recorded('extraction.attempt.recorded',event=>event.pipeline_id===pipeline&&event.kind==='judge');
   assert.equal(judged.state,'succeeded');assert.equal(judged.decisions,4);assert.equal(f.requests.length,2);
-  p=peer(root+'/anamnesis.sock');ok(await p.request('hello',{version:1,client:'qa-new',token:'pipeline-token',commit_mode:'receipt'}));
+  p=peer(root+'/anamnesis.sock');ok(await p.request('hello',{version: 2,client:'qa-new',token:'pipeline-token'}));
   // Coverage seals the terminal pipeline and prunes it from the state file; afterwards status answers unknown and the log line is the record.
   const pruned=await recorded('extraction.pipeline.pruned',event=>event.pipeline_id===pipeline);assert.equal(pruned.sealed_ingest_seq,1);
   assert.deepEqual(ok(await p.request('extraction.audit.status',{pipeline_id:pipeline})),{state:'unknown',pipeline_id:pipeline});

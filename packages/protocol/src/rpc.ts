@@ -4,7 +4,7 @@ import { CreateExtractionPipeline, RunExtractionPipeline, ExtractionPipelineStat
 import { ModelTask } from './extraction.ts';
 
 /** Ingest and receipt-feedback contract. Incompatible wire shapes require a new version. */
-export const RPC_VERSION = 1;
+export const RPC_VERSION = 2;
 export const RPC_LIMITS = {
   frame_bytes: 1024 * 1024,
   chunk_bytes: 512 * 1024,
@@ -27,7 +27,7 @@ export const RPC_METHODS = [
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
   "identity.status", "identity.rebuild", "identity.correct", "identity.directory", "people.list", "people.show",
   "spaces.import", "spaces.list", "spaces.rebuild", "replies.rebuild",
-  "object.commit", "remember", "remember.batch", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
+  "object.commit", "remember", "remember.batch", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "report_outcome", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
 ] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
@@ -204,21 +204,12 @@ export const RpcRecallParams = z.strictObject({
 });
 /** Callers may omit defaulted fields; parsing supplies limit, window and order. */
 export type RpcRecallParams = z.input<typeof RpcRecallParams>;
-/** Receipt-mode feedback; attribution is resolved from the stored receipt, never from the client. */
-export const RpcCommitParams = z.strictObject({
-  operation_id: z.uuidv7(), recall_id: z.uuidv7(),
-  adopted: z.array(z.uuidv7()).max(64).optional(),
-  reward: z.number().finite().min(-1).max(1).optional(),
-}).superRefine((value, context) => {
-  if (value.adopted === undefined && value.reward === undefined) context.addIssue({ code: "custom", message: "adopted or reward is required" });
-  if (value.adopted && new Set(value.adopted).size !== value.adopted.length) context.addIssue({ code: "custom", message: "adopted IDs must be distinct" });
+export const RpcReportOutcomeParams = z.strictObject({
+  usage_id: z.uuidv7(), idempotency_key: z.uuidv7(), reward: z.number().finite(),
 });
-export type RpcCommitParams = z.infer<typeof RpcCommitParams>;
-export const RpcCommitResult = z.strictObject({
-  operation_id: z.uuidv7(), recall_id: z.uuidv7(), adopted: z.array(z.uuidv7()),
-  reward: z.number().min(-1).max(1).nullable(), applied: z.boolean(),
-});
-export type RpcCommitResult = z.infer<typeof RpcCommitResult>;
+export type RpcReportOutcomeParams = z.infer<typeof RpcReportOutcomeParams>;
+export const RpcReportOutcomeResult = z.strictObject({ reward: z.number().min(-1).max(1), applied: z.boolean() });
+export type RpcReportOutcomeResult = z.infer<typeof RpcReportOutcomeResult>;
 export const RpcEmbeddingRecoverParams = z.strictObject({ operation_id: z.uuidv7(), fact_id: z.uuidv7() });
 export type RpcEmbeddingRecoverParams = z.infer<typeof RpcEmbeddingRecoverParams>;
 export const RpcEmbeddingStatusParams = z.strictObject({ operation_id: z.uuidv7() });
@@ -245,13 +236,13 @@ export type RpcEmbeddingRequeueResult = z.infer<typeof RpcEmbeddingRequeueResult
 export const RpcRecallChannel = z.enum(["identity", "bm25", "vector", "session", "ppr"]);
 export const RpcRecallItem = z.discriminatedUnion("kind", [
   z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), schema: z.enum(EPISODE_SCHEMAS), epistemic: z.literal("observed"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1), provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.enum(["Episode", "Fact"]), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
-  z.strictObject({ id: z.uuidv7(), kind: z.literal("Fact"), schema: z.literal(SCHEMA_ID.CLAIM), epistemic: z.literal("derived"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).length(1),
+  z.strictObject({ id: z.uuidv7(), kind: z.literal("Fact"), schema: z.literal(SCHEMA_ID.CLAIM), epistemic: z.literal("derived"), content: boundedString(RPC_LIMITS.frame_bytes), time: TimePoint, score: z.number().nonnegative(), relevance: z.number().nonnegative(), mass: z.number().min(0).max(1), utility: z.number().min(-1).max(1), rank: counter.max(63).optional(), sources: z.array(z.uuidv7()).min(1).max(16),
     window: z.strictObject({ source: z.uuidv7(), before: z.array(z.uuidv7()).max(8), after: z.array(z.uuidv7()).max(8) }),
-    provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), visible_at_T: z.boolean() })).length(1), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
+    provenance: z.strictObject({ derived_from: z.array(z.strictObject({ id: z.uuidv7(), kind: z.literal("Episode"), visible_at_T: z.boolean() })).min(1).max(16), supersedes: z.array(z.strictObject({ id: z.uuidv7(), content: boundedString(RPC_LIMITS.frame_bytes) })).max(8), supersedes_redacted: z.boolean(), contrasts: z.array(z.uuidv7()).max(4), warnings: z.array(z.strictObject({ code: z.enum(["supersedes_withheld", "supersedes_incomplete"]), content: boundedString(512) })).max(2) }), channels: z.array(RpcRecallChannel).max(4) }),
 ]);
 export type RpcRecallItem = z.infer<typeof RpcRecallItem>;
 export const RpcRecallResult = z.strictObject({
-  recall_id: z.uuidv7(), expires_at: counter, results: z.array(RpcRecallItem).max(64),
+  usage_id: z.uuidv7(), results: z.array(RpcRecallItem).max(64),
   companions: z.array(RpcRecallItem).max(256), entities: z.array(z.never()).max(0),
   context_text: unicodeString, used_budget: counter, budget: RpcOutputBudget,
   renderer: z.literal("canonical-jsonl-v1"),
@@ -303,7 +294,6 @@ export const RpcHelloParams = z.strictObject({
   token: boundedString(1024),
   /** Informational label only; must never become an authorization identity. */
   client: boundedString(128),
-  commit_mode: z.enum(["auto", "receipt"]),
   version: z.literal(RPC_VERSION),
 });
 export type RpcHelloParams = z.infer<typeof RpcHelloParams>;
@@ -361,7 +351,7 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("extraction.audit.run", RunExtractionPipeline),
   request("extraction.audit.status", ExtractionPipelineStatus),
   request("recall", RpcRecallParams),
-  request("commit", RpcCommitParams),
+  request("report_outcome", RpcReportOutcomeParams),
   request("projection", RpcProjectionParams),
   request("graph.envelope", z.strictObject({ seed_ids: z.array(z.uuidv7()).min(1).max(128), T: counter.optional() })),
   request("embedding.recover", RpcEmbeddingRecoverParams),
@@ -402,10 +392,10 @@ export const RpcErrorCode = z.enum([
   "object_not_found", "object_metadata_conflict", "object_corrupt", "upload_not_found",
   "upload_sequence_mismatch", "object_size_mismatch", "object_hash_mismatch",
   "lineage_unavailable", "lineage_binding_mismatch", "lineage_mismatch",
-  "unsupported_digest_version", "unknown_recall", "receipt_expired", "empty_commit", "invalid_selection", "unsupported_policy", "internal_error",
-  "commit_mode_mismatch", "policy_denied", "policy_unavailable", "unknown_policy", "invalid_hit_evidence",
+  "unsupported_digest_version", "unknown_usage", "outcome_already_reported", "invalid_selection", "unsupported_policy", "internal_error",
+  "policy_denied", "policy_unavailable", "unknown_policy", "invalid_hit_evidence",
   "extraction_not_configured", "extraction_audit_conflict", "extraction_audit_incomplete", "extraction_audit_stale", "backup_adapter_unavailable", "restore_adapter_unavailable", "daemon_live", "member_mismatch", "archive_layout", "invalid_completion", "completion_mismatch", "incompatible_archive", "object_digest_mismatch", "invalid_dump",
-  "embedding_not_configured", "invalid_budget", "receipt_unavailable", "degree_probe_unavailable", "ordered_probe_unavailable",
+  "embedding_not_configured", "invalid_budget", "degree_probe_unavailable", "ordered_probe_unavailable",
 ]);
 export type RpcErrorCode = z.infer<typeof RpcErrorCode>;
 export const RpcError = z.strictObject({
@@ -444,7 +434,6 @@ export const RpcCapabilities = z.strictObject({
     "duplicate capability method",
   ),
   recall: z.boolean(),
-  commit: z.boolean(),
   policy: z.boolean(),
   extraction: z.boolean(),
   embeddings: z.boolean(),
@@ -513,7 +502,6 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   success("hello", z.strictObject({
     version: z.literal(RPC_VERSION),
     principal: z.literal("installation"),
-    commit_mode: z.enum(["auto", "receipt"]),
     data_incarnation: z.uuid(),
     fs_epoch: z.uuid(),
     capabilities: RpcCapabilities,
@@ -551,7 +539,7 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
     pin: z.strictObject({ policy_revision: counter, generation_id: z.uuidv7(), coverage_revision: counter, covered_ingest_seq: counter, T: counter }),
     overflow: z.strictObject({ nodes: counter, arcs: counter, saturated_sources: counter.max(128) }) })),
   success("recall", RpcRecallResult),
-  success("commit", RpcCommitResult),
+  success("report_outcome", RpcReportOutcomeResult),
   success("projection", RpcProjectionResult),
   success("extraction.audit.create", ModelTask),
   success("extraction.audit.run", ExtractionPipeline),

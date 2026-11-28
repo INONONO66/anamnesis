@@ -45,22 +45,14 @@
               "pattern": "^(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])*$",
               "x-maxUtf8Bytes": 128
             },
-            "commit_mode": {
-              "type": "string",
-              "enum": [
-                "auto",
-                "receipt"
-              ]
-            },
             "version": {
               "type": "number",
-              "const": 1
+              "const": 2
             }
           },
           "required": [
             "token",
             "client",
-            "commit_mode",
             "version"
           ],
           "additionalProperties": false
@@ -1124,39 +1116,29 @@
         },
         "method": {
           "type": "string",
-          "const": "commit"
+          "const": "report_outcome"
         },
         "params": {
           "type": "object",
           "properties": {
-            "operation_id": {
+            "usage_id": {
               "type": "string",
               "format": "uuid",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
             },
-            "recall_id": {
+            "idempotency_key": {
               "type": "string",
               "format": "uuid",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
-            },
-            "adopted": {
-              "maxItems": 64,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
-              }
             },
             "reward": {
-              "type": "number",
-              "minimum": -1,
-              "maximum": 1
+              "type": "number"
             }
           },
           "required": [
-            "operation_id",
-            "recall_id"
+            "usage_id",
+            "idempotency_key",
+            "reward"
           ],
           "additionalProperties": false
         }

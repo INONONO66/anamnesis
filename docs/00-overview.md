@@ -24,7 +24,7 @@ for offline analysis and as an accuracy baseline only.
   Neo4j                                          ~/.anamnesis/
     ├─ originals: Episode · Hit ledger              ├─ objects/   payload bytes (content-addressed, part of the authority)
     │             policy Episodes                   │
-    ├─ control:   RecallReceipt (append-only)       └─ neo4j/     container volume
+    ├─ control:   Usage (append-only)       └─ neo4j/     container volume
     │             InvalidationEvidence · Episode lineage properties
     │             adjudication + embedding records (append-only)
     ├─ derived:   Fact · Entity · Community
@@ -39,7 +39,7 @@ for offline analysis and as an accuracy baseline only.
     ├─ forgetting m(now) = m₀ · R(t, S)  — no tick
     ├─ RRF fusion × mass weighting × (1 + β·U)   U = outcome utility, separate from S
     ├─ policy filter · conflict bundles · exact budget (bytes / scalars / pinned tokens)
-    └─ snapshot(T) · INVALIDATES · provenance assembly · RecallReceipt
+    └─ snapshot(T) · INVALIDATES · provenance assembly · Usage
               │
               v
   Neo4j GDS (offline)
@@ -105,24 +105,17 @@ exists yet, and the gates that will produce one are in
    a memory is about, is stored only on Episode and Fact; visibility of
    Entity, Community and Link is derived from it, and `snapshot(T)` reads
    only this axis ([03-time](03-time.md)). Operational clocks are separate
-   and never enter snapshot: `Episode.ingested_at`, `Hit.t`, RecallReceipt
-   timestamps and TTL, and policy revisions record when the system did
-   something, and are read by forgetting, feedback windows and audit.
+   and never enter snapshot: `Episode.ingested_at`, `Hit.t`, Usage
+   and report timestamps and policy revisions record when the system acted.
 5. **Forgetting is computed, not stored.** The same state and the same clock
    give the same answer whenever it is evaluated. No tick daemon.
-6. **The recall handler is read-only, and Hits have one producer path.**
-   Every Hit (receipt commit with adoption and outcome, post-response
-   exposure, extraction re_mention, dreaming promotion) goes through the same
-   server-side commit function ([04-forgetting](04-forgetting.md) §6). Only
-   `recall_hit`, a confirmed adoption, updates `S` and `t_last_hit`. Exposure,
-   re_mention, promotion and outcome are audit-only for accessibility.
-   Reinforcement is always positive and capped at `S_max`; nothing lowers `S`.
+6. **Only explicit reports create Hits.** Recall writes one Usage before returning. A report allocates signed credit to its selected source Episodes and updates stability and utility ([04-forgetting](04-forgetting.md) §5). Socket delivery has no effect on either.
 7. **Accessibility and utility are separate quantities.** `S` is a
    stability, the time scale over which retention `R(t, S)` decays;
    accessibility `A = R(now − t_last_hit, S)` is how easily a memory comes
    back right now; the per-Episode utility `U` answers "did it help when it
    came back". An outcome reward `r ∈ [−1,1]` feeds `U` through
-   rank-weighted attribution recorded in the RecallReceipt; it never rewinds
+   rank-weighted attribution recorded in the Usage; it never rewinds
    time, never resets `S`, and a missing outcome is not a zero. Hits attach to
    Episodes only, so adopting one Fact refreshes its sibling Facts from the
    same source; that collateral refresh is accepted, not hidden
@@ -138,7 +131,7 @@ exists yet, and the gates that will produce one are in
 9. **Partial results are never used silently.** When a channel fails, the
    whole channel is dropped and the fact is recorded in diagnostics. A
    result that doesn't fit the caller's budget is skipped whole, never
-   truncated, and the receipt lists exactly what was delivered
+   truncated, and Usage records the included primaries
    ([05-recall](05-recall.md), D44). Contradiction companions come from a
    bounded scan (at most 64 raw `CONTRASTS` rows, first 4 eligible); when
    that scan can't see everything, the bundle carries a mandatory incomplete
@@ -146,7 +139,7 @@ exists yet, and the gates that will produce one are in
    ([05-recall](05-recall.md), D46).
 10. **No echo is counted twice and no vector is skipped in silence.** An
    assistant turn that received anamnesis context declares its parent
-   receipts; the resulting Facts carry bounded lineage and corroboration
+   Usage IDs; the resulting Facts carry bounded lineage and corroboration
    roots that never raise confidence, mass, utility, rank or a conflict
    winner. Unknown or incomplete assistant lineage is stored but never served
    as a semantic candidate, and that applies to the assistant Episode itself
@@ -168,7 +161,7 @@ exists yet, and the gates that will produce one are in
 | [02-daemon-and-pipelines](02-daemon-and-pipelines.md) | Who writes — single writer, RPC, revision, extraction, policy RPCs and barrier, maintenance, dreaming, security boundary |
 | [03-time](03-time.md) | Which world — snapshot(T), derived visibility, change vs correction, INVALIDATES |
 | [04-forgetting](04-forgetting.md) | How alive, how useful — m₀, S, Hit ledger, Episode attribution, commit protocol, outcome utility U |
-| [05-recall](05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → policy filter → conflict bundles → budget → assembly, receipts, degradation ladder |
+| [05-recall](05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → policy filter → conflict bundles → budget → assembly, Usage, degradation ladder |
 | [06-envelope-ppr](06-envelope-ppr.md) | How far to look — budgets, fanout, hubs, retained-row normalization, convergence, determinism |
 | [07-gds-validation](07-gds-validation.md) | How accurate — solver validation, envelope validation, CI gates |
 | [08-repo-and-release](08-repo-and-release.md) | How it is built and shipped |
@@ -183,9 +176,9 @@ exists yet, and the gates that will produce one are in
 | Episode / Fact / Entity / Community | Element kinds: original, derived statement, anchor, topic set |
 | Account / Person | Identity layer, not Elements: one `(origin_source, origin_actor)` speaker / a group of accounts judged to be one person (D59) |
 | Link | A relationship between Elements. Eight roles, real Neo4j relationship types; `REPLIES_TO` is a nonconducting Episode cache (D58) |
-| Hit | A ledger record that a memory was actually used. Attached to an Episode. Kinds: `recall_hit` (adoption, the only one that moves `S`), `exposure`, `re_mention`, `promotion`, `outcome` |
-| RecallReceipt | Append-only control record of one recall: delivered primary and companion IDs, source snapshots, versions, channels, ranking state, budget and result digests. Exactly one adoption per source and one outcome per recall; expires by explicit TTL. Not a semantic Episode |
-| U | Per-Episode outcome utility, `U = (ν·μ₀ + Σ w·r) / (ν + Σ w)`. A reported proxy, not truth or causal attribution. Enters score as `(1 + β·U)`, never enters mass |
+| Hit | One signed outcome credit for one source Episode, allocated from a UsageOutcome. |
+| Usage | Ordered primary selection, source Episodes and bound lineage for one recall. One optional explicit UsageOutcome supplies all Episode credit. |
+| U | Outcome utility, clipped after each event and decayed with a 30-day half-life. Enters score as `(1 + 0.25 U)`. |
 | policy | A `deny` or `revoke` command with at least one selector (`subject_entity_id`, `schema`, `sub_kind`, `modality`, `literal`) and a scope (`derived` or `content`). Suppresses ordinary extraction and serving; never erases originals |
 | budget | Optional recall bound `{unit: utf8_bytes \| unicode_scalars \| tokens, limit, tokenizer_id?}`. Exact counts of the final `context_text`; `tokens` needs an installed, version-pinned tokenizer, no estimates |
 | epistemic | `observed \| extracted \| synthesized`: provenance distance from the source utterance. Not a trust probability |

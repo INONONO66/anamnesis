@@ -10,8 +10,8 @@ import { OpenAiEmbeddingProvider } from "@anamnesis/core";
 import { elementDigest, verifyLineageRetry, verifyEpisodeLineage } from "@anamnesis/core";
 import { ExtractionAuditError, parseEpisodeLineage } from "@anamnesis/protocol";
 import type { CreateExtractionPipeline, RunExtractionPipeline } from "@anamnesis/protocol";
-import type { InstallationContext, RecallTransportInput } from "@anamnesis/core";
-import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcCommitParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
+import type { InstallationContext } from "@anamnesis/core";
+import type { RpcPolicySetParams, RpcPolicyRevokeParams, RpcRecallParams, RpcProjectionParams, RpcReportOutcomeParams, RpcEmbeddingRecoverParams, RpcEmbeddingRequeueParams } from "@anamnesis/protocol";
 import { RPC_LIMITS, RPC_METHODS, RpcRememberParams, type RpcCapabilities, type RpcCommittedResult, type RpcRememberBatchResult, type RpcExtractionPacing, type RpcStatusResult, type RpcWorkersStatus } from "@anamnesis/protocol";
 import { EXTRACTION_PACING_DEFAULTS, hasCode, identityOwners, loadProviderConfig, syncDirectory, type ExtractionPacingConfig, type Installation } from "./config.ts";
 import { Uploads, type UploadLifecycle } from "./objects.ts";
@@ -30,7 +30,7 @@ import { canonical, sha256 } from "./archive-manifest.ts";
 
 function digest(params: RpcRememberParams): string { return sha256(canonical({ digest_version: 1, params })); }
 
-export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
+export const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
 type StoredEpisode = {
   id: string; schema: string; time_value: string; time_precision: string;
   content: string; mass: number; properties: string;
@@ -136,7 +136,7 @@ export class Runtime {
       materializationStatePath: join(installation.root, "materialization-state.json"), audit: (event, fields) => logEvent("info", event, fields) });
     this.extraction = extractionEnabled && config.extractionProvider ? new ExtractionScheduler(this.engine, { provider: config.extractionProvider, gate: this.gate,
       gateThreshold: this.gate ? this.gateThreshold : undefined, scope: this.scope, maxInFlight: pacing.maxInFlight,
-      context: Object.freeze({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() }),
+      context: Object.freeze({ principal: "installation", client_binding: randomUUID() }),
       // A settled pipeline may have materialized Facts, and Facts are the embedding lane's input (D56): wake both lanes.
       read: (query, params) => this.read(query, params), wake: () => { this.wakeExtraction(); this.wakeEmbedding(); } }) : undefined;
     this.identityRuntime = new IdentityRuntime({ engine: this.engine, provider: config.extractionProvider, owners: identityOwners(),
@@ -405,7 +405,7 @@ export class Runtime {
       try { outbox = (await runtimeTimed("engine.status", () => this.engine.status())).pendingOutbox; }
       catch (error) { if (!storageUnavailable(error)) throw error; this.markUnavailable(); }
     }
-    return { version: 1, state: stopping ? "stopping" : this.available ? "ready" : "degraded",
+    return { version: 2, state: stopping ? "stopping" : this.available ? "ready" : "degraded",
       storage: this.available ? "available" : "unavailable", data_incarnation: this.installation.incarnation,
       fs_epoch: this.installation.epoch, queue: { pending, capacity: RPC_LIMITS.queued_requests },
       outbox_pending: outbox, capabilities: this.capabilities, workers: this.workers(outbox) };
@@ -482,17 +482,9 @@ export class Runtime {
     await this.requireStorage();
     return this.engine.projection(params, context);
   }
-  async commit(params: RpcCommitParams, context: InstallationContext) {
+  async reportOutcome(params: RpcReportOutcomeParams, context: InstallationContext) {
     await this.requireStorage();
-    return this.engine.commitReceipt(params, context);
-  }
-  async recordRecallTransport(input: RecallTransportInput, context: InstallationContext) {
-    await this.requireStorage();
-    return this.engine.recordRecallTransport(input, context);
-  }
-  async exposeRecall(recallId: string, context: InstallationContext) {
-    await this.requireStorage();
-    return this.engine.exposeRecall(recallId, context);
+    return this.engine.reportOutcome(params, context);
   }
   async recoverEmbedding(params: RpcEmbeddingRecoverParams, context: InstallationContext) {
     await this.requireStorage();

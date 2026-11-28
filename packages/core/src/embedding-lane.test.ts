@@ -17,7 +17,7 @@ const password = process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"];
 if (!uri || !password) throw new Error("ANAMNESIS_TEST_NEO4J_URI and ANAMNESIS_TEST_NEO4J_PASSWORD are required");
 setDefaultTimeout(120_000);
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const profile = EmbeddingProfile.parse({
   model: "embedding-lane-fixture", model_incarnation: "c".repeat(64), dimensions: 2,
   document_prefix: "", query_prefix: "", max_input_bytes: 8192,

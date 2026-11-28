@@ -11,7 +11,7 @@ import type { InstallationContext } from "@anamnesis/core";
 
 const IMAGE_DIGEST = NEO4J_IMAGE.slice("neo4j@".length);
 const compatibility: ArchiveCompatibility = { schema_versions: ["anamnesis.storage/1"], neo4j_versions: [NEO4J_VERSION], neo4j_image_digests: [IMAGE_DIGEST], episode_digest_version_ceiling: 2 };
-const context = (): InstallationContext => ({ principal: "installation", commit_mode: "auto", client_binding: randomUUID() });
+const context = (): InstallationContext => ({ principal: "installation", client_binding: randomUUID() });
 const configBytes = () => Buffer.from(JSON.stringify({ uri: process.env["ANAMNESIS_NEO4J_URI"] ?? "", user: process.env["ANAMNESIS_NEO4J_USER"] ?? "neo4j", database: process.env["ANAMNESIS_NEO4J_DATABASE"] ?? "neo4j" }));
 
 async function uniqueOperation(): Promise<string> { const value = randomUUID(); return `${value.slice(0, 14)}7${value.slice(15, 19)}8${value.slice(20)}`; }

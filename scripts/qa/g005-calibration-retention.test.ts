@@ -41,7 +41,7 @@ test("G005 calibration and bounded scale execute through authenticated Node/UDS"
   }
 
   const timings: number[] = [];
-  const client = await RpcClient.connect(socket, token, "receipt", event => {
+  const client = await RpcClient.connect(socket, token, event => {
     if (event.event === "response" && typeof event.elapsedMs === "number") timings.push(event.elapsedMs);
   });
   try {

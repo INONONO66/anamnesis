@@ -3,7 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "./digest.ts";
 import { receiptTime, ReceiptError } from "./receipts.ts";
 
-export interface InstallationContext { readonly principal: "installation"; readonly commit_mode: "auto" | "receipt"; readonly client_binding?: string }
+export interface InstallationContext { readonly principal: "installation"; readonly client_binding?: string }
 export const PolicyEvent = RpcPolicySetParams.extend({
   action: z.enum(["deny", "revoke"]), principal: z.literal("installation"),
   revision: receiptTime.positive(), created_at: receiptTime,

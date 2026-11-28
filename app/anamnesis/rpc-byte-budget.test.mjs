@@ -11,7 +11,7 @@ const M = 1024 * 1024, F = M + 4, S = 4100;
 const caps = { general: 256 * (F + S), control: 8 * (F + S), ingress: 64 * (S + 4096) };
 const connectionCaps = { general: 16 * (F + S), control: 2 * (F + S), ingress: S + 4096 };
 const zero = { general: 0, control: 0, ingress: 0 };
-const hello = { token: 'byte-token', client: 'byte-fixture', version: 1, commit_mode: 'receipt' };
+const hello = { token: 'byte-token', client: 'byte-fixture', version: 2 };
 function frame(method, id, params = {}, size) {
   let body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
   if (size) body = Buffer.concat([body, Buffer.alloc(size - body.length, 32)]);

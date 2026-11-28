@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 import { connect } from 'node:net';
 import neo4j from 'neo4j-driver';
 import { Engine } from '../../packages/core/src/engine.ts';
-const context = { principal:'installation', commit_mode:'receipt' };
+const context = { principal:'installation' };
 const id = n => `01900000-0000-7000-8000-${n.toString(16).padStart(12,'0')}`;
 const output = process.env.G004_MAINTENANCE_OUTPUT;
 const save = (name, data) => writeFile(join(output,name), JSON.stringify(data,null,2));
@@ -32,7 +32,7 @@ async function runtimeIngestion(options,query) {
     socket.on('error',fail);socket.on('close',()=>fail(new Error('UDS closed')));
     socket.on('data',bytes=>{buffer=Buffer.concat([buffer,bytes]);while(buffer.length>=4&&buffer.length>=buffer.readUInt32BE()+4){const size=buffer.readUInt32BE(),reply=JSON.parse(buffer.subarray(4,size+4));buffer=buffer.subarray(size+4);const waiter=waiting.get(reply.id);if(!waiter)return fail(new Error('unexpected RPC id'));waiting.delete(reply.id);waiter.resolve(reply);}});
     const request=(method,params={})=>new Promise((resolve,reject)=>{const n=++sequence,timer=setTimeout(()=>{waiting.delete(n);reject(new Error('RPC timeout'));},15000);waiting.set(n,{resolve:value=>{clearTimeout(timer);resolve(value);},reject:error=>{clearTimeout(timer);reject(error);}});const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',id:n,method,params})),header=Buffer.alloc(4);header.writeUInt32BE(body.length);socket.write(Buffer.concat([header,body]));});
-    assert.ok((await request('hello',{version:1,client:'g004-maintenance',token:'maintenance-owned-token',commit_mode:'receipt'})).result);
+    assert.ok((await request('hello',{version: 2,client:'g004-maintenance',token:'maintenance-owned-token'})).result);
     const responses=[];
     for(const [record,day] of [['uds-a',6],['uds-c',8],['uds-b',7]]) {const reply=await request('remember',{episode:episode(record,day),source_revision:record,expected_previous_revision_key:null});assert.ok(reply.result,JSON.stringify(reply));responses.push(reply);}
     const links=await query('MATCH (a:Episode)-[l:NEXT_EPISODE]->(b:Episode) WHERE a.origin_record STARTS WITH "uds-" AND b.origin_record STARTS WITH "uds-" RETURN a.origin_record AS a,b.origin_record AS b,l.id AS id ORDER BY a');
@@ -88,9 +88,9 @@ test('physical writes, coverage and bounded repair', {timeout:150000}, async () 
     await engine.store.rebuildTopology();
     await seam('topology rebuild',()=>compare('topology-rebuild'));
     if (process.env.G004_MAINTENANCE_RED) { await save('red-seams.json',failures); assert.deepEqual(failures,[]); return; }
-    const receipt = await engine.issueReceipt({recall_id:id(900),primary_ids:[a.id,b.id,c.id]},context);
-    await engine.commitReceipt({operation_id:id(901),recall_id:receipt.recall_id,adopted:[a.id],reward:1},context);
-    const originals = () => query('MATCH (n) WHERE n:Episode OR n:Hit OR n:RecallReceipt RETURN labels(n) AS labels,properties(n) AS properties ORDER BY coalesce(n.id,n.recall_id)');
+    const receipt = await engine.recallHybrid({query:a.id,limit:1},context);
+    await engine.reportOutcome({idempotency_key:id(901),usage_id:receipt.usage_id,reward:1},context);
+    const originals = () => query('MATCH (n) WHERE n:Episode OR n:Hit OR n:Usage OR n:UsageOutcome RETURN labels(n) AS labels,properties(n) AS properties ORDER BY coalesce(n.id,n.usage_id)');
     const immutable = await originals();
     const snapshot = {identity:await identity(),coverage:await coverage(),state:await state()};
     assert.equal((await engine.remember(episode('b',2))).created,false);

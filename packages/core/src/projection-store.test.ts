@@ -11,7 +11,7 @@ import type { ExtractionProviderInput } from "./extraction.ts";
 
 const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
 if (!uri || !password) throw new Error("owned Neo4j runner required");
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const now = Date.UTC(2030, 0, 1);
 const root = await mkdtemp(join(tmpdir(), "anamnesis-projection-store-"));
 const extractionProvider = {

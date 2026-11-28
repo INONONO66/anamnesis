@@ -15,7 +15,7 @@ if (!uri || !password) throw new Error("Isolated test database credentials requi
 const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true });
 const root = await mkdtemp(join(tmpdir(), "identity-"));
 const engine = new Engine({ uri, password, objectsRoot: root });
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 let minute = 0;
 const at = () => new Date(Date.UTC(2026, 8, 1) + ++minute * 60_000).toISOString().replace(".000", "");
 const remember = (source: string, session: string, actor: string, content: string, properties: MemoryElement["properties"] = {}, role: "user" | "assistant" | "tool" = "user") =>

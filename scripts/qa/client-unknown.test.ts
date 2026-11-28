@@ -14,7 +14,7 @@ test("lost response rejects as machine-readable UNKNOWN without automatic retry"
   const server = createServer(socket => {
     const frames = new Frames(bytes => {
       const request = JSON.parse(bytes.toString());
-      if (request.method === 'hello') socket.write(encode({jsonrpc:'2.0',id:request.id,method:'hello',structure_revision:null,policy_revision:null,server_time:1,result:{version:1,principal:'installation',commit_mode:'receipt',data_incarnation:randomUUID(),fs_epoch:randomUUID(),capabilities,limits:{frame_bytes:RPC_LIMITS.frame_bytes,chunk_bytes:RPC_LIMITS.chunk_bytes,object_bytes:RPC_LIMITS.object_bytes,content_bytes:RPC_LIMITS.content_bytes}}}));
+      if (request.method === 'hello') socket.write(encode({jsonrpc:'2.0',id:request.id,method:'hello',structure_revision:null,policy_revision:null,server_time:1,result:{version: 2,principal:'installation',data_incarnation:randomUUID(),fs_epoch:randomUUID(),capabilities,limits:{frame_bytes:RPC_LIMITS.frame_bytes,chunk_bytes:RPC_LIMITS.chunk_bytes,object_bytes:RPC_LIMITS.object_bytes,content_bytes:RPC_LIMITS.content_bytes}}}));
       else { remembers++; socket.destroy(); }
       return true;
     });

@@ -16,7 +16,7 @@ import type { ExtractionProviderInput } from "../../packages/core/src/extraction
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env["ANAMNESIS_G10_SURFACE_OUT"]
   ?? "/Users/ino/Develop/anamnesis/.omo/evidence/ulw/01a11b8c-9f0b-71f3-ac0c-cb1048614a4e/G005-g10-projection/surface";
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const now = Date.UTC(2030, 0, 1);
 // Same fixture as packages/core/src/projection-store.test.ts; that file seeds at module scope, so importing it would re-run its tests here.
 const fixtures = [
@@ -123,7 +123,7 @@ test("ops projection write renders the valid Facts, rewrites identical bytes and
     expect(diff).toEqual({ code: 0, stdout: "" });
 
     const RpcClient = (await import(`${ROOT}dist/anamnesis-client.mjs`)).RpcClient;
-    client = await RpcClient.connect(`${root}/anamnesis.sock`, token, "receipt");
+    client = await RpcClient.connect(`${root}/anamnesis.sock`, token);
     const denied = sources[4]!, deniedFacts = [facts[4]!];
     const policy = await client!.request("policy.set", { policy_id: uuidv7(), selector: { episode_id: denied }, scope: "content" });
     const three = await ops(dirs[2]!), third = await contents(dirs[2]!);

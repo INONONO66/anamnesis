@@ -9,7 +9,7 @@ import { extractionBodyDigest } from "@anamnesis/protocol";
 import { Engine } from "./engine.ts";
 import { canonicalJson } from "./store/digest.ts";
 
-const context = { principal: "installation", commit_mode: "receipt" } as const;
+const context = { principal: "installation" } as const;
 const owner = uuidv7();
 const id = (n: number) => `${owner.slice(0, 13)}-7${owner.slice(15, 18)}-${owner.slice(19, 23)}-${owner.slice(24, 31)}${n.toString(16).padStart(5, "0")}`;
 const size = 100_000;

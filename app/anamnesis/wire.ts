@@ -1,5 +1,5 @@
 import { TextDecoder } from "node:util";
-import { RPC_LIMITS, RPC_METHODS, RpcErrorCode, RpcErrorResponse, RpcRequest, RpcResponse, type RpcErrorCode as ErrorCode } from "@anamnesis/protocol";
+import { RPC_LIMITS, RPC_VERSION, RPC_METHODS, RpcErrorCode, RpcErrorResponse, RpcRequest, RpcResponse, type RpcErrorCode as ErrorCode } from "@anamnesis/protocol";
 
 export class RpcFault extends Error {
   constructor(readonly code: ErrorCode, message: string, readonly retryable = false) { super(message); }
@@ -50,7 +50,7 @@ export function decodeRequest(bytes: Buffer): RpcRequest {
   if (value && typeof value === "object" && "method" in value) {
     const id = "id" in value ? value.id : null;
     if (typeof value.method === "string" && !RPC_METHODS.some(method => method === value.method)) throw new FrameFault("unsupported_method", "method is not implemented by this ingest-only runtime", id);
-    if (value.method === "hello" && "params" in value && value.params && typeof value.params === "object" && "version" in value.params && value.params.version !== 1) throw new FrameFault("unsupported_version", "unsupported RPC version", id);
+    if (value.method === "hello" && "params" in value && value.params && typeof value.params === "object" && "version" in value.params && value.params.version !== RPC_VERSION) throw new FrameFault("unsupported_version", "unsupported RPC version", id);
     throw new FrameFault("invalid_params", "request parameters do not match the RPC contract", id);
   }
   throw new RpcFault("invalid_request", "invalid RPC request envelope");

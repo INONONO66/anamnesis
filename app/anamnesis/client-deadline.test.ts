@@ -12,7 +12,7 @@ import { Frames, encode } from "./wire.ts";
 
 type TimingEvent = Parameters<TimingSink>[0];
 // A literal rather than runtime.ts's constant: importing runtime.ts would load the Neo4j-backed graph into a pure test.
-const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, commit: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
+const capabilities: RpcCapabilities = { methods: [...RPC_METHODS], recall: true, policy: true, extraction: false, embeddings: false, projection: true, writer_fence: "database" };
 const remember = { episode: { schema: "anamnesis.original-message/1", content: "slow", time: { value: "2026-09-09T00:00:00Z", precision: "second" }, origin: { source: "test", session: "s", actor: "a", record: "r" }, mass: 1 }, source_revision: "v1", expected_previous_revision_key: null } as const;
 
 test("a reply that never arrives rejects at the deadline as UNKNOWN and closes the transport", async () => {
@@ -21,7 +21,7 @@ test("a reply that never arrives rejects at the deadline as UNKNOWN and closes t
   const server = createServer(socket => {
     const frames = new Frames(bytes => {
       const request = JSON.parse(bytes.toString("utf8"));
-      if (request.method === "hello") socket.write(encode({ jsonrpc: "2.0", id: request.id, method: "hello", structure_revision: null, policy_revision: null, server_time: 1, result: { version: 1, principal: "installation", commit_mode: "receipt", data_incarnation: randomUUID(), fs_epoch: randomUUID(), capabilities, limits: { frame_bytes: RPC_LIMITS.frame_bytes, chunk_bytes: RPC_LIMITS.chunk_bytes, object_bytes: RPC_LIMITS.object_bytes, content_bytes: RPC_LIMITS.content_bytes } } }));
+      if (request.method === "hello") socket.write(encode({ jsonrpc: "2.0", id: request.id, method: "hello", structure_revision: null, policy_revision: null, server_time: 1, result: { version: 2, principal: "installation", data_incarnation: randomUUID(), fs_epoch: randomUUID(), capabilities, limits: { frame_bytes: RPC_LIMITS.frame_bytes, chunk_bytes: RPC_LIMITS.chunk_bytes, object_bytes: RPC_LIMITS.object_bytes, content_bytes: RPC_LIMITS.content_bytes } } }));
       return true;
     });
     socket.on("data", (bytes: Buffer) => frames.push(bytes));
@@ -31,7 +31,7 @@ test("a reply that never arrives rejects at the deadline as UNKNOWN and closes t
   try {
     const listening = once(server, "listening", { signal: AbortSignal.timeout(3000) });
     server.listen(join(root, "socket")); await listening;
-    client = await RpcClient.connect(join(root, "socket"), "token", "receipt", event => events.push(event));
+    client = await RpcClient.connect(join(root, "socket"), "token", event => events.push(event));
     jest.useFakeTimers();
     const outcome = client.request("remember", remember).then(() => null, (error: Error & { code: string; retryable: boolean }) => error);
     jest.advanceTimersByTime(120_000);

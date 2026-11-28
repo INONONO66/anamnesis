@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +13,7 @@ import { renderContext } from "./recall.ts";
 
 const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
 if (!uri || !password) throw new Error("owned Neo4j runner required");
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const now = Date.UTC(2030, 0, 1), query = "windowvectorprobe";
 const content = "The operator prefers violet themes.";
 const root = await mkdtemp(join(tmpdir(), "anamnesis-recall-window-"));
@@ -102,9 +101,8 @@ test("default Fact recall delivers two same-session Episodes before and after it
   expect(result.results).toHaveLength(1);
   expect(result.diagnostics).toMatchObject({ pipeline: "derived-hybrid-v1", channels_used: ["vector"] });
   expectWindow(result, [episodeId(2), episodeId(1)], [episodeId(4), episodeId(5)]);
-  const receipt = await engine.getReceipt(result.recall_id);
-  expect(receipt?.serving?.response).toEqual(result);
-  expect(receipt?.serving?.context_digest).toBe(createHash("sha256").update(result.context_text).digest("hex"));
+  const usage = (await admin.executeQuery("MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS selection", { id: result.usage_id })).records[0]!;
+  expect(JSON.parse(usage.get("selection"))).toEqual(result.results.map(({ id, sources }) => ({ id, sources })));
   // D56: the served Fact owns the vector; no Episode is embedded and no vector names an Episode.
   const count = async (cypher: string, params: Record<string, string> = {}) =>
     (await admin.executeQuery(cypher, params)).records[0]?.get("n") as number;
@@ -134,9 +132,8 @@ test("the byte budget trims a Fact window to the nearest two companions", async 
   expectWindow(result, [episodeId(2)], [episodeId(4)]);
   expect(result.used_budget).toBe(limit);
   expect(result.diagnostics.skipped_bundles).toBe(0);
-  const receipt = await engine.getReceipt(result.recall_id);
-  expect(receipt?.serving?.response).toEqual(result);
-  expect(receipt?.serving?.result_digest).toBe(extractionBodyDigest({ results: result.results, companions: result.companions }));
+  const usage = (await admin.executeQuery("MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS selection", { id: result.usage_id })).records[0]!;
+  expect(JSON.parse(usage.get("selection"))).toEqual(result.results.map(({ id, sources }) => ({ id, sources })));
 }, 120000);
 
 test("window zero keeps the Fact source attribution without window companions", async () => {
