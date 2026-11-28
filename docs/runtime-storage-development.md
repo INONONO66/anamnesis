@@ -1,8 +1,10 @@
 # Runtime storage development
 
-This page describes the current storage increment, not a complete experimental
-daemon or production qualification. Normative memory behavior is in docs/00–10;
-GitHub issue #186 tracks implementation and its remaining gates.
+This page is a developer note on storage tests and the storage contract in
+`packages/core`. It isn't a production qualification. The contracts are in
+docs/00 to 10, the daemon is described in the
+[app README](../app/anamnesis/README.md), and GitHub issue #186 tracks
+remaining work.
 
 ## Test isolation
 
@@ -22,7 +24,8 @@ It removes only its owned container and volumes in cleanup.
 
 Evidence uses a fresh directory beneath the supplied evidence root and records
 commands, the secret-redacted endpoint, raw output, process results, and cleanup.
-The default test selection includes both `packages` and `scripts/qa`.
+The default test selection is `packages`, `scripts/qa`,
+`app/anamnesis/runtime.test.ts` and `app/anamnesis/runtime-authority.test.ts`.
 Individual integration files must also be run through that environment:
 
 ```sh
@@ -43,7 +46,8 @@ Explicit null pins the first revision; a hash pins its expected predecessor.
 A conflicting head rejects with `stale_revision`. An already stored revision
 is checked for identical content before a current-head comparison, so retries
 of older revisions remain idempotent. Omitting the field retains the legacy
-append interface; the future daemon must enforce its stricter RPC contract.
+append interface in `Engine`; the daemon's `remember` RPC passes the field
+through from the request.
 
 New writes carry `digest_format: rfc8785-v1`. Unmarked stored digests retain
 legacy insertion-order serialization. Retrying a legacy record is verified
@@ -62,8 +66,7 @@ verification and reconstruction; rebuilding unmarked historical topology
 refuses rather than guessing missing parent information.
 
 Only NEXT_EPISODE cache links are rebuilt. Original Episodes and revision
-history are preserved. The future daemon must also maintain its serving
-revision and ConductingArc contracts when those layers are implemented.
+history are preserved.
 
 ## Numeric diagnostics
 
@@ -75,5 +78,7 @@ are denominators, not normalized stochastic-row sums.
 Role-only weights, uniform dangling redistribution, sorted accumulation,
 finite options, duplicate-node rejection, and independently calculated small
 graphs are covered by tests. This is not a GDS execution result or evidence
-that graph retrieval improves real tasks. Runtime node/arc budgets and
-the same-envelope GDS gate still belong to the graph-integration milestone.
+that graph retrieval improves real tasks. Online recall runs this solver
+over at most 1,024 seed-adjacent arcs; the 2,000-node / 20,000-link envelope
+and the same-envelope GDS gate are roadmap targets
+([09-roadmap](09-roadmap.md#where-the-code-is-today)).

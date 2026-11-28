@@ -1,9 +1,12 @@
 # The graphiti Family — Analysis and What We Borrowed
 
-> Non-normative background (written 2026-08, anamnesis-side statements
-> corrected 2026-09 to match the finalized design). The normative design is
-> [docs/00–10](../00-overview.md); where a "borrowing decision" here differs
-> from it, the normative docs win.
+> **Non-normative, dated.** Written 2026-08; anamnesis-side statements were
+> corrected 2026-09 to match the design as finalized that month and have not
+> been kept current since. [docs/00 to 10](../00-overview.md) are the
+> contracts, and the code wins over this page. "Borrowing decisions" here are
+> design intent from that date: dreaming, Communities and the envelope they
+> mention aren't in the code
+> ([09-roadmap](../09-roadmap.md#where-the-code-is-today)).
 
 > Analyzed (2026-08-30, full read of code and ADRs):
 > - [getzep/graphiti](https://github.com/getzep/graphiti) — the original. Zep's core engine.

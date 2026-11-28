@@ -1,5 +1,10 @@
 # CPU embedding runtime probe: one host, one configuration
 
+> **Non-normative, dated 2026-09-07.** A one-off probe of one host on that
+> date. [docs/00 to 10](../00-overview.md) are the contracts, and the code
+> wins over this page. Provider setup for a deployment is in
+> [deploy](../deploy.md).
+
 This probe checks how the pinned Qwen3-Embedding-0.6B Q8_0 artifact behaves
 under llama.cpp on a CPU-only development host: what a normal request returns,
 what an oversized request returns, and roughly how long a single request takes
