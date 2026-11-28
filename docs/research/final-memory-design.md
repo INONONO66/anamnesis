@@ -425,8 +425,8 @@ the text lands; each step depends on the one before it for vocabulary.
    `adjudication.review`, `adjudication.correct`, `embedding.retry`,
    `embedding.skip`, `embedding.cancel`, and the `gen` action `qualify`; rework
    L1/L1b/R2/L4/W1-W5; add the embedding state machines and error classes;
-   classify the new methods as control-only. Retry validation and spool replay
-   dispatch on the stored row's version, an absent value reads as version 1,
+   classify the new methods as control-only. Retry validation dispatches
+   on the stored row's version, an absent value reads as version 1,
    and a legacy row can never gain lineage in place.
 5. **Time and forgetting.** In [`docs/03-time.md`](../03-time.md) add the
    operator adjudication repair after the existing replacement protocol and

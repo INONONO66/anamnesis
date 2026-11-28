@@ -4,11 +4,11 @@ import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { connect as connectSocket } from 'node:net';
 import { createInterface } from 'node:readline';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-const bundles = resolve(process.env.RUNTIME_FAIR_BUNDLE_ROOT ?? '.omo/evidence/runtime-fair-drain');
-const { RpcClient } = await import(pathToFileURL(`${bundles}/page-client.mjs`));
+const bundles = resolve(process.env.RUNTIME_FAIR_BUNDLE_ROOT ?? '.omo/evidence/runtime-fair');
+const { RpcClient } = await import(pathToFileURL(`${bundles}/fair-client.mjs`));
 function event(signals, name, count = 1) {
   return new Promise((resolve, reject) => {
     const values = [];
@@ -39,25 +39,23 @@ async function fixture(run, park = false) {
     await rm(root, { recursive: true, force: true });
   }
 }
-test('daemon returns control before handling a complete fixture drain cohort', { timeout: 20000 }, () => fixture(async ({ connect, recover, signals }) => {
+test('daemon returns control before handling a complete embedding cohort', { timeout: 20000 }, () => fixture(async ({ connect, recover, signals }) => {
   const client = await connect(); await recover();
-  const control = event(signals, 'control-return'); const settled = event(signals, 'drain_settled');
+  const control = event(signals, 'control-return'); const settled = event(signals, 'fixture-settled');
   const response = client.request('status', {});
   const observed = await control; await response;
-  assert.ok(observed.handled < 12, `control held until all ${observed.handled} fixture drain entries were handled`);
+  assert.ok(observed.handled < 12, `control held until all ${observed.handled} embedding entries were handled`);
   await settled;
-  const status = await client.request('status', {});
-  assert.equal(status.spool.pending, 12); assert.equal(status.spool.quarantined, 12);
 }));
 test('saturated foreground dispatch cannot starve serialized background turns', { timeout: 20000 }, () => fixture(async ({ child, signals, connect, recover }) => {
   const clients = []; for (let i = 0; i < 16; i++) clients.push(await connect());
   await recover();
   const parked = event(signals, 'parked');
   await clients[0].request('status', {}); await parked;
-  // All 256 foreground slots are admitted while the real page boundary is held.
+  // All 256 foreground slots are admitted while the first embedding turn is held.
   const admitted = event(signals, 'admitted', 256);
   const controls = event(signals, 'control-return', 256);
-  const settled = event(signals, 'drain_settled');
+  const settled = event(signals, 'fixture-settled');
   const responses = clients.flatMap(client => Array.from({ length: 16 }, () => client.request('status', {})));
   await admitted; child.send('release');
   const observed = await controls; await Promise.all(responses); await settled;
@@ -99,14 +97,13 @@ test('authenticated control retains headroom; pre-hello status cannot spend it',
     assert.equal(values.filter(value => value.error.data.code === 'resource_exhausted').length, 2);
   } finally { socket.destroy(); }
 }, true));
-test('shutdown cancels queued drain continuations without consuming admitted journal work', { timeout: 20000 }, () => fixture(async ({ root, child, signals, connect, recover }) => {
+test('shutdown cancels queued background continuations', { timeout: 20000 }, () => fixture(async ({ child, signals, connect, recover }) => {
   const client = await connect(); await recover();
   const parked = event(signals, 'parked'); await client.request('status', {}); await parked;
-  const before = await readFile(root + '/spool/spool.journal');
   const exited = event(signals, 'exit');
   const admitted = event(signals, 'admitted'); const response = client.request('shutdown', {});
+  let settled = false; signals.once('fixture-settled', () => { settled = true; });
   await admitted; child.send('release');
   assert.equal((await response).state, 'stopping'); assert.equal((await exited).code, 0);
-  assert.deepEqual(await readFile(root + '/spool/spool.journal'), before);
-  await assert.rejects(readFile(root + '/spool/spool.done'), { code: 'ENOENT' });
+  assert.equal(settled, false);
 }, true));

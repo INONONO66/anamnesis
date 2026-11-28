@@ -13,7 +13,7 @@ import { Engine } from "../../packages/core/src/engine.ts";
 import { OpenAiChatExtractionProvider } from "../../packages/core/src/openai-extraction-provider.ts";
 import { OpenAiEmbeddingProvider } from "../../packages/core/src/openai-embedding-provider.ts";
 import { Generation } from "../../packages/protocol/src/extraction.ts";
-import { RpcRememberParams, type RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
+import { RpcRememberParams } from "../../packages/protocol/src/rpc.ts";
 import { maskSecrets } from "../../app/anamnesis/secrets.ts";
 import type { ExtractionPipeline } from "../../packages/protocol/src/extraction-audit.ts";
 import { loadProviderConfig } from "../../app/anamnesis/config.ts";
@@ -75,7 +75,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
   const pacer = createLlmPacer(llmMinIntervalMs);
   const summary: Record<string, unknown> = { status: "running", stage: "setup", episodes: 0, facts_active: 0, vectors: 0,
     llm_min_interval_ms: llmMinIntervalMs,
-    embedding_channel: embeddingEnabled ? "qwen3-embedding-0.6b via llama-server" : "disabled", recall: [], crash_drain: null, model: "claude-haiku-4-5", provider_errors: errors, durations, deviations };
+    embedding_channel: embeddingEnabled ? "qwen3-embedding-0.6b via llama-server" : "disabled", recall: [], storage_retry: null, model: "claude-haiku-4-5", provider_errors: errors, durations, deviations };
   // Bind-mounted roots must live under $HOME (colima/virtiofs shares only the home directory).
   const qaParent = join(process.env["HOME"] ?? "/tmp", ".cache", "anamnesis-qa"); await mkdir(qaParent, { recursive: true, mode: 0o700 });
   const parent = await mkdtemp(join(qaParent, "ana-g4-")), root = join(parent, "runtime"), secretRoot = await mkdtemp(join(qaParent, "ana-g4-key-"));
@@ -100,16 +100,6 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
   const ops = async (...args: string[]) => command("node", [resolve("dist/anamnesis-ops.mjs"), ...args]);
   const verify = async () => {
     const value = JSON.parse(await ops("verify")); assert.equal(value.ok, true); await log("verify", value); return value;
-  };
-  const waitForEvent = (event: "drain_settled", timeoutMs: number): Promise<number> => {
-    const lines = daemonLines; assert.ok(lines);
-    return new Promise((resolve, reject) => {
-      const cleanup = () => { clearTimeout(timer); lines.off("line", onLine); lines.off("close", onClose); };
-      const onLine = (line: string) => { if (line === JSON.stringify({ event })) { cleanup(); resolve(Date.now()); } };
-      const onClose = () => { cleanup(); reject(new Error("daemon_closed_before_settle")); };
-      const timer = setTimeout(() => { cleanup(); reject(new Error("daemon_settle_timeout")); }, timeoutMs);
-      lines.on("line", onLine); lines.once("close", onClose);
-    });
   };
   const startDaemon = async () => {
     daemon = spawn("node", [resolve("dist/anamnesis-ops.mjs"), "foreground"], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -159,7 +149,6 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
       rule: "Sorted Claude JSONL files and physical lines; first user/assistant text block per record, 40-1200 UTF-8 bytes; preserve timestamp and actor; origin.record=file:line; mass=1; stop at 200 total admitted Episodes." };
     summary.episode_source = episodeSource;
     const converted: RpcRememberParams[] = [];
-    deviations.push("The first transcript Episode is admitted metadata-free so the crash-drain replay is an exact legacy retry (explicit lineage cannot spool offline).");
     const fallback = process.env.ANAMNESIS_E2E_FALLBACK_PROJECT ?? join(homedir(), ".claude/projects/-Users-ino-Develop-token-hub");
     const fallbackCopy = join(parent, "fallback-copy"); await cp(fallback, fallbackCopy, { recursive: true });
     for (const file of (await readdir(fallbackCopy)).filter(file => file.endsWith(".jsonl")).sort()) {
@@ -174,9 +163,7 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
         if (!content || content.length < 40 || Buffer.byteLength(content) > 1200 || !record.timestamp || !Number.isFinite(Date.parse(record.timestamp))) continue;
         if (maskSecrets(content).redactions > 0) continue;
         // Explicit lineage admission (D49): only version-2 Episodes are semantic-eligible; metadata-free imports stay pre-lineage and refuse Facts.
-        // The first transcript Episode stays metadata-free on purpose: it is the crash-drain replay source, and only an exact
-        // legacy retry may spool offline (explicit lineage needs the database; a v2 retry with different lineage fields is a revision_conflict).
-        const lineage = converted.length === 0 ? {} : { origin_role: actor, lineage_mode: "direct", parent_recall_ids: [] };
+        const lineage = { origin_role: actor, lineage_mode: "direct", parent_recall_ids: [] };
         const params = RpcRememberParams.parse({ episode: { schema: "anamnesis.original-message/1", content,
           time: { value: new Date(record.timestamp).toISOString(), precision: "second" },
           origin: { source: "claude-transcript", session: record.sessionId ?? file, actor, record: `${file}:${lineNumber}` }, mass: 1, properties: {} },
@@ -316,39 +303,23 @@ export async function runE2eReal(evidence = resolve(".omo/evidence/runtime-compl
     assert.equal(recall.length, 5);
     assert.ok(recall.some(result => result.kinds.includes("Fact") && result.ppr_used));
     if (embeddingProvider) { assert.ok(recall.every(result => result.channels.includes("vector") && result.vector_reason === "available")); }
-    summary.stage = "crash_drain";
+    summary.stage = "storage_retry";
     await engine.close(); engine = undefined; await startDaemon();
     const beforeVerify = await verify(), before = await snapshot();
     await command("docker", ["kill", "--signal", "SIGKILL", name]);
     const client = await connect();
-    let wake_status: RpcStatusResult | undefined, settled_status: RpcStatusResult | undefined, settle_latency_ms: number | undefined;
     try {
       assert.equal((await client.request("status", {})).storage, "unavailable");
       await assert.rejects(client.request("policy.set", { policy_id: uuidv7(), selector: { episode_id: episodes[0]! }, scope: "content" }), { code: "storage_unavailable" });
-      // Replay an already admitted delivery while offline: a real durable spool
-      // entry must drain idempotently, without changing Episode/generation counts.
-      assert.ok(converted[0], "crash replay needs a converted source receipt");
-      // converted[0] was admitted metadata-free, so this is an exact legacy retry: the only
-      // delivery shape the spool accepts offline, and it drains idempotently.
-      assert.equal("origin_role" in converted[0], false, "crash replay source must be metadata-free");
-      assert.equal((await client.request("remember", converted[0])).state, "spooled");
-      assert.ok((await client.request("status", {})).spool.pending > 0);
-      // Subscribe before restart/wake. Convert rejection to a handled outcome so
-      // an earlier Docker failure cannot leave an unobserved event promise.
-      const settled = waitForEvent("drain_settled", 60000).then(at => ({ at }), cause => ({ cause }));
+      assert.ok(converted[0]);
+      await assert.rejects(client.request("remember", converted[0]), { code: "storage_unavailable", retryable: true });
       await command("docker", ["start", name]); await ready();
-      const wakeAt = Date.now();
-      wake_status = await client.request("status", {}); await log("crash_wake_status", wake_status);
-      const event = await settled; if ("cause" in event) throw event.cause;
-      settle_latency_ms = event.at - wakeAt;
-      settled_status = await client.request("status", {}); await log("crash_settled_status", { ...settled_status, settle_latency_ms });
-      assert.equal(settled_status.storage, "available"); assert.equal(settled_status.spool.pending, 0);
-      assert.equal(settled_status.spool.blocked, 0); assert.equal(settled_status.spool.quarantined, 0);
+      assert.equal((await client.request("remember", converted[0])).created, false);
     } finally { await client.close(); }
     const afterVerify = await verify(), after = await snapshot(); assert.deepEqual(after, before);
     const vectorless = embeddingEnabled ? 0 : Number(after.episodes);
     assert.equal(beforeVerify.status.outbox_pending, vectorless); assert.equal(afterVerify.status.outbox_pending, vectorless);
-    summary.crash_drain = { before, after, equal: true, before_verify: beforeVerify, after_verify: afterVerify, wake_status, settled_status, settle_latency_ms, replay: "existing delivery idempotently spooled and drained", refused_code: "storage_unavailable" };
+    summary.storage_retry = { before, after, equal: true, before_verify: beforeVerify, after_verify: afterVerify, retry: "existing delivery returned as duplicate after storage recovered", refused_code: "storage_unavailable" };
     summary.status = "passed"; summary.stage = "complete"; summary.reported_model = provider.reportedModelIncarnation;
   } catch (error) {
     summary.status = "failed";

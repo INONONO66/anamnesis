@@ -340,6 +340,8 @@ the lattice and the validation all at once.
 
 ## D22 — Neo4j-down remember uses a bounded spool
 
+**Superseded by D61.**
+
 **Decision**: docs/02 §4, §9. Remember fsync-spools until the global
 capacity/free-space boundary, then returns retryable `resource_exhausted`;
 recall returns a diagnosed empty success.
@@ -1507,3 +1509,26 @@ two accounts of one person active in one room at the same time stay apart.
 The scan ignores policy because accounts are operator data; text sent to the
 judge passes extraction policy. Entity links and Person-aware extraction and
 recall remain later work.
+
+## D61 — Remember commits directly to Neo4j (2026-11-28)
+
+**Decision**: Remove the deferred ingestion queue and pre-commit delivery
+reservations. Neo4j commit is the acknowledgement boundary for `remember`
+and each delivery in `remember.batch`. Object uploads remain independent.
+
+**Reason**: No repository client produces lineage-free ingestion that uses
+the queue. The corpus loader already bypasses it by sending direct lineage.
+Production reported an empty queue on 2026-11-23. The Neo4j commit supplies
+durability, and Episode `revision_key` uniqueness plus stored-row digest
+comparison give idempotent retries without filesystem reservations.
+
+**Client contract**: Retry `storage_unavailable` with the same request. No
+failed write is accepted for later processing. If a batch fails after
+committing a prefix, that prefix remains committed. A committed exact retry
+returns `created: false`; a different body with the same key is refused.
+
+**Startup**: Ignore absent or empty legacy `spool/` and `deliveries/`
+directories. Refuse startup if the legacy spool is nonempty, with an error
+naming the directory. Preserve it for reconciliation rather than silently
+dropping acknowledged writes. Leftover delivery files are only pre-commit
+reservations and may be removed at startup with a log event.

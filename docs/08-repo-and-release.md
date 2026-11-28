@@ -33,7 +33,7 @@ anamnesis/
 │   │   ├── src/{element,link,hit,rpc}.ts
 │   │   ├── schemas/*.schema.json   # exported artifacts (committed)
 │   │   └── scripts/export-schemas.ts
-│   ├── core/                   # Neo4j schema, write path, idempotency, generations, objects/, spool (docs/01–02)
+│   ├── core/                   # Neo4j schema, write path, idempotency, generations, objects/ (docs/01–02)
 │   ├── dynamics/               # pure functions: R(t,S), S update, replay, utility U, CSR PPR, RRF, budget packing, ordering conventions (docs/04–06). No Neo4j dependency
 │   ├── recall/                 # candidates, seeds, envelope queries, policy filter, conflict bundles, assembly, receipts, degradation ladder (docs/05)
 │   ├── daemon/                 # anamnesisd: UDS JSON-RPC, write queue, Outbox worker, dreaming schedule

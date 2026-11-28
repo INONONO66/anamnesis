@@ -24,7 +24,7 @@ for offline analysis and as an accuracy baseline only.
 ```text
   Neo4j                                          ~/.anamnesis/
     ├─ originals: Episode · Hit ledger              ├─ objects/   payload bytes (content-addressed, part of the authority)
-    │             policy Episodes                   ├─ spool/     transient remember() queue while Neo4j is down
+    │             policy Episodes                   │
     ├─ control:   RecallReceipt (append-only)       └─ neo4j/     container volume
     │             InvalidationEvidence · Episode lineage properties
     │             adjudication + embedding records (append-only)
@@ -166,7 +166,7 @@ exists yet, and the gates that will produce one are in
 | Document | Question it answers |
 |---|---|
 | [01-storage](01-storage.md) | What is stored where — layers, elements, link lattice, generations, filesystem |
-| [02-daemon-and-pipelines](02-daemon-and-pipelines.md) | Who writes — single writer, RPC, revision, spool, extraction, policy RPCs and barrier, maintenance, dreaming, security boundary |
+| [02-daemon-and-pipelines](02-daemon-and-pipelines.md) | Who writes — single writer, RPC, revision, extraction, policy RPCs and barrier, maintenance, dreaming, security boundary |
 | [03-time](03-time.md) | Which world — snapshot(T), derived visibility, change vs correction, INVALIDATES |
 | [04-forgetting](04-forgetting.md) | How alive, how useful — m₀, S, Hit ledger, Episode attribution, commit protocol, outcome utility U |
 | [05-recall](05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → policy filter → conflict bundles → budget → assembly, receipts, degradation ladder |

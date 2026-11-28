@@ -6,7 +6,7 @@ import { createServer, connect } from 'node:net';
 import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, writeFileSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile, appendFile, rm, stat, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import neo4j from 'neo4j-driver';
 import { RpcClient } from '../../dist/anamnesis-client.mjs';
@@ -87,16 +87,10 @@ async function client(path=root+'/anamnesis.sock') {const c=await RpcClient.conn
 async function closeClients(){for(const c of clients)await c.close();clients.clear();}
 async function kill(){await closeClients();assert.equal((await daemon.stop()).signal,'SIGKILL');}
 function offline(){online=false;for(const socket of connections)socket.destroy();}
-async function recoverDrain(c) {
-  const settled=nextEvent(daemon,e=>e.event==='drain_settled');
-  online=true;await c.request('status',{});await settled;
-  return c.request('status',{});
-}
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const sha=value=>hash(JSON.stringify(value));
 const key=p=>{const o=p.episode.origin;return sha([sha([o.source,o.session,o.actor,o.record]),p.source_revision]);};
 const input=(record,content=`G002 ${record}`)=>({episode:{schema:'anamnesis.original-message/1',time:{value:'2026-09-09T00:00:00Z',precision:'second'},content,mass:1,properties:{},origin:{source:caseName,session:'s',actor:'a',record}},source_revision:'v1',expected_previous_revision_key:null});
-const identity=r=>({revision_key:r.revision_key,body_digest:r.body_digest,data_incarnation:r.data_incarnation});
 async function rows(expected) {
   const result=await driver.executeQuery('MATCH (e:Episode) WHERE e.origin_source=$source RETURN e.id AS id, e.revision_key AS revision, e.ingest_seq AS seq, e.payload_hash AS payload ORDER BY seq',{source:caseName});
   const values=result.records.map(r=>r.toObject());
@@ -158,10 +152,9 @@ const scenarios={
     const first=await c.request('remember',p);assert.equal(first.state,'committed');assert.equal(first.revision_key,key(p));
     const duplicate=await c.request('remember',p);assert.equal(duplicate.id,first.id);assert.equal(duplicate.ingest_seq,first.ingest_seq);assert.equal(duplicate.created,false);
     await assert.rejects(c.request('remember',{...p,episode:{...p.episode,content:'conflict'}}),{code:'revision_conflict'});
-    assert.equal((await c.request('ingest.status',{...identity(first),body_digest:'0'.repeat(64)})).state,'unknown');
-    assert.equal((await rows(1))[0].payload,payload_hash);checkpoint('uds-ingest',{first,duplicate,malformed:true,boundary:true,unknown:true});
+    assert.equal((await rows(1))[0].payload,payload_hash);checkpoint('uds-ingest',{first,duplicate,malformed:true,boundary:true});
   },
-  async 'object-spool-crashes'(){
+  async 'object-upload-crash'(){
     await start();let c=await client();const bytes=Buffer.from('incomplete upload');const sha256=hash(bytes);
     const begun=await c.request('object.begin',{sha256,size:bytes.length,media_type:'text/plain'});
     await c.request('object.chunk',{upload_id:begun.upload_id,seq:0,bytes_b64:bytes.subarray(0,3).toString('base64')});
@@ -169,42 +162,42 @@ const scenarios={
     assert.deepEqual(await readdir(root+'/uploads'),[]);
     await assert.rejects(c.request('object.commit',{upload_id:begun.upload_id}),{code:'upload_not_found'});
     await assert.rejects(stat(`${root}/objects/${sha256.slice(0,2)}/${sha256}.json`),{code:'ENOENT'});
-    const payload_hash=await upload(c);offline();const p={...input('durable'),payload_hash};const receipt=await c.request('remember',p);assert.equal(receipt.state,'spooled');
-    await kill();const journal=root+'/spool/spool.journal';const before=await readFile(journal);await appendFile(journal,Buffer.from([0,0,0]));
-    await start();c=await client();assert.deepEqual(await c.request('remember',p),receipt);assert.deepEqual(await readFile(journal),before);
-    assert.equal((await recoverDrain(c)).spool.pending,0);assert.equal((await c.request('ingest.status',identity(receipt))).state,'committed');await rows(1);
-    offline();const corrupt=await c.request('remember',input('corrupt'));await kill();
-    const data=await readFile(journal);data[data.length-1]^=1;await writeFile(journal,data);
-    await start();c=await client();assert.equal((await c.request('status',{})).spool.quarantined,1);
-    assert.equal((await c.request('ingest.status',identity(corrupt))).state,'quarantined');
-    await assert.rejects(c.request('remember',input('after-corruption')),{code:'spool_corrupt'});
-    checkpoint('object-spool-crashes',{receipt,corrupt,partialUploadAbsent:true,tornSuffixTruncated:true,quarantined:true});
+    const payload_hash=await upload(c);await kill();await start();c=await client();
+    const receipt=await c.request('remember',{...input('durable'),payload_hash});
+    assert.equal(receipt.created,true);assert.equal((await rows(1))[0].payload,payload_hash);
+    checkpoint('object-upload-crash',{receipt,partialUploadAbsent:true});
   },
-  async 'outage-drain-50'(){
-    await start();let c=await client();const before=await c.request('status',{});offline();const queued=[];
-    for(let i=0;i<50;i++){const params=input(`offline-${i}`);const receipt=await c.request('remember',params);assert.equal(receipt.state,'spooled');assert.equal(receipt.spool_seq,i+1);queued.push({params,receipt});}
-    assert.equal((await c.request('status',{})).spool.pending,50);await kill();await start();c=await client();
-    const after=await c.request('status',{});assert.equal(after.spool.pending,50);assert.equal(after.data_incarnation,before.data_incarnation);assert.notEqual(after.fs_epoch,before.fs_epoch);
-    for(const q of queued)assert.deepEqual(await c.request('remember',q.params),q.receipt);
-    // The embedding outbox holds Facts without a vector (D56); no extraction runs here, so the drained Episodes add none.
-    const drained=await recoverDrain(c);assert.equal(drained.spool.pending,0);assert.equal(drained.outbox_pending,0);
-    const committed=[];for(const q of queued){const result=await c.request('ingest.status',identity(q.receipt));assert.equal(result.state,'committed');const retry=await c.request('remember',q.params);assert.equal(retry.id,result.id);assert.equal(retry.ingest_seq,result.ingest_seq);assert.equal(retry.created,false);committed.push(result);}
-    const actual=await rows(50);assert.deepEqual(actual.map(r=>r.revision).sort(),queued.map(q=>key(q.params)).sort());
-    assert.equal((await c.request('status',{})).outbox_pending,0);checkpoint('outage-drain-50',{before,after,drained,queued,committed});
+  async 'storage-retry'(){
+    await start();const c=await client();
+    const parent=input('parent');
+    const child={...parent,source_revision:'v2',expected_previous_revision_key:key(parent)};
+    await assert.rejects(c.request('remember',child),{code:'stale_revision'});
+    offline();
+    await assert.rejects(c.request('remember',parent),{code:'storage_unavailable',retryable:true});
+    await assert.rejects(c.request('remember.batch',{deliveries:[parent,child]}),{code:'storage_unavailable',retryable:true});
+    assert.equal((await c.request('status',{})).storage,'unavailable');
+    await rows(0);online=true;
+    const batch={deliveries:[parent,child]};
+    const {results}=await c.request('remember.batch',batch);
+    assert.deepEqual(results.map(r=>[r.revision_key,r.created]),[[key(parent),true],[key(child),true]]);
+    assert.ok(results[0].ingest_seq<results[1].ingest_seq);
+    assert.deepEqual((await c.request('remember.batch',batch)).results,results.map(r=>({...r,created:false})));
+    await assert.rejects(c.request('remember',input('parent','changed')),{code:'revision_conflict'});
+    await rows(2);checkpoint('storage-retry',{results});
   },
   async 'managed-ingest-restart'(){
     await start(true);let c=await client();const before=await c.request('status',{});const first=await c.request('remember',input('managed'));
     await closeClients();const owner=JSON.parse(await readFile(root+'/owner/owner.json','utf8'));pids.push(owner.pid);
     const restarted=nextEvent(daemon,e=>e.event==='listening');process.kill(owner.pid,'SIGKILL');await restarted;
     const replacement=JSON.parse(await readFile(root+'/owner/owner.json','utf8'));pids.push(replacement.pid);assert.notEqual(replacement.pid,owner.pid);
-    c=await client();assert.equal((await c.request('ingest.status',identity(first))).id,first.id);const after=await c.request('status',{});assert.equal(after.data_incarnation,before.data_incarnation);assert.notEqual(after.fs_epoch,before.fs_epoch);
+    c=await client();assert.deepEqual(await c.request('remember',input('managed')),{...first,created:false});const after=await c.request('status',{});assert.equal(after.data_incarnation,before.data_incarnation);assert.notEqual(after.fs_epoch,before.fs_epoch);
     const gate=await replyGate();let receipt;
     try{
       const proxy=await client(gate.path);const held=once(gate.signals,'held',{signal:AbortSignal.timeout(15000)});
       const pending=proxy.request('remember',input('lost-reply')).then(()=>null,error=>error);
       [receipt]=await held;assert.equal(receipt.state,'committed');gate.drop();const error=await pending;assert.equal(error?.code,'outcome_unknown');assert.equal(error?.retryable,false);
-      const resolved=await c.request('ingest.status',identity(receipt));assert.equal(resolved.id,receipt.id);
-      assert.equal((await c.request('ingest.status',{...identity(receipt),body_digest:'0'.repeat(64)})).state,'unknown');
+      const resolved=await c.request('remember',input('lost-reply'));assert.deepEqual(resolved,{...receipt,created:false});
+      await assert.rejects(c.request('remember',input('lost-reply','different')),{code:'revision_conflict'});
     }finally{await gate.close();}
     await rows(2);await closeClients();assert.equal((await daemon.stop('SIGTERM')).code,0);
     assert.throws(()=>process.kill(replacement.pid,0),{code:'ESRCH'});await assert.rejects(stat(root+'/owner'),{code:'ENOENT'});

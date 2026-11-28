@@ -1,14 +1,14 @@
-import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import neo4j from "neo4j-driver";
 import { v7 as uuidv7 } from "uuid";
-import { DurableSpool, Engine, type InstallationContext } from "@anamnesis/core";
+import { Engine, type InstallationContext } from "@anamnesis/core";
 import { extractionBodyDigest, type RpcRememberParams } from "@anamnesis/protocol";
 import { fakeAuthorityAdapter, sha256 } from "./authority-adapter.fixture.ts";
 import type { Installation } from "./config.ts";
@@ -60,12 +60,6 @@ function identityOf(params: RpcRememberParams, incarnation: string) {
   return { revision_key: revisionKeyOf(params), body_digest: sha256(canonical({ digest_version: 1, params })), data_incarnation: incarnation };
 }
 
-type Remembered = Awaited<ReturnType<Runtime["remember"]>>;
-function asCommitted(result: Remembered): Extract<Remembered, { state: "committed" }> {
-  if (result.state !== "committed") throw new Error(`expected a committed delivery, saw ${result.state}`);
-  return result;
-}
-
 const roots: string[] = [];
 const opened: Runtime[] = [];
 async function freshRoot(): Promise<string> {
@@ -96,18 +90,6 @@ async function shutdown(runtime: Runtime): Promise<void> {
   const index = opened.indexOf(runtime);
   if (index !== -1) opened.splice(index, 1);
   await runtime.close();
-}
-async function drainToRest(runtime: Runtime): Promise<number> {
-  for (let turns = 1; turns <= 1000; turns++) if (!(await runtime.drainTurn())) return turns;
-  throw new Error("drain did not come to rest within 1000 turns");
-}
-async function spoolOffline(installation: Installation, ...deliveries: RpcRememberParams[]): Promise<void> {
-  const offline = await boot(installation, DEAD_URI);
-  for (const params of deliveries) {
-    const result = await offline.runtime.remember(params);
-    if (result.state !== "spooled") throw new Error(`expected a spooled delivery, saw ${result.state}`);
-  }
-  await shutdown(offline.runtime);
 }
 const bumpWriterEpoch = () => query("MATCH (m:Meta {key:'meta'}) SET m.writer_epoch = m.writer_epoch + 1000");
 
@@ -163,210 +145,25 @@ afterEach(async () => {
 });
 afterAll(async () => { await admin?.close(); });
 
-test("remember skips an empty spool scan but finds a pending re-delivery", async () => {
-  const page = spyOn(DurableSpool.prototype, "page");
-  try {
-    const installation = installationAt(await freshRoot());
-    const runtime = await withEnv({ ...dbEnv(DEAD_URI), ANAMNESIS_NEO4J_PASSWORD: "test-password" }, async () => new Runtime(installation));
-    opened.push(runtime);
-    await runtime.init();
-    const params = delivery({ record: "pending-redelivery" });
-
-    const spooled = await runtime.remember(params);
-    expect(spooled).toMatchObject({ state: "spooled", spool_seq: 1 });
-    expect(page).toHaveBeenCalledTimes(0);
-
-    expect(await runtime.remember(params)).toEqual(spooled);
-    expect(page).toHaveBeenCalled();
-  } finally { page.mockRestore(); }
-});
-
-dbTest("a live boot reports ready, commits deliveries once, and answers re-deliveries and ingest status from the store", async () => {
+dbTest("a live boot reports ready, commits deliveries once, and answers re-deliveries from the store", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime, lanes } = await boot(installation);
-  expect(lanes).toEqual(["spool", "identity"]);
+  expect(lanes).toEqual(["identity"]);
   expect(runtime.capabilities).toMatchObject({ recall: true, commit: true, policy: true, extraction: false, embeddings: false });
   const ready = await runtime.status(0, false);
   expect(ready).toMatchObject({ version: 1, state: "ready", storage: "available", data_incarnation: installation.incarnation, fs_epoch: installation.epoch,
-    spool: { pending: 0, blocked: 0, quarantined: 0, bytes: 0 }, outbox_pending: 0, workers: { extraction: { state: "unconfigured" }, embedding: { pending: 0, drained_total: 0, quarantined_total: 0, last_error: null } } });
+    outbox_pending: 0, workers: { extraction: { state: "unconfigured" }, embedding: { pending: 0, drained_total: 0, quarantined_total: 0, last_error: null } } });
   expect((await runtime.status(3, true))).toMatchObject({ state: "stopping", queue: { pending: 3 } });
 
   const first = delivery({ record: "first" });
-  const committed = asCommitted(await runtime.remember(first));
+  const committed = await runtime.remember(first);
   expect(committed).toMatchObject({ state: "committed", created: true, ...identityOf(first, installation.incarnation) });
-  expect(lanes).toEqual(["spool", "identity", "identity"]);
-  const identity = identityOf(first, installation.incarnation);
-  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
+  expect(lanes).toEqual(["identity", "identity"]);
   await shutdown(runtime);
 
   const restarted = (await boot(installation)).runtime;
   expect(await restarted.remember(first)).toEqual({ ...committed, created: false });
   await expect(restarted.remember(delivery({ record: "first", content: "a different body" }))).rejects.toMatchObject({ code: "revision_conflict" });
-  await writeFile(join(installation.root, "deliveries", identity.revision_key + ".json"), JSON.stringify({
-    digest_version: 1, params: first, body_digest: identity.body_digest, incarnation: installation.incarnation, fs_epoch: installation.epoch,
-  }));
-  expect(await restarted.ingestStatus(identity)).toEqual({ ...committed, created: false });
-  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
-  expect(await restarted.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({ state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available" });
-  expect(await restarted.ingestStatus({ ...identity, revision_key: "1".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
-  await expect(restarted.ingestStatus({ ...identity, data_incarnation: uuidv7() })).rejects.toMatchObject({ code: "incarnation_mismatch" });
-  await drainToRest(restarted);
-  expect(await restarted.drainTurn()).toBe(false);
-  expect((await restarted.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
-});
-
-dbTest("storage loss spools deliveries, reports degraded, and the same incarnation drains the backlog in dependency order once storage returns", async () => {
-  const installation = installationAt(await freshRoot());
-  const offline = await boot(installation, DEAD_URI);
-  expect(await offline.runtime.status(0, false)).toMatchObject({ state: "degraded", storage: "unavailable", outbox_pending: null });
-  const parent = delivery({ record: "doc" });
-  const child = delivery({ record: "doc", revision: "v2", predecessor: revisionKeyOf(parent) });
-  const spooledChild = await offline.runtime.remember(child);
-  expect(spooledChild).toMatchObject({ state: "spooled", spool_seq: 1, fs_epoch: installation.epoch, ...identityOf(child, installation.incarnation) });
-  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
-  expect(await offline.runtime.remember(parent)).toMatchObject({ state: "spooled", spool_seq: 2 });
-  expect(await offline.runtime.remember(child)).toEqual(spooledChild);
-  await expect(offline.runtime.remember(delivery({ record: "doc", revision: "v2", predecessor: revisionKeyOf(parent), content: "a different body" })))
-    .rejects.toMatchObject({ code: "revision_conflict" });
-  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
-  expect(await offline.runtime.ingestStatus(identityOf(child, installation.incarnation))).toEqual(spooledChild);
-  expect(await offline.runtime.status(0, false)).toMatchObject({ state: "degraded", spool: { pending: 2 } });
-  expect(await offline.runtime.drainTurn()).toBe(false);
-  expect(await offline.runtime.embeddingTurn()).toBe("stalled");
-  expect(await offline.runtime.extractionTurn()).toBe("stalled");
-  await expect(offline.runtime.recall({ query: "doc", limit: 5 }, receiptContext)).rejects.toMatchObject({ code: "storage_unavailable", retryable: true });
-  await expect(offline.runtime.remember({ ...delivery({ record: "lineage" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, receiptContext))
-    .rejects.toMatchObject({ code: "storage_unavailable", retryable: true });
-  await shutdown(offline.runtime);
-
-  const live = await boot(installation);
-  expect(live.lanes).toEqual(["spool", "identity"]);
-  await drainToRest(live.runtime);
-  expect(await live.runtime.ingestStatus(identityOf(parent, installation.incarnation))).toMatchObject({ state: "committed", created: false });
-  expect(await live.runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "committed", created: false });
-  expect(await live.runtime.remember(child)).toMatchObject({ state: "committed", created: false });
-  expect(await live.runtime.status(0, false)).toMatchObject({ state: "ready", spool: { pending: 0, blocked: 0, quarantined: 0 } });
-  expect(await query("MATCH (e:Episode) RETURN count(e) AS episodes")).toEqual([{ episodes: 2 }]);
-});
-
-dbTest("a spooled successor whose predecessor never arrives stays blocked and a live retry surfaces the stale CAS", async () => {
-  const installation = installationAt(await freshRoot());
-  const orphan = delivery({ record: "orphan", revision: "v2", predecessor: sha256("never delivered") });
-  await spoolOffline(installation, orphan);
-  const { runtime } = await boot(installation);
-  await drainToRest(runtime);
-  const identity = identityOf(orphan, installation.incarnation);
-  expect(await runtime.ingestStatus(identity)).toEqual({ state: "blocked", ...identity, fs_epoch: installation.epoch, spool_seq: 1, expected_previous_revision_key: sha256("never delivered"), reason: "missing_predecessor" });
-  expect(await runtime.status(0, false)).toMatchObject({ state: "ready", spool: { pending: 1, blocked: 1, quarantined: 0 } });
-  await expect(runtime.remember(orphan)).rejects.toMatchObject({ code: "stale_revision" });
-});
-
-dbTest("a live commit of the revision a blocked entry waits for wakes the drain, which then commits the entry", async () => {
-  const installation = installationAt(await freshRoot());
-  const parent = delivery({ record: "late" });
-  const child = delivery({ record: "late", revision: "v2", predecessor: revisionKeyOf(parent) });
-  await spoolOffline(installation, child);
-  const { runtime, lanes } = await boot(installation);
-  await drainToRest(runtime);
-  expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
-  const woken = lanes.length;
-  expect(await runtime.remember(delivery({ record: "unrelated" }))).toMatchObject({ state: "committed", created: true });
-  expect(lanes.slice(woken)).toEqual(["identity"]);
-  expect(await runtime.remember(parent)).toMatchObject({ state: "committed", created: true });
-  expect(lanes.slice(woken)).toEqual(["identity", "identity", "spool"]);
-  await drainToRest(runtime);
-  expect(await runtime.ingestStatus(identityOf(child, installation.incarnation))).toMatchObject({ state: "committed", created: false });
-  expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 0, blocked: 0 });
-});
-
-dbTest("mutually dependent spool entries are blocked as a dependency cycle and a tail entering the cycle as a missing predecessor", async () => {
-  const installation = installationAt(await freshRoot());
-  const keyA = revisionKeyOf(delivery({ record: "cycle", revision: "a" }));
-  const keyB = revisionKeyOf(delivery({ record: "cycle", revision: "b" }));
-  const a = delivery({ record: "cycle", revision: "a", predecessor: keyB });
-  const b = delivery({ record: "cycle", revision: "b", predecessor: keyA });
-  const tail = delivery({ record: "cycle", revision: "c", predecessor: keyA });
-  await spoolOffline(installation, a, b, tail);
-  const { runtime } = await boot(installation);
-  await drainToRest(runtime);
-  expect(await runtime.ingestStatus(identityOf(a, installation.incarnation))).toMatchObject({ state: "blocked", reason: "dependency_cycle", spool_seq: 1 });
-  expect(await runtime.ingestStatus(identityOf(b, installation.incarnation))).toMatchObject({ state: "blocked", reason: "dependency_cycle", spool_seq: 2 });
-  expect(await runtime.ingestStatus(identityOf(tail, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor", spool_seq: 3 });
-  expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 3, blocked: 3 });
-});
-
-dbTest("drain blocks a stale successor, a body conflicting with a committed revision, and the entry behind them without stopping the cohort", async () => {
-  const installation = installationAt(await freshRoot());
-  const base = delivery({ record: "stale" });
-  const stale = delivery({ record: "stale", revision: "v2", predecessor: revisionKeyOf(base) });
-  const behindStale = delivery({ record: "stale", revision: "v3", predecessor: revisionKeyOf(stale) });
-  const conflicting = delivery({ record: "conflict", content: "spooled body" });
-  const liveBody = delivery({ record: "conflict", content: "live body" });
-  await spoolOffline(installation, stale, behindStale, conflicting);
-  // Seed the conflicting committed owner below Runtime admission so drain still
-  // exercises its revision-conflict classification against the durable spool body.
-  const engine = new Engine({ uri: TEST_DB.uri, user: TEST_DB.user, password: TEST_DB.password, objectsRoot: join(installation.root, "direct-conflict") });
-  try {
-    await engine.init();
-    await engine.claimWriterEpoch();
-    await engine.remember({ ...liveBody.episode, source_revision: liveBody.source_revision,
-      expected_previous_revision_key: liveBody.expected_previous_revision_key });
-  } finally { await engine.close(); }
-  const { runtime, lanes } = await boot(installation);
-  expect(await runtime.remember(base)).toMatchObject({ state: "committed", created: true });
-  expect(await runtime.remember(delivery({ record: "stale", revision: "v1b", predecessor: revisionKeyOf(base) }))).toMatchObject({ state: "committed", created: true });
-  expect(lanes).toEqual(["spool", "identity", "identity", "identity"]);
-  await drainToRest(runtime);
-  expect(await runtime.ingestStatus(identityOf(stale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "stale_revision" });
-  expect(await runtime.ingestStatus(identityOf(behindStale, installation.incarnation))).toMatchObject({ state: "blocked", reason: "missing_predecessor" });
-  expect(await runtime.ingestStatus(identityOf(conflicting, installation.incarnation))).toMatchObject({ state: "unknown", storage: "available" });
-  expect(await runtime.ingestStatus(identityOf(liveBody, installation.incarnation))).toMatchObject({ state: "committed", created: false });
-  await expect(runtime.remember(conflicting)).rejects.toMatchObject({ code: "revision_conflict" });
-  expect((await runtime.status(0, false)).spool).toMatchObject({ pending: 3, blocked: 3 });
-  expect(await query("MATCH (e:Episode {origin_record:'conflict'}) RETURN e.content AS content")).toEqual([{ content: "live body" }]);
-});
-
-dbTest("entries from another incarnation are quarantined while this incarnation keeps serving", async () => {
-  const root = await freshRoot();
-  const foreign = installationAt(root);
-  const stranded = delivery({ record: "stranded" });
-  await spoolOffline(foreign, stranded);
-  const installation = installationAt(root);
-  const { runtime } = await boot(installation);
-  await drainToRest(runtime);
-  const identity = identityOf(stranded, installation.incarnation);
-  expect(await runtime.ingestStatus(identity)).toEqual({ state: "quarantined", ...identity, reason: "incarnation_mismatch" });
-  expect(await runtime.status(0, false)).toMatchObject({ state: "degraded", storage: "available", spool: { pending: 1, quarantined: 1 } });
-  await expect(runtime.remember(stranded)).rejects.toMatchObject({ code: "incarnation_mismatch" });
-  expect(await runtime.remember(delivery({ record: "served" }))).toMatchObject({ state: "committed", created: true });
-});
-
-dbTest("a quarantined other-incarnation entry answers only its recorded body digest", async () => {
-  const root = await freshRoot();
-  const foreign = installationAt(root);
-  const stranded = delivery({ record: "quarantined-digest" });
-  await spoolOffline(foreign, stranded);
-  const installation = installationAt(root);
-  const { runtime } = await boot(installation);
-  await drainToRest(runtime);
-  const identity = identityOf(stranded, installation.incarnation);
-  expect(await runtime.ingestStatus(identity)).toEqual({ state: "quarantined", ...identity, reason: "incarnation_mismatch" });
-  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toEqual({
-    state: "unknown", ...identity, body_digest: "0".repeat(64), storage: "available",
-  });
-});
-
-dbTest("a quarantined spool stops admission and drain, and reports every pending delivery as quarantined", async () => {
-  const installation = installationAt(await freshRoot());
-  const pending = delivery({ record: "pending" });
-  await spoolOffline(installation, pending);
-  const { runtime } = await boot(installation);
-  await writeFile(join(installation.root, "spool", "spool.durable"), "0");
-  expect(await drainToRest(runtime)).toBe(1);
-  const identity = identityOf(pending, installation.incarnation);
-  expect(await runtime.ingestStatus(identity)).toEqual({ state: "quarantined", ...identity, reason: "spool_corrupt" });
-  await expect(runtime.remember(delivery({ record: "refused" }))).rejects.toMatchObject({ code: "spool_corrupt" });
-  expect(await runtime.status(0, false)).toMatchObject({ state: "degraded", spool: { quarantined: 1 } });
 });
 
 dbTest("a payload-bearing delivery is admitted only once its object is committed", async () => {
@@ -386,17 +183,13 @@ dbTest("lineage metadata needs authenticated custody and is re-verified from the
   const v2 = { ...delivery({ record: "lineage" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
   await expect(runtime.remember(v2)).rejects.toMatchObject({ code: "lineage_binding_mismatch" });
   await expect(runtime.remember(v2, unbound)).rejects.toMatchObject({ code: "lineage_binding_mismatch" });
-  const committed = asCommitted(await runtime.remember(v2, receiptContext));
+  const committed = await runtime.remember(v2, receiptContext);
   expect(committed).toMatchObject({ state: "committed", created: true });
   expect(await runtime.remember(v2, receiptContext)).toEqual({ ...committed, created: false });
-  expect(await readdir(join(installation.root, "deliveries"))).toEqual([]);
-  const identity = identityOf(v2, installation.incarnation);
-  expect(await runtime.ingestStatus(identity)).toEqual({ ...committed, created: false });
-  expect(await runtime.ingestStatus({ ...identity, body_digest: "0".repeat(64) })).toMatchObject({ state: "unknown", storage: "available" });
   await query("MATCH (e:Episode {id:$id}) SET e.context_digests = [$digest]", { id: committed.id, digest: "f".repeat(64) });
-  await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_mismatch" });
+  await expect(runtime.remember(v2, receiptContext)).rejects.toMatchObject({ code: "lineage_mismatch" });
   await query("MATCH (e:Episode {id:$id}) REMOVE e.lineage_mode", { id: committed.id });
-  await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "lineage_unavailable" });
+  await expect(runtime.remember(v2, receiptContext)).rejects.toMatchObject({ code: "lineage_unavailable" });
 });
 
 dbTest("remember.batch answers each delivery in order: a refusal answers its delivery alone and a retryable failure fails the rest", async () => {
@@ -416,41 +209,39 @@ dbTest("remember.batch answers each delivery in order: a refusal answers its del
   const third = delivery({ record: "batch-3" }), fourth = delivery({ record: "batch-4" });
   const offlineLineage = { ...delivery({ record: "batch-lineage-2" }), origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] };
   await expect(offline.runtime.rememberBatch([third, offlineLineage, fourth], receiptContext)).rejects.toMatchObject({ code: "storage_unavailable", retryable: true });
-  expect(await offline.runtime.ingestStatus(identityOf(third, installation.incarnation))).toMatchObject({ state: "spooled" });
-  expect(await offline.runtime.ingestStatus(identityOf(fourth, installation.incarnation))).toMatchObject({ state: "unknown", storage: "unavailable" });
+  const rows = await query("MATCH (e:Episode) RETURN e.origin_record AS record ORDER BY record");
+  expect(rows.map(row => row["record"])).toEqual(["batch-1", "batch-2", "batch-lineage"]);
 });
 
 dbTest("stored rows that no longer verify are reported as digest faults instead of commits", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime } = await boot(installation);
   const params = delivery({ record: "verified" });
-  const committed = asCommitted(await runtime.remember(params));
-  const identity = identityOf(params, installation.incarnation);
+  const committed = await runtime.remember(params);
   const [row] = await query("MATCH (e:Episode {id:$id}) RETURN e.digest AS digest, e.digest_format AS format", { id: committed.id });
   const digest = row?.["digest"], format = row?.["format"];
   if (typeof digest !== "string") throw new Error("the committed episode carries no digest");
   await query("MATCH (e:Episode {id:$id}) SET e.episode_digest_version = 3", { id: committed.id });
-  await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "unsupported_digest_version" });
+  await expect(runtime.remember(params)).rejects.toMatchObject({ code: "unsupported_digest_version" });
   await query("MATCH (e:Episode {id:$id}) REMOVE e.episode_digest_version SET e.digest_format = 'unknown-format'", { id: committed.id });
-  await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "unsupported_digest_version" });
+  await expect(runtime.remember(params)).rejects.toMatchObject({ code: "unsupported_digest_version" });
   if (typeof format === "string") await query("MATCH (e:Episode {id:$id}) SET e.digest_format = $format", { id: committed.id, format });
   else await query("MATCH (e:Episode {id:$id}) REMOVE e.digest_format", { id: committed.id });
   await query("MATCH (e:Episode {id:$id}) SET e.digest = $digest", { id: committed.id, digest: "e".repeat(64) });
-  await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "revision_conflict" });
+  await expect(runtime.remember(params)).rejects.toMatchObject({ code: "revision_conflict" });
   await query("MATCH (e:Episode {id:$id}) SET e.digest = $digest, e.content = 'tampered'", { id: committed.id, digest });
-  await expect(runtime.ingestStatus(identity)).rejects.toMatchObject({ code: "revision_conflict" });
+  await expect(runtime.remember(params)).rejects.toMatchObject({ code: "revision_conflict" });
 });
 
-dbTest("a changed writer epoch is ownership loss for status and the spool lane, and cancelDrain stalls every lane", async () => {
+dbTest("a changed writer epoch is ownership loss for status and admission, and stopBackground stalls the workers", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime } = await boot(installation);
   await runtime.remember(delivery({ record: "owned" }));
   await bumpWriterEpoch();
   await expect(runtime.status(0, false)).rejects.toMatchObject({ code: "ownership_lost" });
-  await expect(runtime.drainTurn()).rejects.toMatchObject({ code: "ownership_lost" });
+  await expect(runtime.refresh()).rejects.toMatchObject({ code: "ownership_lost" });
   await expect(runtime.remember(delivery({ record: "later" }))).rejects.toMatchObject({ code: "ownership_lost" });
-  runtime.cancelDrain();
-  expect(await runtime.drainTurn()).toBe(false);
+  runtime.stopBackground();
   expect(await runtime.embeddingTurn()).toBe("stalled");
   expect(await runtime.extractionTurn()).toBe("stalled");
 });
@@ -481,15 +272,16 @@ dbTest("Runtime.create wires providers from the environment and drives the embed
   opened.push(runtime);
   expect(runtime.capabilities).toMatchObject({ extraction: true, embeddings: true });
   await runtime.init();
-  expect([...lanes].sort()).toEqual(["embedding", "extraction", "identity", "spool"]);
+  expect([...lanes].sort()).toEqual(["embedding", "extraction", "identity"]);
   // The turn only finds the batch; its provider call runs outside the turn and the batch's end wakes the lane.
   const batchEnded = new Promise<void>(resolve => { embeddingWoken = resolve; });
   expect(await runtime.embeddingTurn()).toBe("waiting");
   await batchEnded;
   expect(await runtime.extractionTurn()).toBe("waiting");
 
-  const committed = asCommitted(await runtime.remember(delivery({ record: "embedded" })));
-  expect(lanes.slice(5).sort()).toEqual(["embedding", "extraction", "identity"]);
+  const woken = lanes.length;
+  const committed = await runtime.remember(delivery({ record: "embedded" }));
+  expect(lanes.slice(woken).sort()).toEqual(["embedding", "extraction", "identity"]);
   const deferred = await runtime.status(0, false);
   expect(deferred.workers.embedding).toMatchObject({ pending: 1, drained_total: 0, quarantined_total: 0 });
   expect(deferred.workers.embedding.last_error).toContain("deferred");
@@ -542,7 +334,7 @@ dbTest("Runtime.create keeps providers wired while the extraction lane is off", 
     opened.push(runtime);
     expect(runtime.capabilities).toMatchObject({ extraction: false, embeddings: true });
     await runtime.init();
-    expect([...lanes].sort()).toEqual(["embedding", "identity", "spool"]);
+    expect([...lanes].sort()).toEqual(["embedding", "identity"]);
     expect((await runtime.status(0, false)).workers.extraction).toEqual({ state: "unconfigured" });
     expect(await runtime.extractionTurn()).toBe("stalled");
     expect(requests).toBe(0);
@@ -559,7 +351,7 @@ dbTest("Runtime.create keeps providers wired while the extraction lane is off", 
 dbTest("storage-backed RPCs pass through to the engine under the caller's custody", async () => {
   const installation = installationAt(await freshRoot());
   const { runtime } = await boot(installation);
-  const committed = asCommitted(await runtime.remember(delivery({ record: "recallable", content: "the quick brown fox" })));
+  const committed = await runtime.remember(delivery({ record: "recallable", content: "the quick brown fox" }));
   const recall = await runtime.recall({ query: "quick brown fox", limit: 5 }, autoContext);
   expect(recall.results.map(item => item.id)).toEqual([committed.id]);
   expect(recall).toMatchObject({ renderer: "canonical-jsonl-v1", diagnostics: { pipeline: "derived-hybrid-v1", vector_reason: "not_configured", channels_used: ["bm25"] } });
@@ -591,8 +383,8 @@ dbTest("a prior revision denied by episode id is withheld from the primary's sup
   const installation = installationAt(await freshRoot());
   const { runtime } = await boot(installation);
   const original = delivery({ record: "revised", content: "the sleepy owl hoots" });
-  const first = asCommitted(await runtime.remember(original));
-  const second = asCommitted(await runtime.remember(delivery({ record: "revised", revision: "v2", predecessor: revisionKeyOf(original), content: "the sleepy owl hoots at dusk" })));
+  const first = await runtime.remember(original);
+  const second = await runtime.remember(delivery({ record: "revised", revision: "v2", predecessor: revisionKeyOf(original), content: "the sleepy owl hoots at dusk" }));
   const view = (recall: Awaited<ReturnType<Runtime["recall"]>>) => recall.results.map(item => [item.id, item.provenance.supersedes, item.provenance.supersedes_redacted]);
   const query = { query: "sleepy owl hoots", limit: 5 };
   expect(view(await runtime.recall(query, autoContext))).toEqual([[second.id, [{ id: first.id, content: "the sleepy owl hoots" }], false]]);

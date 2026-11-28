@@ -156,7 +156,7 @@ const malformed = [
   ["unsorted members", m => { m.members.reverse(); }, "identities must be unique and sorted"],
   ["missing declared member", m => { m.members.pop(); }, "missing members or total byte limit"],
   ["total member bytes over limit", m => { fillTotal(m, 256); m.members.find(x => x.role === "database_dump").bytes++; }, "missing members or total byte limit"],
-  ["extra declared member", m => { m.members.push({ path: "spool/x", role: "auth", bytes: 1, sha256: "a".repeat(64) }); }, "noncanonical or wrong-role member path"],
+  ["extra declared member", m => { m.members.push({ path: "unexpected/x", role: "auth", bytes: 1, sha256: "a".repeat(64) }); }, "noncanonical or wrong-role member path"],
   ["wrong member role", m => { m.members[0].role = "auth"; }, "noncanonical or wrong-role member path"],
   ["unknown member role", m => { m.members[0].role = "other"; }, "unknown member role"],
   ["numeric member path", m => { m.members[0].path = 5; }, "member path must be a string"],
@@ -441,7 +441,7 @@ test("unreadable archive directory propagates the operating system failure", { s
   await chmod(locked, 0);
   try { await assert.rejects(preflightArchive(f.root, compatibility), { code: "EACCES" }); } finally { await chmod(locked, 0o700); }
 });
-for (const path of ["unexpected", "spool/pending", "objects/ff/orphan", "database/extra", "empty-directory/"]) test(`unlisted filesystem member ${path} rejects`, async t => {
+for (const path of ["unexpected", "objects/ff/orphan", "database/extra", "empty-directory/"]) test(`unlisted filesystem member ${path} rejects`, async t => {
   const f = await fixture(t);
   if (path.endsWith("/")) await mkdir(join(f.root, path));
   else { await mkdir(join(f.root, path, ".."), { recursive: true }); await writeFile(join(f.root, path), "extra"); }

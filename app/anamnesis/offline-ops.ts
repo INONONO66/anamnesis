@@ -87,8 +87,6 @@ export async function offlineRestore(root: string, archive: string): Promise<{ o
     await writeFile(join(inputStaging, "incarnation.json"), JSON.stringify(incarnation) + "\n", { mode: 0o600 });
     await mkdir(join(inputStaging, "objects"), { recursive: true, mode: 0o700 });
     await mkdir(join(inputStaging, "uploads"), { recursive: true, mode: 0o700 });
-    await mkdir(join(inputStaging, "spool"), { recursive: true, mode: 0o700 });
-    await mkdir(join(inputStaging, "deliveries"), { recursive: true, mode: 0o700 });
     try { await cp(join(inputArchive, "objects"), join(inputStaging, "objects"), { recursive: true }); } catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; }
   };
   // restoreOwned requires an owned parent and a live directory. The existing

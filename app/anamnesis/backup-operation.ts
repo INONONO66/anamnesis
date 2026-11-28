@@ -59,7 +59,7 @@ export interface BackupOperationOptions {
   /** TRUST BOUNDARY: required for every observation, never for intent alone.
    * Throw unless the report establishes the transition for this exact operation,
    * body digest, expected version, source inode, reserved destination and cutoff.
-   * cutoff: gate + all writer fences, spool_pending=0, full cutoff manifest/pins.
+   * cutoff: gate + all writer fences, full cutoff manifest/pins.
    * database_stopped: actual offline observation of the pinned service/volume.
    * dump_verified: successful offline admin result, exact image, fsynced dump and
    * validated metadata bound to cutoff. database_healthy: actual restart/health.

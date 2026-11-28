@@ -47,7 +47,6 @@ describe("strict versioned RPC requests", () => {
       request("object.commit", { upload_id: uuid }),
       request("remember", remember),
       request("remember.batch", { deliveries: [remember, { ...remember, source_revision: "revision-2" }] }),
-      request("ingest.status", { revision_key: hash, body_digest: hash, data_incarnation: uuid }),
     ];
     for (const input of inputs) expect(RpcRequest.safeParse(input).success).toBe(true);
     expect(RpcRememberParams.parse(remember).episode.properties).toEqual({});
@@ -174,7 +173,7 @@ describe("strict versioned RPC requests", () => {
 describe("strict RPC responses", () => {
   test("validates handshake, lifecycle and object results without fabricated capabilities", () => {
     const capabilities = {
-      methods: ["hello", "status", "shutdown", "object.begin", "object.chunk", "object.commit", "remember", "ingest.status"],
+      methods: ["hello", "status", "shutdown", "object.begin", "object.chunk", "object.commit", "remember"],
       recall: false,
       commit: true,
       policy: false,
@@ -204,7 +203,6 @@ describe("strict RPC responses", () => {
       data_incarnation: uuid,
       fs_epoch: uuid,
       queue: { pending: 0, capacity: RPC_LIMITS.queued_requests },
-      spool: { pending: 1, blocked: 0, quarantined: 0, bytes: 128 },
       outbox_pending: null,
       capabilities,
       workers: { embedding: { pending: null, drained_total: 0, quarantined_total: 0, last_error: null }, extraction: { state: "unconfigured" } },
@@ -239,27 +237,15 @@ describe("strict RPC responses", () => {
     }
   });
 
-  test("separates durable acceptance from authoritative commit and UNKNOWN", () => {
+  test("remember requires commit evidence and only a batch can report per-item refusal", () => {
     const identity = { revision_key: hash, body_digest: hash, data_incarnation: uuid };
     const committed = { state: "committed", ...identity, id: uuid, created: true, ingest_seq: 1 };
-    const spooled = { state: "spooled", ...identity, fs_epoch: uuid, spool_seq: 1 };
-    const unknown = { state: "unknown", ...identity, storage: "available" };
+    const refused = { state: "refused", code: "revision_conflict", message: "stored revision has a different delivery body" };
     expect(RpcResponse.safeParse({ ...response("remember", committed), structure_revision: 1 }).success).toBe(true);
-    expect(RpcResponse.safeParse(response("remember", spooled)).success).toBe(true);
-    expect(RpcResponse.safeParse(response("ingest.status", unknown)).success).toBe(true);
-    // UNKNOWN always names the storage state observed while answering; a client must not infer it from an older status.
-    expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, storage: "unavailable" })).success).toBe(true);
-    expect(RpcResponse.safeParse(response("ingest.status", { state: "unknown", ...identity })).success).toBe(false);
-    expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, storage: "degraded" })).success).toBe(false);
-    expect(RpcResponse.safeParse(response("remember", unknown)).success).toBe(false);
-    const refused = { state: "refused", code: "revision_conflict", message: "revision already binds a different delivery body" };
-    expect(RpcResponse.safeParse(response("remember.batch", { results: [committed, spooled, refused] })).success).toBe(true);
+    expect(RpcResponse.safeParse(response("remember.batch", { results: [committed, refused] })).success).toBe(true);
     expect(RpcResponse.safeParse(response("remember", refused)).success).toBe(false);
-    expect(RpcResponse.safeParse(response("remember.batch", { results: [unknown] })).success).toBe(false);
+    expect(RpcResponse.safeParse(response("remember", { state: "committed", ...identity })).success).toBe(false);
     expect(RpcResponse.safeParse(response("remember.batch", { results: [{ ...refused, code: "not_a_code" }] })).success).toBe(false);
-    expect(RpcResponse.safeParse(response("remember", { ...spooled, created: true })).success).toBe(false);
-    expect(RpcResponse.safeParse(response("remember", { ...spooled, id: uuid })).success).toBe(false);
-    expect(RpcResponse.safeParse(response("ingest.status", { ...unknown, id: uuid })).success).toBe(false);
   });
 
   test("closed machine errors cannot masquerade as success", () => {

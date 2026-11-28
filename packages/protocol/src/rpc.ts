@@ -20,7 +20,6 @@ export const RPC_LIMITS = {
   queued_requests_per_connection: 16,
   queued_requests: 256,
   remember_batch: 32,
-  spool_bytes: 1024 * 1024 * 1024,
 } as const;
 
 export const RPC_METHODS = [
@@ -28,7 +27,7 @@ export const RPC_METHODS = [
   "extraction.audit.create", "extraction.audit.run", "extraction.audit.status",
   "identity.status", "identity.rebuild", "identity.correct", "identity.directory", "people.list", "people.show",
   "spaces.import", "spaces.list", "spaces.rebuild", "replies.rebuild",
-  "object.commit", "remember", "remember.batch", "ingest.status", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
+  "object.commit", "remember", "remember.batch", "graph.envelope", "hit-cache.verify", "hit-cache.rebuild", "backup", "restore", "backup.status", "restore.status", "policy.set", "policy.revoke", "recall", "commit", "embedding.recover", "embedding.status", "embedding.requeue", "projection",
 ] as const;
 export const RpcMethod = z.enum(RPC_METHODS);
 export type RpcMethod = z.infer<typeof RpcMethod>;
@@ -313,8 +312,6 @@ const deliveryIdentity = {
   body_digest: RpcHash,
   data_incarnation: z.uuid(),
 };
-export const RpcIngestStatusParams = z.strictObject(deliveryIdentity);
-export type RpcIngestStatusParams = z.infer<typeof RpcIngestStatusParams>;
 
 export const RpcHitCacheParams = z.strictObject({});
 export type RpcHitCacheParams = z.infer<typeof RpcHitCacheParams>;
@@ -360,7 +357,6 @@ export const RpcRequest = z.discriminatedUnion("method", [
   request("object.commit", z.strictObject({ upload_id: z.uuid() })),
   request("remember", RpcRememberParams),
   request("remember.batch", RpcRememberBatchParams),
-  request("ingest.status", RpcIngestStatusParams),
   request("extraction.audit.create", CreateExtractionPipeline),
   request("extraction.audit.run", RunExtractionPipeline),
   request("extraction.audit.status", ExtractionPipelineStatus),
@@ -402,11 +398,11 @@ export const RpcErrorCode = z.enum([
   "parse_error", "invalid_request", "invalid_params", "unsupported_method",
   "unsupported_version", "unauthorized", "unauthenticated", "authentication_failed", "already_authenticated",
   "storage_unavailable", "resource_exhausted", "shutting_down", "ownership_lost",
-  "revision_conflict", "stale_revision", "idempotency_conflict", "incarnation_mismatch",
+  "revision_conflict", "stale_revision", "idempotency_conflict",
   "object_not_found", "object_metadata_conflict", "object_corrupt", "upload_not_found",
   "upload_sequence_mismatch", "object_size_mismatch", "object_hash_mismatch",
   "lineage_unavailable", "lineage_binding_mismatch", "lineage_mismatch",
-  "spool_corrupt", "unsupported_digest_version", "unknown_recall", "receipt_expired", "empty_commit", "invalid_selection", "unsupported_policy", "internal_error",
+  "unsupported_digest_version", "unknown_recall", "receipt_expired", "empty_commit", "invalid_selection", "unsupported_policy", "internal_error",
   "commit_mode_mismatch", "policy_denied", "policy_unavailable", "unknown_policy", "invalid_hit_evidence",
   "extraction_not_configured", "extraction_audit_conflict", "extraction_audit_incomplete", "extraction_audit_stale", "backup_adapter_unavailable", "restore_adapter_unavailable", "daemon_live", "member_mismatch", "archive_layout", "invalid_completion", "completion_mismatch", "incompatible_archive", "object_digest_mismatch", "invalid_dump",
   "embedding_not_configured", "invalid_budget", "receipt_unavailable", "degree_probe_unavailable", "ordered_probe_unavailable",
@@ -434,37 +430,13 @@ export const RpcCommittedResult = z.strictObject({
   ingest_seq: positiveCounter,
 });
 export type RpcCommittedResult = z.infer<typeof RpcCommittedResult>;
-export const RpcSpooledResult = z.strictObject({
-  state: z.literal("spooled"),
-  ...deliveryIdentity,
-  fs_epoch: z.uuid(),
-  spool_seq: positiveCounter,
-});
-export type RpcSpooledResult = z.infer<typeof RpcSpooledResult>;
-export const RpcRememberResult = z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult]);
-export type RpcRememberResult = z.infer<typeof RpcRememberResult>;
+export type RpcRememberResult = RpcCommittedResult;
 /** One answer per delivery, in order: its remember result, or the non-retryable refusal that answered it alone. */
-export const RpcRememberBatchResult = z.strictObject({ results: z.array(z.discriminatedUnion("state", [RpcCommittedResult, RpcSpooledResult,
+export const RpcRememberBatchResult = z.strictObject({ results: z.array(z.discriminatedUnion("state", [RpcCommittedResult,
   z.strictObject({ state: z.literal("refused"), code: RpcErrorCode, message: boundedString(1024) })])).min(1).max(RPC_LIMITS.remember_batch) });
 export type RpcRememberBatchResult = z.infer<typeof RpcRememberBatchResult>;
 export const RpcStorageState = z.enum(["available", "unavailable"]);
 export type RpcStorageState = z.infer<typeof RpcStorageState>;
-export const RpcIngestStatusResult = z.discriminatedUnion("state", [
-  RpcCommittedResult,
-  RpcSpooledResult,
-  /** `storage` is the daemon's observation while it answered: `unknown` rules out a committed delivery only while
-   * storage was available, so a client never combines this verdict with an earlier, possibly stale `status`. */
-  z.strictObject({ state: z.literal("unknown"), ...deliveryIdentity, storage: RpcStorageState }),
-  z.strictObject({
-    state: z.literal("blocked"), ...deliveryIdentity,
-    fs_epoch: z.uuid(), spool_seq: positiveCounter,
-    expected_previous_revision_key: RpcHash.nullable(),
-    reason: z.enum(["missing_predecessor", "dependency_cycle", "stale_revision", "revision_conflict", "storage_unavailable"]),
-  }),
-  z.strictObject({ state: z.literal("quarantined"), ...deliveryIdentity, reason: RpcErrorCode }),
-]);
-export type RpcIngestStatusResult = z.infer<typeof RpcIngestStatusResult>;
-
 /** Capability names are operational, not promises about unimplemented stages. */
 export const RpcCapabilities = z.strictObject({
   methods: z.array(RpcMethod).max(RPC_METHODS.length).refine(
@@ -520,7 +492,6 @@ export const RpcStatusResult = z.strictObject({
   data_incarnation: z.uuid(),
   fs_epoch: z.uuid(),
   queue: z.strictObject({ pending: counter.max(RPC_LIMITS.queued_requests), capacity: z.literal(RPC_LIMITS.queued_requests) }),
-  spool: z.strictObject({ pending: counter, blocked: counter, quarantined: counter, bytes: counter.max(RPC_LIMITS.spool_bytes) }),
   outbox_pending: counter.nullable(),
   capabilities: RpcCapabilities,
   workers: RpcWorkersStatus,
@@ -561,9 +532,8 @@ export const RpcSuccessResponse = z.discriminatedUnion("method", [
   ])),
   success("object.chunk", z.strictObject({ upload_id: z.uuid(), next_seq: positiveCounter })),
   success("object.commit", RpcObjectMetadata),
-  success("remember", RpcRememberResult),
+  success("remember", RpcCommittedResult),
   success("remember.batch", RpcRememberBatchResult),
-  success("ingest.status", RpcIngestStatusResult),
   success("hit-cache.verify", z.strictObject({ state: z.literal("verified"), hits: counter, issues: z.array(z.strictObject({ code: boundedString(128), id: boundedString(128) })).max(1024) })),
   success("hit-cache.rebuild", z.strictObject({ state: z.literal("rebuilt"), hits: counter, created: counter, removed: counter })),
   success("identity.status", RpcIdentityStatusResult),

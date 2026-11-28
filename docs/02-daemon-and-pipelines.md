@@ -15,7 +15,7 @@ changes.
   external harnesses ─┐  (separate repos, attach over the RPC contract)
   anamnesis ops CLI ──┼─ UDS ~/.anamnesis/sock ─▶ anamnesisd ─ bolt(127.0.0.1) ─▶ Neo4j (Docker)
                       ┘                             │
-                                                  ├─ objects/  spool/
+                                                  ├─ objects/
                                                   ├─ write queue (serialized)
                                                   ├─ read pool  (recall, concurrent)
                                                   ├─ extraction worker (coverage-driven scan, extraction-state.json journal)
@@ -46,23 +46,11 @@ own non-reusable UUID `fs_epoch`. The lease winner atomically replaces and
 directory-fsyncs a fixed parent pointer
 `~/.anamnesis-writer.<root_hash>.current = {fs_epoch, owner_nonce, pid}`.
 
-- Spool paths are epoch-owned:
-  `spool/<fs_epoch>/<yyyymmdd>.journal` and matching `.done`. Different
-  daemons can never interleave bytes or cursors in one file.
-- Every object publish and spool append reads the fixed pointer immediately
-  before mutation and again before ack. Losing ownership aborts the ack.
-  A publication that completed just before loss is an idempotent object; an
-  unacknowledged appended record may drain but the caller retries safely.
-- Each epoch journal records a contiguous `local_seq`. Drain discovers every
-  epoch directory and uses a dependency-aware deterministic merge: a revision
-  is ready only when its predecessor is already in Neo4j or null; records
-  whose predecessor exists in any pending epoch are deferred. Among ready
-  records order is `(accepted_server_time, fs_epoch bytes, local_seq,
-  record_uuid bytes)`.
-- A no-progress pass leaves a missing-predecessor/cycle record BLOCKED and
-  does not advance its journal cursor past it; `status` names the dependency.
-  Thus clock regression cannot place B before acknowledged predecessor A,
-  while genuine sibling revisions still resolve through authoritative CAS.
+- Every object publish reads the fixed pointer immediately before mutation
+  and again before ack. Losing ownership aborts the ack. A publication that
+  completed just before loss is an idempotent object.
+
+Concurrent sibling revisions still resolve through authoritative CAS.
 - GC treats every undrained epoch journal as a reference source. It runs only
   after the current fs_epoch is reasserted under the cross-process object
   lease.
@@ -187,7 +175,7 @@ zod in `packages/protocol`; server and clients share the same schema.
 | `embedding.retry {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Move the exact BLOCKED head back to PENDING (docs/01 §4) |
 | `embedding.skip {operation_id, embedding_model_id, stream, generation, ingest_seq, item_ordinal, reason}` | resolution record | Resolve one BLOCKED head as `RESOLVED_NO_VECTOR`; permanent vector exclusion for that source |
 | `embedding.cancel {operation_id, embedding_profile_id, reason}` | resolution record | Cancel a non-active target build under the write-queue barrier |
-| `status` | — | Neo4j connection, revision, active selectors, spool length, embedding backlog (Facts without a vector for the active profile, minus quarantined ledger entries), blocked embedding heads |
+| `status` | — | Neo4j connection, revision, active selectors, embedding backlog (Facts without a vector for the active profile, minus quarantined ledger entries), blocked embedding heads |
 | `verify {scope}` | — | Digests, Payloads, orphan Facts, ledger ↔ cache agreement |
 | `gen {stream, action: build\|status\|activate\|rollback\|retire\|qualify}` | selector, qualification record | Lifecycle operations; activate/rollback enforce the catch-up barrier, `qualify` appends an `EmbeddingQualification` and activates nothing by itself (docs/01 §4) |
 | `maintain` | caches | Run the maintenance job now (§6) |
@@ -287,8 +275,8 @@ the AND selector is a no-match, not guessed semantic metadata. The Episode's
 own schema is tested, not a possible future Fact schema. A structured selector
 therefore cannot guarantee matching facts hidden in unextracted text: policy
 responses report that limitation.
-Commands return the effective policy revision only after the serving barrier;
-they do not acknowledge deferred spool entries. Neo4j unavailable means
+Commands return the effective policy revision only after the serving barrier.
+Neo4j unavailable means
 `policy.set`, `policy.revoke` and `commit` fail with retryable
 `storage_unavailable`, never report unapplied effects as accepted. Revocation
 does not implicitly re-extract skipped assertions. Background rebuild removes
@@ -389,7 +377,7 @@ Each connection may hold at most two uploads and 128 MiB of temporary bytes;
 the daemon permits at most 64 connections, 32 open uploads and 1 GiB of upload
 temp globally. Incomplete uploads expire after one hour and are deleted.
 `upload_id` is unguessable and bound to the authenticated UDS session. Hashes accepted
-from RPC, spool or restore input must match `^[0-9a-f]{64}$` before path
+from RPC or restore input must match `^[0-9a-f]{64}$` before path
 construction. There is no client-side filesystem write path.
 Startup charges surviving temp files to the global quota before accepting an
 upload. Data without a committed sidecar is an orphan; a sidecar without
@@ -404,8 +392,8 @@ the explicit authenticated path and requires all three admission fields for a
 new revision. Existing stored versions win before metadata/parent validation;
 both insertion-order and canonical pre-lineage digests remain frozen. Parent
 custody is a server-issued hello-connection binding, not the client label.
-New lineage admission requires an available store, never an unauthorised legacy
-spool fallback. These compatibility choices qualify the all-new-v2 target below;
+New lineage admission requires an available store. These compatibility
+choices qualify the all-new-v2 target below;
 see [the implemented contract](../app/anamnesis/episode-lineage.md).
 
 ```text
@@ -494,7 +482,7 @@ Append-only adapters use their immutable record ID as both `record` and
 `source_revision`. `revision_key` is unique, while `digest` detects an adapter
 that mutates one token; the stored `episode_digest_version` decides which body
 that comparison uses, and an existing row's version always wins over the
-version a new caller or journal entry would have created (docs/01 §1).
+version a new request would have created (docs/01 §1).
 The origin head is the newest Episode by indexed `ingest_seq` under the
 Meta writer fence, not a separate CAS cache.
 
@@ -540,54 +528,29 @@ its `structure_revision` increment are atomic. `verify --scope topology`
 compares every cached chain with the indexed order; `rebuild --topology`
 deletes and reconstructs only these cache links.
 
-## 4. Spool — when Neo4j is unavailable
+## 4. Ingestion when Neo4j is unavailable
 
-If the Neo4j container is down or still starting, remember uses the bounded
-durable spool.
+`remember` and `remember.batch` write to Neo4j during the request. If storage
+is unavailable, the RPC returns retryable `storage_unavailable` and admits
+nothing for the failed write. Clients retain the input and retry. If a batch
+loses storage after committing an earlier item, its committed prefix remains;
+no later item is attempted. Retrying the same body under a committed
+`revision_key` returns the existing Episode with `created: false`. The writer
+checks the body against the retained row and refuses a different body with
+`revision_conflict`. This also resolves an uncertain transport outcome.
 
-```text
-  ~/.anamnesis/spool/<fs_epoch>/<yyyymmdd>.journal
-      [u32be length][canonical JSON][32 raw SHA-256 bytes]
-  ~/.anamnesis/spool/<fs_epoch>/<yyyymmdd>.done
-      same framing for {offset, record_hash} cursors
-```
+Object uploads remain independent of Neo4j. Startup, status, and remember can
+recheck storage; a bounded recovery probe wakes the identity, embedding, and
+extraction workers when storage returns.
 
-- The objects/ write is independent of Neo4j and proceeds as usual.
-- The framed record is appended and **fsynced before the ack**. Response:
-  `{spooled: true, spool_seq}`. There is no id yet and nothing is "created" —
-  callers find the Episode later by `revision_key`.
-- Canonical JSON includes `fs_epoch`, contiguous per-epoch `local_seq`,
-  `record_uuid`, `origin_key`, `revision_key`,
-  `previous_revision_key` and the server-selected **creation**
-  `episode_digest_version`. Every newly admitted record carries version 2;
-  a legacy acknowledged record with no version replays as version 1.
-- When Neo4j is back, drain the dependency-ready records in the deterministic
-  cross-epoch order from §0. For each record the transaction commits first,
-  then its checksummed `.done` cursor is appended and fsynced. Cursors advance
-  only over the contiguous processed prefix of each journal. A crash between
-  commit and cursor replays the record, and `revision_key` makes it a no-op.
-- At drain, an Episode already stored under that `revision_key` is
-  authoritative and its stored version verifies the retry; the captured
-  journal version controls only creation when the key is absent. So a new
-  version-2 journal retry of an existing version-1 Episode stays a version-1
-  no-op with zero SETs, while an old versionless acknowledged entry still
-  creates the version-1 Episode it promised.
-- Startup truncates only an incomplete final frame. Any checksum-invalid
-  complete frame quarantines the **whole journal**—even at the tail—because it
-  may have been acknowledged and later boundaries are not trusted. Drain does
-  not advance through it; `anamnesis spool repair` is an explicit export and
-  re-import workflow. ENOSPC/short append truncates to the prior verified offset,
-  fsyncs, and rejects before another append. The cursor uses the last valid
-  framed entry and never guesses an offset.
-- Spool files are deleted after every line is done and `verify` has confirmed
-  the drained Episodes (default 7 days later). The spool is a queue, not part
-  of the authority (docs/01 §9).
-- The spool is capped at 1 GiB and refuses an append when free space would
-  fall below 2 GiB. `remember` then returns `resource_exhausted` and the caller
-  retains the request for retry. Durability cannot promise success under
-  ENOSPC.
-- recall does not read the spool. While Neo4j is unavailable, recall waits for
-  warmup and then returns an empty success ([05-recall](05-recall.md) §8).
+On upgrade, startup ignores an absent or empty legacy `spool/`. A nonempty
+legacy directory may contain unapplied acknowledged writes: startup fails with
+its path and leaves it untouched for recovery before upgrading. An absent or
+empty legacy `deliveries/` is also fine; leftover pre-commit reservation files
+may be removed at startup with a log event. They were never acknowledgements.
+
+While Neo4j is unavailable, recall waits for warmup and then returns an empty
+success ([05-recall](05-recall.md) §8).
 
 ## 5. Cold path — extraction worker
 
@@ -1156,8 +1119,7 @@ looks at global structure, and the place where GDS is used if at all.
                           · export only IDs and MENTIONS/RELATES_TO arcs for Facts with
                             max_source_ingest_seq ≤ the pin to
                             ~/.anamnesis/tmp/dream/<operation_id>/, capped at 8 GiB
-                          · start only with ≥ 10 GiB free so the spool's 2 GiB floor
-                            remains reserved; delete+directory-fsync the temp tree in finally
+                          · start only with ≥ 10 GiB free to leave 2 GiB free; delete+directory-fsync the temp tree in finally
                           · load that file into a disposable GDS container; Leiden returns
                             only {element_id, community_assignment}
                           · baseline GDS 2.13.12 image is digest-pinned, network=none, temporary volume;
@@ -1227,8 +1189,8 @@ tries again next cycle.
 | Neo4j up, embed up | normal | normal | normal | normal |
 | Neo4j up, embed down | normal | vector channel dropped (`channels_used`) | embed stage backs up (transient retry, then a BLOCKED head) | dreaming phase 2 skipped |
 | Neo4j up, embedding head BLOCKED | normal | that model's coverage frozen; active profile serves its prior prefix, BM25/session unaffected | that model's publication paused until an authenticated retry or skip | unchanged |
-| Neo4j cold start (≤ warmup_wait 20 s) | spool, or `resource_exhausted` at its cap | wait, then empty success `neo4j_unavailable` | paused | paused |
-| Neo4j down | spool, or `resource_exhausted` at its cap | empty success `neo4j_unavailable` | paused | paused |
+| Neo4j cold start (≤ warmup_wait 20 s) | retryable `storage_unavailable` | wait, then empty success `neo4j_unavailable` | paused | paused |
+| Neo4j down | retryable `storage_unavailable` | empty success `neo4j_unavailable` | paused | paused |
 | LLM down | normal | normal | backs up (retry) | maintenance normal; dreaming phase 1 summary fallback, phase 2 skipped |
 
 When Neo4j is unavailable, recall's diagnostic-only empty success includes
@@ -1260,7 +1222,7 @@ Personal, single-user, localhost. The boundary is the OS user.
 | UDS | `sock` mode 0600 plus a per-install 32-byte capability in `socket.token` (0600), required by `hello`. This is portable in pure Node; no native peer-credential addon |
 | control commands | Policy changes, generation/maintenance/gc operations, adjudication review and correction, embedding retry/skip/cancel and qualification require authenticated explicit calls; never dispatch commands parsed from retrieved or ingested content |
 | provenance metadata | `origin_role`, `lineage_mode` and `parent_recall_ids` come from the authenticated adapter and are verified against the caller binding. Never infer lineage from prose, and never let ingested text claim independence (D49) |
-| request caps | length-prefixed RPC frame ≤ 1 MiB; decoded chunk ≤ 512 KiB; object ≤ 64 MiB; per connection 2 uploads/128 MiB temp; global 64 connections/32 uploads/1 GiB temp; spool ≤ 1 GiB and ≥ 2 GiB free-space floor |
+| request caps | length-prefixed RPC frame ≤ 1 MiB; decoded chunk ≤ 512 KiB; object ≤ 64 MiB; per connection 2 uploads/128 MiB temp; global 64 connections/32 uploads/1 GiB temp |
 | policy caps | active denies ≤ 256; literal ≤ 512 Unicode scalars after NFC; resolved entity aliases ≤ 256 per policy per generation, lookup ≤ 257 entries; reject overflow atomically, never truncate; revoke remains allowed |
 | Neo4j bind | container publishes `127.0.0.1:7687` only; no HTTP port published |
 | Neo4j auth | password generated per install (32 random bytes, base64) into `neo4j.auth` (0600) and injected into compose. No default password anywhere |

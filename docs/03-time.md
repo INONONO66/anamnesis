@@ -22,8 +22,7 @@ record command acceptance and are not selectable historical memory content.
 - Fact: **the time the claim took effect.** "I moved to Seoul in 2019" said in
   2026 gives Fact.time = 2019, Episode.time = 2026.
 - Episodes additionally carry `ingested_at` (server ms), written once at
-  CREATE, immutable, and **not used in snapshot computation** — audit and
-  spool-drain ordering only.
+  CREATE, immutable, and **not used in snapshot computation** — audit only.
 
 ## 2. Time resolution (extraction)
 

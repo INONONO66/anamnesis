@@ -57,7 +57,7 @@ export class RpcClient {
   }
   private fail(error: Error, known = false): void {
     // A closed transport after an admitted request leaves its effect unknown;
-    // callers must resolve it with ingest.status rather than retrying blindly.
+    // remember callers can resolve it by retrying the exact delivery.
     const unknown = known ? error : Object.assign(new Error("RPC connection closed; delivery outcome is unknown", { cause: error }), { code: "outcome_unknown", retryable: false });
     this.timing?.({ layer: "client", event: "transport_terminal", hash: timingHash(String(error)) });
     for (const [id, pending] of this.pending) {

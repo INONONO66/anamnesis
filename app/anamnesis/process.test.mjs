@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { mkdtemp, rm, stat, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, readFile, writeFile, readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
@@ -57,15 +57,6 @@ async function fixture(run, configure = async () => ({})) {
 }
 const hello = { token:'correct-token',client:'node-test',commit_mode:'receipt',version:1 };
 const params = { episode:{schema:'anamnesis.original-message/1',time:{value:'2026-09-09T00:00:00Z',precision:'second'},content:'durable Node request',origin:{source:'test',session:'s',actor:'a',record:'r'},mass:1,properties:{}},source_revision:'r1',expected_previous_revision_key:null };
-const sha = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-// Independent canonical serialization: JSON.stringify's property list imposes
-// sorted keys recursively, rather than sharing the daemon's digest helper.
-function bodyDigest(params) {
-  const envelope={digest_version:1,params};const keys=new Set();
-  const collect=value=>{if(value && typeof value==='object'){for(const [key,child] of Object.entries(value)){if(!Array.isArray(value))keys.add(key);collect(child);}}};
-  collect(envelope);
-  return createHash('sha256').update(JSON.stringify(envelope,[...keys].sort())).digest('hex');
-}
 test('actual Node/socket reports unconfigured providers as disabled', {timeout:15000}, ()=>fixture(async ({client})=>{
   const p=client();
   const h=(await p.request('hello',hello)).result;
@@ -109,24 +100,15 @@ test('actual Node/socket authenticates token and prevents pre-hello remember', {
   const valid=client();assert.equal((await valid.request('hello',hello)).result.principal,'installation');
   assert.equal((await stat(root)).mode&0o777,0o700);assert.equal((await stat(root+'/token')).mode&0o777,0o600);
 }));
-test('actual Node/socket durably accepts offline remember with real revision identity and bounded status', {timeout:15000}, ()=>fixture(async ({client,root})=>{
-  const p=client();const h=(await p.request('hello',hello)).result;
-  const result=(await p.request('remember',params)).result;
-  assert.equal(result.state,'spooled');assert.equal(result.revision_key,sha([sha(['test','s','a','r']),'r1']));
-  assert.equal(result.data_incarnation,h.data_incarnation);
-  assert.equal(result.body_digest,bodyDigest(params));
-  assert.deepEqual(await readdir(root+'/deliveries'),[]);
-  const duplicate=(await p.request('remember',params)).result;assert.deepEqual(duplicate,result);
-  // Wire insertion order and an omitted default do not change the normalized
-  // admission envelope; JSON-RPC request IDs are not part of delivery identity.
-  const {properties,...episode}=params.episode;
-  const normalizedDuplicate=(await p.request('remember',{expected_previous_revision_key:null,source_revision:'r1',episode})).result;
-  assert.deepEqual(normalizedDuplicate,result);
-  assert.equal((await p.request('remember',{...params,episode:{...params.episode,content:'different'}})).error.data.code,'revision_conflict');
-  const s=(await p.request('status')).result;assert.equal(s.state,'degraded');assert.equal(s.storage,'unavailable');assert.equal(s.spool.pending,1);assert.ok(s.spool.bytes>0);
-  const {revision_key,body_digest,data_incarnation}=result;
-  assert.deepEqual((await p.request('ingest.status',{revision_key,body_digest,data_incarnation})).result,result);
-  assert.equal((await p.request('ingest.status',{revision_key,body_digest:'0'.repeat(64),data_incarnation})).result.state,'unknown');
+test('actual Node/socket refuses single and batch ingestion while storage is unavailable', {timeout:15000}, ()=>fixture(async ({client,root})=>{
+  const p=client();await p.request('hello',hello);
+  for (const response of [await p.request('remember',params), await p.request('remember.batch',{deliveries:[params]})]) {
+    assert.deepEqual(response.error.data,{code:'storage_unavailable',retryable:true});
+  }
+  const {state,storage}= (await p.request('status')).result;
+  assert.deepEqual({state,storage},{state:'degraded',storage:'unavailable'});
+  await assert.rejects(stat(root+'/spool'),{code:'ENOENT'});
+  await assert.rejects(stat(root+'/deliveries'),{code:'ENOENT'});
 }));
 test('G005 RED: real Node/UDS backup restore require auth and refuse without trusted adapter', {timeout:15000}, ()=>fixture(async ({client,root})=>{
   const p=client();
@@ -146,23 +128,28 @@ test('G005 RED: real Node/UDS backup restore require auth and refuse without tru
   await assert.rejects(stat(root+'/backup.state'),{code:'ENOENT'});
   await assert.rejects(stat(root+'/restore.state'),{code:'ENOENT'});
 }));
-test('actual Node/socket exposes spool quarantine and rejects new ingestion before object lookup', {timeout:15000}, ()=>fixture(async ({client,root})=>{
-  const p=client();await p.request('hello',hello);
-  const receipt=(await p.request('remember',params)).result;
-  assert.equal(receipt.state,'spooled');
-  // Corrupt opaque journal bytes, without interpreting or writing producer
-  // marker/cursor formats. Quarantine is observed only through RPC status.
-  const journal=root+'/spool/spool.journal';const bytes=await readFile(journal);
-  bytes[bytes.length-1]^=1;await writeFile(journal,bytes);
-  const status=(await p.request('status')).result;
-  assert.equal(status.spool.quarantined,1);assert.equal(status.state,'degraded');
+test('startup ignores an empty legacy queue and cleans pre-commit reservation files', {timeout:15000}, ()=>fixture(async ({root})=>{
+  assert.deepEqual(await readdir(root+'/spool'),[]);
   assert.deepEqual(await readdir(root+'/deliveries'),[]);
-  const next={...params,source_revision:'new-after-quarantine',payload_hash:'0'.repeat(64)};
-  assert.equal((await p.request('remember',next)).error.data.code,'spool_corrupt');
-  assert.deepEqual(await readdir(root+'/deliveries'),[]);
-  const {revision_key,body_digest,data_incarnation}=receipt;
-  assert.equal((await p.request('ingest.status',{revision_key,body_digest,data_incarnation})).result.state,'quarantined');
+}, async root=>{
+  await mkdir(root+'/spool');await mkdir(root+'/deliveries');
+  await writeFile(root+'/deliveries/'+'a'.repeat(64)+'.json','reservation');
 }));
+test('startup refuses a nonempty legacy queue without touching its contents', {timeout:15000}, async ()=>{
+  const root=await mkdtemp('/tmp/ana-upgrade-');
+  const spool=root+'/spool', journal=spool+'/spool.journal';
+  try {
+    await mkdir(spool);await writeFile(journal,'unapplied legacy data');
+    const child=spawn(process.execPath,[entry],{env:{...process.env,ANAMNESIS_RUNTIME_ROOT:root,ANAMNESIS_RUNTIME_TOKEN:'correct-token',ANAMNESIS_NEO4J_PASSWORD:'unused-offline',ANAMNESIS_NEO4J_URI:'bolt://127.0.0.1:1'},stdio:['ignore','ignore','pipe']});
+    let stderr='';child.stderr.on('data',bytes=>{stderr+=bytes});
+    try {
+      const [code]=await once(child,'close',{signal:deadline()});
+      assert.equal(code,1);assert.ok(stderr.includes(spool),stderr);
+      assert.equal(await readFile(journal,'utf8'),'unapplied legacy data');
+      await assert.rejects(stat(root+'/anamnesis.sock'),{code:'ENOENT'});
+    } finally { if(child.exitCode===null&&child.signalCode===null) child.kill('SIGKILL'); }
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
 test('actual Node/socket handles split u32-be frames and rejects oversize/invalid UTF-8 before decoding', {timeout:15000}, ()=>fixture(async ({client})=>{
   const p=client();
   assert.equal((await p.frame(encode({jsonrpc:'2.0',id:1,method:'hello',params:hello}),true)).result.version,1);

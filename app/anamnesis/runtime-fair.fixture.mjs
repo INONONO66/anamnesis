@@ -1,12 +1,10 @@
-// Fixture-only DB availability probe and invalid-envelope cohort. No Engine
-// write or spool completion is mocked; malformed entries must never reach them.
+// Fixture-only storage probe and bounded embedding turns; socket admission and scheduling stay real.
 import { foreground } from './daemon.ts';
 import { Runtime } from './runtime.ts';
 import { Frames } from './wire.ts';
 
 const proto = Runtime.prototype;
 const init = proto['init'];
-const validate = proto['validated'];
 const status = proto['status'];
 let online = false, handled = 0, park = process.env.FAIR_PARK === '1', release;
 process.on('message', message => {
@@ -24,21 +22,21 @@ proto['init'] = async function () {
   this.engine.init = async () => {};
   this.engine.claimWriterEpoch = async () => 1;
   this.engine.status = async () => ({ pendingOutbox: 0 });
+  this.capabilities.embeddings = true;
   await init.call(this);
-  const page = this.spool.page.bind(this.spool);
-  this.spool.page = async (...args) => {
-    const result = await page(...args);
-    if (online && park) {
-      park = false;
-      const released = new Promise(resolve => { release = resolve; });
-      process.send?.({ event: 'parked' });
-      await released;
-    }
-    return result;
-  };
-  for (let i = 0; i < 12; i++) await this.spool.append({ origin: `invalid-${i}`, revision: `invalid-${i}`, predecessor: null, body: {}, incarnation: this.installation.incarnation });
 };
-proto['validated'] = function (...args) { handled++; return validate.apply(this, args); };
+proto.embeddingTurn = async function () {
+  if (park) {
+    park = false;
+    const released = new Promise(resolve => { release = resolve; });
+    process.send?.({ event: 'parked' });
+    await released;
+  }
+  handled++;
+  if (handled < 12) return 'more';
+  process.send?.({ event: 'fixture-settled' });
+  return 'idle';
+};
 proto['status'] = async function (...args) {
   const value = await status.apply(this, args);
   process.send?.({ event: 'control-return', handled });

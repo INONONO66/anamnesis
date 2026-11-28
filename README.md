@@ -46,7 +46,7 @@ normative; code follows them.
 |---|---|
 | [00-overview](docs/00-overview.md) | What is this, what are the invariants, where is everything |
 | [01-storage](docs/01-storage.md) | What is stored where — layers, elements, link lattice, generations, filesystem |
-| [02-daemon-and-pipelines](docs/02-daemon-and-pipelines.md) | Who writes — single writer, RPC, `structure_revision`, spool, extraction, dreaming |
+| [02-daemon-and-pipelines](docs/02-daemon-and-pipelines.md) | Who writes — single writer, RPC, `structure_revision`, extraction, dreaming |
 | [03-time](docs/03-time.md) | Which world — `snapshot(T)`, derived visibility, change vs correction, non-recursive `INVALIDATES` |
 | [04-forgetting](docs/04-forgetting.md) | How alive — m₀, stability, hit ledger on episodes, commit protocol, replay |
 | [05-recall](docs/05-recall.md) | How to retrieve — candidates → seeds → envelope → PPR → RRF → assembly, degradation ladder |

@@ -96,17 +96,20 @@ The client has no Bolt connection or Bun runtime dependency.
 - Committed receipts are read back from Neo4j with their real ID and ingest
   sequence. A versioned canonical RPC-body digest additionally binds fields such
   as mass that the existing core digest does not cover. Both digests are checked;
-  matching only a revision key never makes an UNKNOWN delivery successful.
-- A transient binding file reserves delivery identity before the live store write
-  or spool append. The daemon removes it after Neo4j commits or after
-  `DurableSpool.append`, directory fsync, and verification publish the complete
-  binding in the spool. Lineage admissions are never spooled and write no
-  reservation.
-- Startup, authenticated `status`, `remember`, and `ingest.status` probe the DB and
-  drain dependency-ready entries. Recovery is **demand-driven**, not a background
-  polling service. Use `status` after restoring the DB. Missing predecessors,
-  revision conflicts, cycles, and quarantine remain visible rather than being
-  marked complete.
+  matching only a revision key never makes a retry successful.
+- `remember` and `remember.batch` write directly to Neo4j during the request.
+  If storage is unavailable, the failed write is not accepted; the client
+  receives retryable `storage_unavailable` and retries the same input. In a
+  batch, an already committed prefix is retained; later items are not tried.
+  An exact retry of a committed revision returns `created: false`, while a
+  different body under the same key returns `revision_conflict`.
+- Startup, authenticated `status`, and `remember` probe the DB. A bounded
+  background probe resumes the identity, embedding, and extraction workers
+  after storage recovery.
+- Startup ignores an absent or empty legacy `spool/` and refuses a nonempty
+  one, naming its path and preserving it. An absent or empty `deliveries/` is
+  fine; leftover reservation files were never acknowledgements and may be
+  cleaned up with a log event.
 - SIGTERM/SIGINT and authenticated `shutdown` stop admission, finish accepted
   work, close clients/drivers, remove uploads/socket, and release ownership.
 
@@ -148,7 +151,7 @@ The four recovery scenarios use owned, isolated Neo4j and real built Node UDS:
 ```sh
 bun run build:runtime
 bun scripts/qa/runtime-scenarios.ts --case uds-ingest --evidence-root /tmp/g002-evidence
-# Other cases: object-spool-crashes, outage-drain-50, managed-ingest-restart. Run database cases serially on small Docker VMs.
+# Other cases: object-upload-crash, storage-retry, managed-ingest-restart. Run database cases serially on small Docker VMs.
 ```
 
 ## Live extraction acceptance (explicit opt-in)
@@ -215,23 +218,4 @@ RED caught malformed-JSON and fabricated revision-identity behavior; its initial
 authentication assertions already passed. Later process tests additionally cover
 version mismatch, split/oversized frames, invalid UTF-8, uploads, and shutdown.
 
-Spool completion advances only through the contiguous committed prefix; later
-completed records remain replay-visible behind a gap. Runtime lookups and drain
-use finite pages. `status`, which every `remember` asks, reuses its last full
-verification while no spool file has changed, and a live commit wakes the drain
-only when a blocked entry waits for that revision. Marker publication uses synced temporary files, rename and
-directory sync, rather than overwriting published markers in place. These
-guarantees do not establish a bound on total scan work, request latency, or
-runtime status-map memory. The evidence proves process restart and database
-outage/recovery, **not hardware power-loss qualification or retention-based
-journal reclamation**.
-
-The `deliveries/` directory holds only transient admission reservations.
-Committed exact outcomes are reconstructed and verified from Neo4j; pending
-exact outcomes come from their durable spool frames. A reservation left by a
-crash or an older daemon is removed after either durable owner verifies it.
-With the daemon stopped, an existing `deliveries/` directory from an older
-version may be deleted; startup recreates it. Committed objects are not
-garbage-collected by this experimental runtime. Database row reads are
-daemon-only and coupled explicitly to the current originals schema; no new core
-export or package was added.
+Committed objects are not garbage-collected by this runtime.

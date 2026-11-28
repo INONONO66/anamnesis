@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { RpcClient } from "../../app/anamnesis/client.ts";
 import { socketPath } from "../../app/anamnesis/config.ts";
 import { timingHash, timingLog } from "../../app/anamnesis/timing.ts";
-import type { RpcMethod, RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
+import type { RpcMethod, RpcRememberParams, RpcCommittedResult, RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
 import type { ContinuousSoakDriver } from "./g006-runtime-scenarios.ts";
 import type { ProcessResult, startProcess } from "./runtime-scenarios.ts";
 
@@ -19,7 +19,7 @@ export function createContinuousDriver(start: typeof startProcess, evidence: str
   let terminalEvidence: Promise<string | undefined> | undefined;
   let client: RpcClient | undefined;
   let identity: { data_incarnation: string; fs_epoch: string } | undefined;
-  const receipts = new Map<number, { revision_key: string; body_digest: string; data_incarnation: string }>();
+  const receipts = new Map<number, { params: RpcRememberParams; receipt: RpcCommittedResult }>();
   const redact = (text: string) => [endpoint?.password, token].reduce<string>((text, secret) => secret ? text.replaceAll(secret, "[REDACTED]") : text, text);
   const timing = timingLog(join(evidence, "continuous-timing.jsonl"));
   let eventSequence = 0, callSequence = 0;
@@ -98,14 +98,14 @@ export function createContinuousDriver(start: typeof startProcess, evidence: str
       // Preserve the exact admitted delivery even if its receipt is lost.
       event({ event: "traffic_admitted", sequence, params, ...identity });
       const receipt = await observed("remember", () => client!.request("remember", params));
-      receipts.set(sequence, { revision_key: receipt.revision_key, body_digest: receipt.body_digest, data_incarnation: receipt.data_incarnation });
+      receipts.set(sequence, { params, receipt });
       event({ event: "traffic_receipt", sequence, receipt });
       if (receipt.state !== "committed") throw new Error(`traffic not committed: ${receipt.state}`);
       if (receipt.data_incarnation !== identity?.data_incarnation) throw new Error("traffic incarnation mismatch");
-      // ingest.status reads and validates the actual immutable DB artifact.
-      const verified = await observed("ingest.status", () => client!.request("ingest.status", receipts.get(sequence)!));
+      // Exact retry reads and validates the retained DB row.
+      const verified = await observed("remember", () => client!.request("remember", params));
       event({ event: "traffic_verified", sequence, receipt: verified });
-      if (verified.state !== "committed" || verified.id !== receipt.id || verified.ingest_seq !== receipt.ingest_seq) throw new Error(`traffic artifact not verified: ${verified.state}`);
+      if (verified.created || verified.id !== receipt.id || verified.ingest_seq !== receipt.ingest_seq) throw new Error(`traffic artifact not verified: ${verified.state}`);
       event({ event: "traffic_committed", sequence, receipt, ...identity });
     },
     async recover(sequence) {
@@ -113,9 +113,9 @@ export function createContinuousDriver(start: typeof startProcess, evidence: str
       await status();
       const delivery = receipts.get(sequence);
       if (!delivery) throw new Error(`missing traffic identity ${sequence}`);
-      const settled = await observed("ingest.status", () => client!.request("ingest.status", delivery));
+      const settled = await observed("remember", () => client!.request("remember", delivery.params));
       event({ event: "recovered", sequence, state: settled.state, receipt: settled, ...identity });
-      if (settled.state !== "committed") throw new Error(`traffic recovery unresolved: ${settled.state}`);
+      if (settled.created || settled.id !== delivery.receipt.id || settled.ingest_seq !== delivery.receipt.ingest_seq) throw new Error(`traffic recovery unresolved: ${settled.state}`);
     },
     async terminal() { trafficSequence = undefined; await status(); signal.throwIfAborted(); event({ event: "terminal_boundary", ...identity }); },
     async hashEvidence() {
