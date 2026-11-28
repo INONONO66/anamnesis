@@ -1,266 +1,93 @@
 # 09 — Roadmap
 
-Three stages. Each stage must be a usable product on its own, and the next
-stage inherits the previous one's data without migration — the originals
-layer and the Hit ledger are fixed in v0.1 and never change afterwards.
-
-```text
-  v0.1  originals + forgetting + search      "a search engine that forgets"
-  v0.2  derived layer + time + local PPR     "memory that follows relationships"
-  v0.3  dreaming + validation + scale        "memory that organizes itself"
-```
+This is the only document that describes unbuilt work. Docs 00 to 08 describe
+what the code does; when they mention a target, they point here. Every entry
+names what ships today, so the boundary stays visible.
 
 ## Where the code is today
 
-The repository (branch `anamnesis2`) holds `packages/protocol` and
-`packages/core` plus the `app/anamnesis` daemon and its operator CLI. What
-runs:
+The repository (branch `anamnesis2`) holds `packages/protocol`,
+`packages/core` and the `app/anamnesis` daemon with its ops CLI. It runs:
 
-- An originals write path into Neo4j with the D49 Episode digest: version 2
-  (`episode-rfc8785-v2`) with lineage properties written in the Episode's own
-  transaction when lineage is supplied, version 1 otherwise, and a
-  Lucene fulltext index over Element content (`element_content`, cjk
-  analyzer).
-- The `recall` RPC, served as `Engine.recallHybrid` → `Store.recall`
-  (`packages/core/src/store/recall-store.ts`). Its candidate channels are
-  Episode exact-ID, Episode BM25, Episode session (recent Episodes of the
-  request session), Fact vector over `vec_fact_<profileId>` (LIMIT 64) and
-  Fact BM25, both for the selected extraction generation (D56). On top of the
-  candidates: the T/now pin, the policy-revision barrier (D43), the exact
-  byte budget with a durable Usage (D44, D62), hit-cache retention
-  and utility in originals ranking, a real PPR solver
-  (`packages/core/src/dynamics/ppr.ts`) seeded uniformly from the
-  candidates over seed-adjacent ConductingArc (LIMIT 1024), the first
-  DERIVED_FROM row as Fact companion, and CONTRASTS peers (LIMIT 4) under a
-  current-policy check, and a bounded same-session Episode window (default
-  two before / two after the Fact's DERIVED_FROM source Episode, D56).
-  Shipped in this change: Fact validity at assembly with
-  `provenance.supersedes` under the invalidating Fact (#263), the Fact score
-  with `A_Fact` over `sigma_fact = 30` and the source-mean `U_Fact` (#267),
-  the `time` window and `order` (#269), and `known_by` with `ingested_at`
-  on INVALIDATES links (#270, D57). D62 replaces `commit` (#266) with an installation-scoped `report_outcome` RPC.
-- The Fact embedding lane: vectors on separate `Embedding_<profileId>`
-  nodes keyed by `fact_id`, one `vec_fact_<profileId>` index per profile,
-  the `embedding-state.json` ledger (version 2, `facts`) and the
-  `embedding.recover` / `embedding.requeue` / `embedding.status` RPCs
-  (D54, D56). Episodes are never embedded.
-- The extraction scheduler (`packages/core/src/extraction-scheduler.ts`),
-  running continuously in the daemon through the OpenAI-compatible chat
-  provider: a `claim_window` call per same-`session_key` window of up to
-  eight Episodes plus up to three preceding context Episodes (D56), then a
-  judge per Episode → materialize Facts, Entities, evidence and
-  ConductingArc for the generation, with the relation judge (D53) gating
-  Fact→Fact relations over entity-shared Facts unioned with the top-8
-  `vec_fact` neighbours, at most 16 deduplicated with entity-shared first,
-  entity-only with a recorded reason (provider_absent, profile_absent,
-  embed_failed, query_failed) when the vector channel is unavailable (#265). With `ANAMNESIS_EXTRACTION_GATE=jev` the Jev pre-gate
-  (`packages/core/src/jev-gate.ts`) scores the window and cancels all of its
-  members only when the window's maximum score is under the threshold;
-  otherwise the provider call proceeds. State lives in
-  `extraction-state.json` (D55); `extraction.audit.create` / `run` /
-  `status` run the same pipeline on demand. This is the production
-  extraction path, not an audit-only one.
-- `anamnesis-ops load`: loads one source of a cleaned corpus (one JSONL
-  record per message, prepared outside the repository) as `remember` calls
-  with direct lineage, rooms in parallel and each room in order, resuming
-  from a line cursor per room file. The earlier in-repository collectors and
-  raw-source adapters are gone.
-- Policy RPCs (D43), budget (D44), the outcome Hit ledger (D62),
-  conflict bundles (D46), `backup` / `restore`, the authority snapshot and
-  the hit cache.
-- `ops projection write`: read-only markdown per Entity of valid Facts
-  (#268). The `projection {T?}` RPC snapshots the writable generation at T
-  with policy denies applied (`ProjectionStore.snapshotTx`,
-  `capabilities.projection: true`), and `anamnesis-ops projection write
-  <dir>` writes one `<slug>-<id tail 12 hex>.md` per Entity with a footer pinned to
-  the request T (`latest`: the command sends none), never the wall clock, so
-  an unchanged graph yields byte-identical files. The daemon never reads the
-  directory back (01 §4).
+- direct `remember` into Neo4j with the two Episode digest versions, payload
+  upload, lineage admission and room/space/reply caches (docs/01, docs/02 §3);
+- the extraction scheduler with windowed claims, the optional Jev pre-gate,
+  validated Fact writes, the relation judge and generation cutover
+  (docs/02 §5);
+- the Fact embedding lane (docs/01 §4);
+- `recall` as `derived-hybrid-v1`: Episode exact-ID, BM25 and session
+  channels, Fact BM25 and vector channels, uniform-seed PPR over seed-adjacent
+  ConductingArc rows, policy and validity filters, exact budgets and one
+  durable Usage per recall ([05-recall](05-recall.md));
+- `report_outcome` with signed Episode credit (docs/04);
+- content-scope policy by Episode or source, the identity lane, the markdown
+  projection, journaled backup and restore, and the `graph.envelope`
+  diagnostic read.
 
-Not in code: Entity and relationship vectors (no `vec_rel_*` index, no
-`embedding_m_<modelhex>` property), the Fact session channel, the Entity
-identity channel, hub damping, the top-128 seed cap, the 2,000-node /
-20,000-link bounded envelope and its timeout degradation, D46 occurrence
-grouping and dreaming. The former `Engine.recall(string)`
-fulltext-only test helper is gone; tests go through `Engine.recallHybrid`.
+Neo4j holds memory and the cursors that resume work. Pipeline bookkeeping is
+in state files under the runtime root (D54, D55). Collected raw data stays
+outside the graph; the archive is the collection source of truth and Neo4j is
+the memory (D56).
 
-Everything below is the normative target, not a description of the code.
-Wherever the code at HEAD disagrees with these documents, v0.1 brings it in
-line: the docs lead. The gap is established by reading HEAD against docs/01
-and docs/02, not by the list above. The direction decided on 2026-10-11
-(a raw archive outside the graph as the collection SSOT, Fact-first recall
-with Episodes as provenance only, windowed extraction behind a cheap
-pre-gate) is recorded in D56.
+## Future register
 
-One boundary is deliberately narrower than "bring it in line". The Episode
-digest has two versions: D49's version 1 for metadata-free Episodes and
-version 2 (`episode-rfc8785-v2`, selected by the stored
-`episode_digest_version`) for Episodes admitted with lineage. The verifier
-dispatches on the stored version, so verify, retry, journal replay,
-backup/restore and rebuild run write-free over version-1 rows. No Episode is
-reserialized, relabeled or given lineage in place, and there is no data
-migration in any stage (docs/01 §1, docs/08).
+Each entry is a target, not a contract. Promoting one means a decision-log
+entry, code and tests in the same change.
 
-### Neo4j holds memory only
-
-A cross-cutting cleanup moves every operational ledger out of the graph and
-into state-dir files plus structured audit log lines, leaving Neo4j with
-Episodes, Facts, Entities, links, vectors and the coverage cursors.
-
-| Goal | State | Contents | Docs |
-|---|---|---|---|
-| G2 | done (#244, #246) | embedding lane: `EmbeddingAttempt` and `Outbox` leave the graph; missing-vector scan; `embedding-state.json` ledger | 01 §4, 02 §3, D54 |
-| G3 | done (#249) | extraction lane: the five pipeline ledger labels and their seven constraints leave the graph; coverage-driven scan; `extraction-state.json` journal with sealed-entry pruning; `extraction.*` audit events | 01 §6, §7, 02 §5, D55 |
-| G4 | done (#250) | materialization custody in `materialization-state.json`, relation premises/verdicts in `ExtractionJournalEntry.relations`, Episode lineage properties, indexed Episode origin head, Entity witness properties; formerly separate graph labels | 01 §1, §3.3, §6–7 |
-| G6 | done (#263, #267, #269, #270) | recall serving: Fact validity and `provenance.supersedes` at assembly; `A_Fact` / `U_Fact` in the score; `time` window and `order`; `known_by` as one `ingested_at` predicate with `ingested_at` on INVALIDATES links | 03 §4, §6–7, 05 §1, §6, D57 |
-| G8 | done (#265) | relation judge candidates: entity-shared ACTIVE Facts unioned with the top-8 `vec_fact` vector neighbours, at most 16 deduplicated; entity-only fallback with the recorded reason (`provider_absent`, `profile_absent`, `embed_failed`, `query_failed`); `body_digest` a pure function of (fact, candidates) | 02 §5 L4, D53 |
-| G9 | done (#264) | archive admit over the daemon socket with per-source cursor resume; `admit --archive --socket --token [--source]` sends each archive record as one Episode through `remember`, tallies created / duplicate / failed, and keeps `<archive>/admit/<source>.cursor.json` (atomic rewrite after every ack, `in_progress` resumes after `last`, `complete` or absent means a full run that the daemon dedupes); the archive package was removed later, and loading is `anamnesis-ops load` | packages/archive README, D56 |
-| G10 | done (#268) | `ops projection write`: read-only markdown per Entity of valid Facts; `projection` RPC over the writable generation at T, `FACT_VALID` plus content deny policies, deterministic file bytes, stale `*-<12 hex>.md` files removed | 01 §4, 02 §2 |
-
-## v0.1 — originals, forgetting, search
-
-**Goal**: Episodes go in and come out; their stability and utility change only on an explicit signed outcome. Forgetting is evaluated on the server clock.
-
-| Area | Contents | Docs |
+| Target | Ships today | Evidence needed before it ships |
 |---|---|---|
-| storage | Neo4j compose, schema, version-dispatched Episode digest (frozen version-1 body for stored rows, version 2 for new admissions, zero SETs either way), global `ingest_seq`, indexed Episode origin-head lookup under the Meta writer fence, `:Element:Episode`, Payload metadata + `objects/`, originals links, rebuildable event-time NEXT_EPISODE topology | 01 §1–2, §6–8; 02 §3 |
-| daemon | `anamnesisd` UDS JSON-RPC, bounded object upload, write queue, serving revision, pure-Node nonce/heartbeat singleton lease, core RPCs | 02 §1–3 |
-| security | 0700/0600 modes, UDS capability token, length-prefixed frame and global resource caps, bolt on 127.0.0.1 only, per-install random password | 02 §10 |
-| direct ingestion | commit before ack, retry on storage loss, verify duplicate bodies | 02 §4, §9 |
-| provenance | authenticated `origin_role` / `lineage_mode`, lineage properties written on the Episode in its transaction, bounded parent receipts, roots and depth, `unknown` lineage never presumed independent | 01 §3.3, D49 |
-| embedding | `embed_episode` worker driven by a missing-vector scan (Episodes with no `EmbeddingVector` for the active profile) with attempt/quarantine state in the `embedding-state.json` ledger, bounded batches, three-part embedding identity (`embedding_model_id`, `vector_index_id`, `embedding_profile_id`), per-entry state machine with bounded retry, terminal-prefix coverage, and authenticated operator control through `embedding.recover`, `embedding.requeue` and `embedding.status` (D54) | 01 §4, 02 §3, D51, D54 |
-| durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
-| time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
-| forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
-| report | `report_outcome` allocates a signed verdict by final rank and source. One Hit per credited Episode. | 04 §5–6, 05 §10 |
-| Usage | Immutable ordered primary selection, source attribution and bound lineage. One optional UsageOutcome, no TTL. | 05, D62 |
-| utility | per-Episode `U` from rank-weighted outcome attribution (`Σ w_e = 1`), rebuildable utility cache, `(1 + β·U)` in score; zero and missing distinct | 04, D45 |
-| policy | `policy.set` / `policy.revoke` RPCs, `anamnesis.memory-policy/1` Episodes, active-policy cache rebuild, policy-revision barrier, `content` scope over raw text, control Episodes excluded from search, structured-selector limit reported | 02, D43 |
-| budget | `budget {unit, limit, tokenizer_id?}`; exact byte and scalar counts; pinned tokenizer or reject; greedy whole-bundle packing over deterministic `context_text`; `used_budget`; hard response byte cap retained | 05, D44 |
-| recall | vector (nodes) + BM25 + session channels with caps, RRF, score = rel·max(m,.02)^γ·(1+β·U), policy hard filter, deterministic ordering, degradation ladder, diagnostics | 05 (without PPR, identity, relationship vectors, conflict bundles) |
-| clients | ops CLI (`up/down/status/verify/backup/restore/projection write`), RPC contract export (`schemas/`); remember/recall harnesses are external (D39) | 08 |
-| protocol | zod: Episode-only time requirement, `source_revision`, `previous_revision_key`, `revision_key`, `correction` schema, Hit, RPC methods | 08 |
-| CI | forgetting fixtures, utility attribution fixtures, budget exactness fixtures, policy suppression fixtures, receipt exact-once fixtures, RRF invariance, ordering conventions, contract schema tests | 04 §10, 07 §6, 08 |
+| Entity and relationship vector channels | Fact vectors only, one `vec_fact_<profileId>` index per profile; no Entity or `RELATES_TO` vector property or index | a profile and index scheme for the new targets, coverage rules, and a recall evaluation showing the channel helps |
+| Fact session channel | Episode session channel (last 32 Episodes); the per-Fact session window is assembly, not a channel | a bounded per-Episode Fact read and an evaluation against the window |
+| Entity identity channel and the `entities` block | Episode exact-ID lookup (`identity_mode: "exact_episode_id"`); `entities` is always empty; the D59 identity lane is not read by recall | linking extracted Entities to Persons, and a channel that doesn't leak denied mentions |
+| Hub damping | every candidate seeds with weight 1; saturated sources are skipped only in `graph.envelope` | a degree signal recall can read cheaply, and an ablation (docs/07 §7) |
+| Top-128 seed cap | no cap; every distinct candidate seeds | seed ranking, then the cap |
+| 2,000-node / 20,000-link bounded online envelope and its timeout degradation | recall reads seed-adjacent rows with `LIMIT 1024` and no timeout; `graph.envelope` has 2,000/20,000 caps but recall doesn't call it | a two-hop mass-ordered read, its deadline and whole-channel drop, and truncation validation against full-view GDS |
+| D46 occurrence grouping | every occurrence is its own Fact; recall returns up to four `CONTRASTS` peers per Fact with no counts or completeness flags | a pinned grouping key, the counted conflict scan with `conflict_total` / `conflict_truncated` / `conflict_redacted`, and their warnings |
+| Dreaming | no `dream` RPC, job store, Community writer, synthesis or profile cache; `HAS_MEMBER`, `anamnesis.community/1` and `anamnesis.synthesis/1` are registered with no writer | a bounded export, a networkless GDS Leiden run, a pinned community generation and exact-support synthesis |
 
-**Exit criteria**: ingest one month of the author's own conversation logs →
-recall p50 < 50 ms (no PPR) → after 100 outcome reports, `verify` shows
-ledger ↔ cache agreement for both the hit cache and the utility cache → 50
-remembers with Neo4j killed → drain verified after recovery → `backup` then
-`restore` into an empty directory passes `verify --scope all`.
+Other open items, each smaller:
 
-**Gates that must hold before v0.1 ships** (each is a fixture, not a
-reading):
-
-- policy: after `policy.set` with `content` scope, the next ordinary recall
-  returns nothing from the matched Episode text and the Usage carries the
-  new policy revision; a recall that straddles the barrier is retried or
-  rejected, never served torn; `policy.revoke` restores serving without
-  fabricating anything that was never extracted; `rebuild` reproduces the
-  active policy from the policy Episodes alone.
-- budget: `used_budget` equals the exact byte, scalar or pinned-token count
-  of the returned `context_text`; an unknown `tokenizer_id` is rejected; a
-  bundle that doesn't fit is skipped and a later one may still be included;
-  `limit: 0` yields empty results; the Usage selection IDs equal the
-  included primaries.
-- outcomes: replaying the same normalized verdict is a no-op; another key or a conflicting reward is rejected. Signed credits change utility and stability within their bounds.
-- lineage: an assistant Episode declaring receipts writes a lineage row whose
-  roots and depth match its parents, overflow past 16 roots or depth 8 sets
-  `complete=false` and `unknown`, and an echoed claim leaves `S`, `m`, utility
-  and ranking bit-identical to the no-echo case.
-- embedding failure (D54): a deterministic failure (`provider_rejected`,
-  `input_too_large`, `profile_mismatch`, `invalid_vector`, `stale_input`)
-  quarantines the Episode on its first attempt with one terminal record in
-  `embedding-state.json`; a transient failure defers with bounded backoff and
-  the ninth in a row quarantines as `provider_unavailable_exhausted`; a
-  quarantined Episode is never re-sent by the drain, and an authenticated
-  `embedding.recover` or `embedding.requeue` is the only way forward. The
-  generation-scoped head/cursor rule (`worker_lost`, terminal-prefix
-  coverage) is the design in 01 §4 and applies once that lane ships.
-
-## v0.2 — derived layer, time, local PPR
-
-**Goal**: Facts and Entities are extracted, corrections follow time, and PPR
-retrieves along relationships.
-
-| Area | Contents | Docs |
-|---|---|---|
-| derived layer | `:Fact`, `:Entity`, physical generation labels/indexes, global `ingest_seq`, BUILDING/ACTIVE/CATCHING_UP/INACTIVE/RETIRED lifecycle, strict sequencer, dual-tail Outbox, atomic cutover and caught-up rollback | 01 §1, §4–5 |
-| extraction | target sequencer: claim LLM (self-contained content, required `content_language`, modality, confidence as source-faithfulness, literal `evidence_quote` and derived span) → bounded generation-index reads → judge LLM → revalidated write with quote and UTF-8 boundary checks; explicit same-speaker/same-time/same-scope self-correction only, otherwise CONTRASTS; one immutable Fact per source occurrence, no "duplicate → no Fact"; policy applied before any derived write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5, §5.1, D46, D47, D48 |
-| grouping | bounded `speaker_key` / `subject_keys` / `predicate_text` / closed `scope` / `time_key` fields, `anamnesis.duplicate-group/1` key, irreflexive symmetric non-transitive `known_conflict`; local comparison only, never a global identity claim | 02 §5.3, 05 §6, D49 |
-| maintenance | hourly job: `m_cache`; ConductingArc retained-graph rebuild/verify and complete generation publication. **Precedes PPR** — no missing-cache native fallback | 01 §5, 02 §6 |
-| time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |
-| forgetting | Fact mass `m = m₀ · max_e R(age_e, s_e · σ_fact)` over bounded sources, σ_fact a dimensionless stability multiplier; κ conservation and merging, sources resolution | 04 §3, §5 |
-| envelope | budgets, fanout, ConductingArc unique/RANGE (source_id, link_id) first-256 ordered probe before filters; atomic endpoint-row maintenance on physical create/delete/rewire/GC; complete coverage or PPR absent; non-hubs resolve captured rows via per-role link-ID indexes, never re-expand adjacency; saturated sources have no outgoing traversal, stale-link verification, per-row arc cap, row-total initialization, 3-query tx, deadline, retained-row normalization | 01 §5, 06 §1–4 |
-| PPR | CSR, iteration, convergence cap, determinism conventions | 06 §5–7 |
-| recall | relationship vector channel (`queryRelationships`), seeds (hub damping on the capped probe degree), PPR list in fusion, valid filter, provenance/supersedes, bounded conflict bundles (raw CONTRASTS scan ≤ 64 rows + sentinel, per-row policy/validity checks, first 4 eligible as companions; `conflict_total` exact only when the scan exhausted and count ≤ 4, else `null`; `conflict_truncated` when eligible > 4 or raw rows remain; mandatory incomplete and redacted warnings; no automatic winner), occurrence grouping at assembly with explicit occurrence IDs, budget counts companion text, torn retry | 05 §2–7, D46 |
-| policy | derived-scope suppression through conduction and provenance text; background reconciliation rebuilds indexes and caches without touching originals | 02, 05, D43 |
-| GDS | disposable validation container, σ-node solver validation, L1/top-k/NDCG CI | 07 §1–2 |
-| gc | RETIRED-generation-only `gc --derived`, protected rollback targets, `gc --embedding` | 01 §4 |
-
-**Exit criteria**: extraction runs on v0.1 data with no downtime → 20 solver
-validations pass → correction scenario fixtures (change / correction /
-replacement) pass snapshot queries → a hub Entity with degree > 256 is
-classified by its capped probe in a recall → recall p50 < 100 ms.
-ConductingArc fixtures must prove ordered index LIMIT before filtering,
-both-endpoint/parallel/five-role coverage, atomic rebuild/rewire/GC, stale-row
-exclusion and whole-PPR degradation on missing/incomplete cache or indexes;
-no native adjacency alternative is an acceptable implementation (docs/07).
-
-## v0.3 — dreaming, validation, scale
-
-**Goal**: the graph builds its own topics, and the truncation quality is
-measured.
-
-| Area | Contents | Docs |
-|---|---|---|
-| dreaming | bounded ID/arc export → disposable networkless GDS Leiden → pinned community generation, exact-support synthesis, profile cache | 02 §7 |
-| derived layer | `:Community`, cross-stream-compatible HAS_MEMBER, extraction-cutover disable/rebuild rule, majority visibility, Community mass | 01 §4, 03 §3, 04 §3 |
-| recall | identity channel, `entities` block | 05 §2 |
-| embedding | profile swap procedure (new property and indexes, backfill, current-watermark barrier, switch, gc), `EmbeddingQualification` records and the production-activation block | 01 §4, D51 |
-| qualification (trigger-gated) | production multilingual, extractor, judge and index qualification packages: each ships only when its own machine-validated manifests and predeclared thresholds exist. Until then the v0.2 defaults stay development-scoped and reversible | 07, D48, D51 |
-| GDS | envelope validation overlap@20, 100k/1M scale benches, health report | 07 §3–5 |
-| calibration | Usage and outcome events → refit DECAY, FACTOR, a, b, c, γ, β, σ_fact, modality and sub_kind priors, role weights, RRF weights; ablate each default; prior changes ship as a new derived generation with a recorded prior version; config version tags | 04 §9, D47 |
-
-**Exit criteria**: on a 1M synthetic graph p50 < 100 ms / p95 < 250 ms,
-envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
-< 30 minutes.
+- **m₀ priors.** Fact `m₀` is the judge's confidence. The `sub_kind` and
+  `modality` prior tables are calibration targets.
+- **Change versus correction.** The relation judge writes INVALIDATES at the
+  invalidating Fact's own time. A correction mode that backdates to the
+  target's time, and a replacement Fact that restores a wrongly invalidated
+  one, are designed (archived D18) and not built.
+- **Broader policy selectors.** Only `episode_id` and `source` with `content`
+  scope exist. Entity, schema, sub-kind, modality and literal selectors and a
+  `derived` scope were designed under D43.
+- **Embedding profile lifecycle.** One fingerprint per profile today. Separate
+  model and index fingerprints, a qualification record, a build lifecycle and
+  a production-activation block were designed under D51.
+- **Scale benches and truncation validation** (docs/07 §3, §4). No latency or
+  scale number in this document set is a measurement.
+- **Generation garbage collection.** Retired generations stay on disk.
 
 ## Not doing
 
-- Multi-user, auth beyond the OS user, remote bolt. Personal, localhost.
-- A second graph store outside Neo4j (SQLite, custom format). The previous
-  roadmap is retired ([10-decision-log](10-decision-log.md) D0).
+- Multi-user operation or auth beyond the installation token and the optional
+  TCP bearer. It is a personal engine.
+- A second graph store outside Neo4j (SQLite, custom format) (D0).
 - LLM calls on the recall path. Summarization and re-ranking belong to the
   caller.
-- Transaction time / bitemporal (03 §6). The recall `known_by` predicate is
-  one `ingested_at` comparison, not a record-time axis (D57).
-- Recursive INVALIDATES (03 §4).
-- Tick- or schedule-based forgetting updates (04).
-- Per-link weights (D24).
-- `gc --erase`, or any erasure guarantee. Policy suppresses extraction and
-  serving; originals, backups and privileged raw operator access stay
-  outside it (D43).
+- Transaction time / bitemporal storage (docs/03 §6). `known_by` is one
+  `ingested_at` comparison, not a record-time axis (D57).
+- Recursive INVALIDATES (docs/03 §4).
+- Tick- or schedule-based forgetting updates (docs/04).
+- Erasure. Policy suppresses serving and extraction; originals, backups and
+  privileged raw access stay outside it (D43).
 - Automatic execution of instructions found in ingested text. Policy is an
   authenticated RPC command only (D43).
 - Token estimates. A `tokens` budget without a pinned installed tokenizer is
-  rejected, never approximated from bytes (D44).
-- Per-Fact accessibility. Hits attach to Episodes; sibling Facts of an
-  adopted source refresh together (D45).
-- A stability penalty. `S` only rises; outcome feeds `U` (D45, supersedes
-  the D40 negative branch).
+  rejected (D44).
+- Per-Fact accessibility. Hits attach to Episodes; sibling Facts of a credited
+  source refresh together (D1).
 - Automatic contradiction winners by confidence or recency (D46).
-- Automatic query translation or two-query fusion on the recall path. The
-  caller's query is used verbatim; the offline comparison behind that default
-  is in [research/retrieval-fusion](research/retrieval-fusion.md) (D48).
-- English-normalized canonical Facts. `fact_language_policy` is a per-
-  generation configuration, and generated English projections are neither
-  persisted nor indexed under this contract (D48). This is about LLM
-  renderings of claim text; the markdown projection of 01 §4 is a different
-  thing, a file view of the graph that the daemon never reads back.
+- Automatic query translation or two-query fusion on the recall path (D48).
+- English-normalized canonical Facts. `fact_language_policy` is a
+  per-generation setting, and generated English renderings are neither stored
+  nor indexed (D48).
 - Corroboration by repetition. Occurrence count, root count and echo depth
   never move confidence, mass, utility, ranking or a conflict winner (D49).
-- Production embedding activation on ONLINE status or operator attestation
-  alone. It stays disabled until a qualification carries machine-validated
-  manifests and predeclared thresholds (D51).
-- Truncating, chunking or zero-filling an embedding input to move a coverage
-  cursor (D51).
+- Truncating, chunking or zero-filling an embedding input to produce a vector
+  (D54).

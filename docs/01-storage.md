@@ -1,26 +1,25 @@
 # 01 — Storage
 
 All graph data lives in one Neo4j (Community 5.26+, Docker, localhost-only).
-Logically there are three memory layers plus a retained control ledger; each
-permits a different kind of write.
+There are three memory layers plus a control ledger. Each permits a different
+kind of write.
 
 ```text
   originals  CREATE-only. No update, no delete. Loss here is irreversible
-             Episode (including policy events) · Payload (metadata) · Hit
-             originals-layer links: HAS_PAYLOAD · HIT_OF · Episode→Episode INVALIDATES (revision)
-  derived    CREATE-only nodes/links inside a lifecycle-managed generation. Regenerable from
-             originals plus the retained content-free InvalidationEvidence ledger and each
-             rebuild's explicit old/new target mappings; originals alone do not suffice (§4)
-             Fact · Entity · Community · derived links · embedding
-  caches     SET allowed. Can be dropped and regenerated at any time
-             hit/utility cache · active policy · Entity witness properties · session topology · Episode room/space · REPLIES_TO · ConductingArc · ConductingArcCoverage · ProfileCache · m_cache · selectors
-             (embedding, extraction and materialization operational state are not graph
-             layers; they live in `embedding-state.json`, `extraction-state.json` and
-             `materialization-state.json` beside the runtime root, §4, §6)
-  control    append-only Usage and UsageOutcome; never semantic Episodes
-             append-only InvalidationEvidence metadata, retained while its
-             invalidation outcome can affect a supported historical snapshot
-             Episode lineage properties
+             Episode · Payload (metadata) · Hit
+             links: HAS_PAYLOAD · HIT_OF · Episode→Episode INVALIDATES (revision)
+  derived    CREATE-only nodes and links inside an extraction generation (§4)
+             Fact · Entity · derived links · Fact embedding vectors
+  caches     SET allowed. Can be dropped and rebuilt at any time
+             hit/utility cache · Entity witness properties · session topology
+             Episode room/space · REPLIES_TO · ConductingArc · ConductingArcCoverage
+  control    append-only Usage and UsageOutcome, policy events,
+             Episode lineage properties, identity decisions
+```
+
+Embedding, extraction and materialization bookkeeping is not in the graph. It
+lives in `embedding-state.json`, `extraction-state.json` and
+`materialization-state.json` under the runtime root (§6).
 
 Payload bytes live on the filesystem in `objects/`. Authority = Neo4j +
 `objects/`, nothing else (§9).
@@ -34,8 +33,8 @@ kind-specific queries go through the kind label.
 ```text
 (:Element:Episode)    original. A user message or a document revision. Has an event time
 (:Element:Fact)       derived statement. Time = "when the claim took effect"
-(:Element:Entity)     anchor for a person, thing or concept. No event time; cached visibility threshold
-(:Element:Community)  topic-set summary. No event time; generation-built visibility threshold
+(:Element:Entity)     anchor for a person, thing or concept. No event time
+(:Element:Community)  reserved kind label. Nothing writes it (docs/09)
 ```
 
 ### Common properties
@@ -46,7 +45,7 @@ kind-specific queries go through the kind label.
 | `schema` | all | `anamnesis.<kind>/<n>`. The only notion of "type" |
 | `content` | all | UTF-8 normalized natural language; Episode ≤ 64 KiB, derived element ≤ 8 KiB |
 | `m0` | all | Intrinsic mass in [0, 1]. Assigned once at creation, immutable (docs/04 §1) |
-| `properties` | all | Schema-specific canonical JSON, encoded size ≤ 32 KiB |
+| `properties` | all | Schema-specific canonical JSON, encoded size ≤ 64 KiB |
 | `time_value`, `time_utc`, `time_precision` | Episode, Fact | Event time (docs/03 §1) |
 | `origin_source/session/actor/record` | Episode | Source identification |
 | `room`, `space` | Episode | Recomputable cache properties outside `properties` and the digest. Room = string `properties.room`, otherwise `origin_session`; space = explicit room assignment, otherwise `unknown:<origin_source>` (D58) |
@@ -62,27 +61,23 @@ kind-specific queries go through the kind label.
 | `payload_hash` | Episode | Payload reference (optional) |
 | `episode_digest_version` | Episode | Server-selected immutable digest discriminator. Absent on every Episode stored before D49 implementation, which means version 1; `2` on every Episode admitted afterwards; any other stored value is `unsupported_digest_version`. The caller never supplies or downgrades it (*Episode digest versions* below) |
 | `digest` | Episode | SHA-256 for integrity and retry conflict detection, computed by the row's own version. Version 1 hashes the frozen insertion-ordered body `{schema, content, properties, time, payload_hash, previous_revision_key}`; version 2 hashes the RFC-8785 body `{episode_digest_version, schema, content, properties, time, payload_hash, previous_revision_key, origin_role, lineage_digest}`. Byte-identical to the version-2 body in docs/02 §3; under one `revision_key`, a changed version-1 field, or a changed version-2 role or lineage body, is `revision_conflict` |
-| `generation` | Fact, Entity, Community, derived links | Immutable owning generation (§4) |
+| `generation` | Fact, Entity, derived links | Immutable owning generation (§4) |
 | `idem_key` | Fact | SHA-256 of the full canonical Fact identity below. Fact creation also uses the unique `fact_identity` key `(generation, meaning_digest, primary_episode_id)` with `MERGE` |
 | `entity_key` | Entity | `sha256(generation, normalized_name, entity_kind)`. Unique; create-new Entity retries are no-ops |
-| `visible_from_utc` | Entity, Community | Temporal visibility threshold, one property comparison. Entity is a cache; Community is fixed at build. Policy-independent: an Entity additionally needs current-policy witness properties on the Entity (docs/03 §3) |
-| `witness_generation`, `witness_policy_revision` | Entity | Indexed current-generation and policy-revision witness marker, written with an allowed mention (docs/03 §3) |
-| `source_extraction_generation`, `source_covered_ingest_seq` | Community | Extraction snapshot used to build this Community generation |
-| `source_structure_revision`, `source_export_digest` | Community | Exact serving-view revision and ordered ID/arc/threshold export hash |
+| `witness_generation`, `witness_policy_revision` | Entity | Indexed generation and policy-revision witness marker, written with an allowed mention (§3.2) |
 | `source_episode_ids` | Fact | Sorted immutable list of 1–16 original Episode IDs used for mass and Hit attribution |
 | `primary_episode_id` | non-synthesis Fact | Episode whose extraction/correction created this Fact; indexed for bounded session recall |
 | `source_count_total`, `sources_truncated` | Fact | Audit fields recording the authority-set size before its deterministic cap |
-| `max_source_ingest_seq` | Fact | Maximum ingest sequence in `source_episode_ids`; Community snapshot filter |
-| `support_fact_ids` | synthesis Fact | 1–16 non-synthesis Facts whose validity the synthesis depends on |
+| `max_source_ingest_seq` | Fact | Maximum ingest sequence in `source_episode_ids` |
+| `support_fact_ids` | synthesis Fact | Reserved claim field. No synthesis writer exists (docs/09) |
 | `sub_kind` | Fact | `fact / state / event / preference / procedure / decision / summary`. Input to the forgetting prior (docs/04 §1) |
 | `content_language` | Fact | `^[a-z]{2,8}(-[a-z0-9]{1,8})*$`, at most 35 ASCII characters, or `mul` for materially multilingual prose, or `und` for nonlinguistic/insufficient evidence. Required, immutable, meaning-bearing (D48) |
-| `speaker_key`, `subject_keys`, `time_key`, `duplicate_group_key` | Fact | `sha256(RFC-8785 {origin_source, origin_actor})` or null; 1–16 sorted resolved Entity IDs or null; the exact `{time_utc, time_precision}` pair; the local grouping key below when every component resolves (D49) |
+| `speaker_key`, `subject_keys` | Fact | `sha256(RFC-8785 {origin_source, origin_actor})` or null; 1–16 sorted resolved Entity IDs or null (D49) |
 | `predicate_text`, `scope`, `scope_complete` | Fact | NFC case-preserving source-language relation (1–256 scalars), the closed bounded scope object below, and whether every scope component resolved. Meaning-bearing (D49) |
 | `echo_state`, `echo_of_element_id`, `echo_depth`, `echo_lineage_truncated` | Fact | `direct \| known_echo \| context_derived \| unknown`, the exact delivered result a known echo repeats, depth 0..8, and whether a bound truncated the lineage (§3.3) |
 | `parent_recall_ids`, `corroboration_root_episode_ids` | Fact | Sorted immutable 0..4 parent Usage IDs and 0..16 root Episode IDs copied from the Episode's lineage row. Provenance accounting only; never authority, candidates or a score term |
 | `modality` | every Fact, including synthesis | `asserted / reported / hedged / intended / hypothetical` — the speech act of this content (docs/02 §5.1). Required, meaning-bearing: part of identity, input to the forgetting prior, returned on recall |
 | `confidence` | Fact | Judge's belief in [0,1] that the claim is what the source says. Stored, input to `m₀`, **not** part of identity — model nondeterminism on a scalar must not fork Facts |
-| `prior_version`, `calibration_version`, `judge_version` | Fact | Immutable versions used to assign confidence and `m0`; generation configuration pins them. Raw validated judge output is retained in bounded `properties.audit` |
 | `span` | primary `DERIVED_FROM` link (Fact → Episode) | `[start, end)` UTF-8 byte offsets into the Episode's content the claim rests on; validated at write, optional when the claim has no single locus (docs/02 §5 W2) |
 
 ### Episode digest versions (D49)
@@ -151,20 +146,16 @@ Episode ID, revision chain, payload, event time or snapshot result.
 |---|---|---|
 | `anamnesis.original-message/1` | Episode | Conversation message |
 | `anamnesis.original-document/1` | Episode | Document or file. One Episode per revision |
-| `anamnesis.correction/1` | Episode | An explicit correction uttered by the user (the original behind docs/03 §5) |
-| `anamnesis.memory-policy/1` | Episode | Authenticated deny/revoke control event (§3.2). Never a semantic search or extraction input |
 | `anamnesis.claim/1` | Fact | An extracted claim. Invalidation events are claims too — the only special thing about them is an outgoing INVALIDATES edge |
-| `anamnesis.mapping/1` | Fact | An actor ↔ person mapping claim |
-| `anamnesis.synthesis/1` | Fact | A higher-level fact combining several Facts while retaining bounded Episode authority |
+| `anamnesis.mapping/1` | Fact | Registered ID. No writer |
+| `anamnesis.synthesis/1` | Fact | Registered ID. No writer (docs/09) |
 | `anamnesis.entity/1` | Entity | Anchor |
-| `anamnesis.community/1` | Community | Topic set. Owns members through HAS_MEMBER |
+| `anamnesis.community/1` | Community | Registered ID. No writer (docs/09) |
 
-For a larger document, `objects/` keeps the complete bytes while the adapter
-stores a deterministic UTF-8 excerpt within the Episode content cap and sets
-`properties.content_truncated=true`. Local extraction may stream bounded
-decoded sections in later jobs. A remote endpoint receives such sections only
-under the separate `allow_remote_payload_egress` contract (docs/02 §10);
-neither path enlarges one RPC/LLM request.
+`remember` accepts only the two Episode schemas. A stored
+`anamnesis.memory-policy/1` Element from before the policy rewrite is legacy
+data: startup counts it and never bootstraps a fresh policy authority over it
+(§3.2).
 
 ### Contract: every Fact has bounded Episode authority
 
@@ -175,7 +166,6 @@ Every Fact materializes a non-empty authority set of original Episodes:
     extracted Fact     = [input Episode]
     replacement Fact   = [correction Episode] (reserved)
                        + authority(replaced Fact)
-    synthesis Fact     = ∪ authority(member Facts)
 
   selection = top 16 unique candidates, except replacement:
               reserve correction Episode + top 15 other unique candidates
@@ -191,12 +181,6 @@ semantic provenance but are never traversed for mass or Hit attribution.
 `verify` reports `orphan-fact` unless the list contains 1–16 existing Episode
 IDs and exactly matches the direct Fact→Episode links. This makes every
 authority lookup total and bounded.
-
-The correction Episode is never eligible for truncation in a replacement.
-A synthesis additionally stores 1–16 `support_fact_ids`, chosen from
-non-synthesis members by `m0 DESC, time_utc DESC, id ASC`. It is valid only while every
-support Fact is valid; dreaming replaces an invalid synthesis rather than
-nesting synthesis on synthesis.
 
 Fact identity covers every immutable field that can change meaning:
 
@@ -222,9 +206,7 @@ judge output, `confidence`, audit versions, and byte spans are retained but
 excluded from identity. Otherwise nesting confidence inside raw output would
 silently defeat its exclusion. A generation pins prior/calibration/judge
 versions; changing `m0` priors requires a new derived generation, never Hit
-replay or a SET of `m0`. Synthesis confidence measures faithfulness to its
-support bundle, not world truth or a product of uncalibrated source scores;
-its modality is judged from its own content (D42, D45, D47).
+replay or a SET of `m0` (D42, D47).
 
 ### Grouping and scope fields (D49)
 
@@ -250,43 +232,24 @@ order, and quantities sort by `(unit UTF-8 bytes, value ASCII bytes)`:
     attribution_speaker_keys: 0..8 sorted speaker keys
   }
   scope_complete = boolean
-  time_key       = {time_utc, time_precision}
   modality       = the required D42 enum
 ```
 
 Unresolved subjects or predicates, unknown units, free qualifiers that do not
 fit the closed object, and unresolved reported speakers all force
-`scope_complete=false`. When every component resolves, assembly pins
-`grouping_version = "anamnesis.duplicate-group/1"` and computes
-`predicate_key = sha256(UTF-8 predicate_text)`,
-`scope_key = sha256(RFC-8785 scope)` and
-`duplicate_group_key = sha256(RFC-8785 {grouping_version, subject_keys,
-predicate_key, time_key, scope_key, modality})`. Validators enforce shape,
-bounds, sorting, decimal canonicalization and ID resolvability; they assert no
-semantic equivalence, and the key never establishes global person, Entity or
-predicate identity.
-
-Two audit-only extractor fields ride alongside and are **not** Fact
-properties: `corrects_local_claim_index` (null or an earlier index in 0..31)
-and `correction_scope_text` (null or NFC source-language slot text, 1..256
-scalars). They exist for the intra-Episode L1b correction rule in docs/02
-§5.3, which uses a deliberately narrower scope predicate than grouping.
+`scope_complete=false`. Validators enforce shape, bounds, sorting, decimal
+canonicalization and ID resolvability. They assert no semantic equivalence.
+No grouping key is computed from these fields; occurrence grouping is a
+docs/09 target.
 
 ### Occurrence provenance (D46)
 
 Semantic duplication never suppresses an occurrence's extracted assertion.
-Each source occurrence receives its own immutable Fact, direct Episode
+Each source occurrence gets its own immutable Fact with direct Episode
 authority, modality, time and optional span, even when another Fact says the
-same thing. Link it to that Fact with existing `RELATES_TO` or semantic
-`DERIVED_FROM`; no new merge relation or automatic confidence/truth boost.
-A translated or transliterated rendering is never a second occurrence: a
-generated English projection is neither authority, claim content, evidence,
-nor an Entity alias, and it is not persisted or indexed until a later
-decision pins its schema, prompt and digest (D48).
-Exact retries within one occurrence still collide on `idem_key`. Assembly
-may group duplicates with a representative and explicit occurrence IDs and
-truncation metadata, but must preserve subject/predicate/time/modality;
-storage does not promise a global semantic equivalence key (docs/05, D46).
+same thing. Repetition adds no confidence and merges nothing. Exact retries within one occurrence collide on
+the Fact identity key. Recall does not group occurrences
+([09-roadmap](09-roadmap.md)).
 
 ## 2. Payload — outside Neo4j
 
@@ -303,19 +266,14 @@ content-addressed files.
 - The daemon's bounded `object.begin/chunk/commit` RPC writes the file first
   (temp name → fsync → rename → fsync directory); `remember` later supplies
   only its hash. Every hash used in a path must match `^[0-9a-f]{64}$`.
-  A file without a node is a gc candidate (§9); a node without a file is reported by `verify` as
-  `missing-payload`.
+  A node without a file is a missing payload and fails integrity checks.
 - Because the file always exists before any transaction that references it,
   a backup can copy the exact hash manifest after taking the offline Neo4j
   dump (§9).
 
 ## 3. Hit ledger — attached to Episodes
 
-Only explicit outcomes create Hits. At rank j of n primaries, the share is
-(1/(j+1))/H_n. Split each share equally among its distinct direct source
-Episodes and sum shared contributions. Each Episode gets one outcome Hit of
-credit 0.2 r w; a report contributes at most 0.2 absolute utility. Empty
-selections record the verdict without Hits.
+Only explicit outcomes create Hits. The credit rule is docs/04 §5.
 
 Hit stores id, episode_id, usage_id, t, kind, credit and idem_key. HIT_OF links
 to the Episode. HitCache stores s, t_last_hit, hit_count, u_anchor and u_at.
@@ -327,92 +285,49 @@ its server-issued usage_id. Usage stores the ordered {id,sources} selection,
 created_at, policy_revision, lineage rows and their selection_digest, and the
 connection binding. A Usage has no TTL or copy of the response or query.
 
-report_outcome takes {usage_id,idempotency_key,reward}. Both IDs are UUIDv7;
-clamp finite reward to [-1,1] and normalize negative zero. Authorize all source
-Episodes under current policy before accepting or replaying a verdict. Create
-one UsageOutcome and its Episode Hits atomically. Return {reward,applied}; an
-identical normalized retry returns applied:false. A reused key with different
-usage or reward raises idempotency_conflict; another key on the same usage
-raises outcome_already_reported. Missing usage, denied source and unavailable
-storage raise unknown_usage, policy_denied and storage_unavailable respectively.
-Socket completion never writes to the graph.
+`report_outcome` creates one UsageOutcome and its Episode Hits atomically.
+Its admission rules and error codes are docs/04 §6.
 
 ### 3.2 Suppression policy authority (D43)
 
-Only authenticated explicit `policy.set` / `policy.revoke` commands append
-`anamnesis.memory-policy/1` Episodes. Ingested text is data: neither the
-extractor nor dreaming may execute a policy instruction found in it. Each
-event's `properties` has `policy_id`, `action: deny | revoke`, `selector`, and
-`scope: derived | content`. The selector has at least one of
-`subject_entity_id`, `schema`, `sub_kind`, `modality`, `literal`; supplied
-fields are ANDed. `literal` is a nonempty NFC Unicode, case-sensitive
-substring of at most 512 Unicode scalars after normalization, never regex.
-There are at most 256 active denies. Exceeding either hard limit rejects the
-set atomically before any Episode/cache/revision change; identical retries
-remain no-ops and revoke remains allowed at capacity. The daemon assigns
-control origin/revision identity,
-ingest sequence and server event time; revoke copies the target deny's
-selector/scope, so audit remains self-contained. A policy ID identifies one
-immutable deny; repeating the same command is idempotent, changing its
-selector/scope is a conflict. A revoked deny needs a new ID to be reissued.
+Policy is an authenticated command. Text found in ingested data is never
+executed as policy.
 
-The active-policy cache is rebuilt by folding events in `ingest_seq` order.
-`Meta.policy_revision` advances atomically with each effective change and
-cache publication. Entity-selector bindings must remain resolvable across
-generation changes: retain the bound Entity's immutable normalized-name/kind
-snapshot in policy event audit metadata and rebuild at most 256 resolved
-aliases per policy per generation before cutover. Alias lookup inspects at
-most 257 ordered entries (limit+1); overflow or ambiguity rejects a new set
-atomically, or blocks an existing policy's generation cutover with current
-serving policy intact. Never truncate aliases and silently weaken a deny.
-Revocation remains available in either state. Matching also uses that snapshot
-before a new Entity is written, so
-suppression need not recreate a denied anchor. Ambiguous binding blocks cutover,
-never silently disables a deny; the policy does not promise global entity
-equivalence. Cache loss blocks ordinary serving until policy replay
-completes. Policy/control Episodes retain audit metadata but are excluded
-from semantic fulltext/vector/session search, extraction, and PPR; generation
-and embedding sequencers advance over them as deterministic no-ops.
+`policy.set {policy_id, selector, scope: "content"}` and
+`policy.revoke {policy_id}` append immutable `PolicyEvent` nodes (unique
+`revision` and `key`) and advance `Meta.policy_revision` in the same
+transaction. The evaluator is `episode-source-v1`, recorded on
+`(:PolicyAuthority {key:'installation'})`. A selector names an exact
+`episode_id`, an `origin_source`, or both (ANDed). The schema accepts no
+other selector field and no other scope, and no payload is scanned. A policy
+ID identifies one immutable deny: repeating the same command is a no-op, and
+a revoked deny needs a new ID to be reissued. The active set is the fold of
+the events in revision order.
 
-`derived` scope matches canonical claims and resolved entities before any
-derived writes or Hits. `content` additionally matches original Episode
-content and suppresses matching originals from ordinary recall. A supplied
-structured selector field absent on the tested raw Episode evaluates to false, so the
-AND selector is a no-match; never infer a missing subject, sub_kind or modality
-from its prose. The RPC reports this limit rather than promising full
-original-text suppression for a structured selector. An Episode has its own
-schema, not the schema of a potential future claim. Content matching is over
-stored capped Episode text only (at most 64 KiB), with no automatic payload
-scanning and no arbitrary bytes from an unexamined payload or backup.
+Suppression is a hard filter. A denied Episode is not returned, and it can't
+support a visible derived result: a Fact is dropped when any of its
+`DERIVED_FROM` source Episodes is denied. The same check runs in extraction
+before text leaves the database, in recall candidates, companions and
+provenance text, in projection, in embedding recovery and status, and in
+`report_outcome`, which refuses with `policy_denied` when a credited source
+is now denied. Historical `T` never bypasses current policy.
 
-Suppression is a hard filter on extraction, remention, dreaming, candidate
-retrieval, conduction, result assembly, and all companion/provenance text.
-A denied Episode cannot support a visible derived result; a denied Fact cannot
-support a visible synthesis. Do not remove one denied source from immutable
-authority and serve the remainder. Derived summaries/profile caches affected
-by a deny stay unavailable until rebuilt from allowed inputs; Entity anchors
-need an allowed witness, not only a pre-policy visibility threshold. The
-witness is the indexed `Entity.{witness_generation, witness_policy_revision}`
-marker set when a validated Fact mentions it. Activation checks the marker
-for each distinct Entity the generation's Facts mention, at the pinned
-generation and policy revision; an absent or mismatched marker blocks that
-generation's activation rather than treating `visible_from_utc` alone as
-sufficient. Request-time queries run against the activated generation and do
-not re-read the marker per Entity. No separate witness row or
-`earliest_allowed_from` property is written (docs/03 §3).
+Entity anchors need an allowed witness. The witness is the indexed
+`Entity.{witness_generation, witness_policy_revision}` marker set when a
+validated Fact mentions it. Cutover checks the marker for each distinct Entity
+the generation's Facts mention, at the pinned generation and policy revision;
+an absent or mismatched marker blocks that cutover.
 
-Policy publication takes an immediate serving barrier (docs/02 §1), including
-recall and feedback already in flight. Background reconciliation rebuilds
-derived serving generations, indexes and caches without denied content; it
-never deletes originals or their established invalidation outcomes.
-Reconciliation is a serving-view rebuild, **not semantic re-extraction**:
-copy retained allowed assertions with explicit old/new target mappings and
-preserve validity metadata even when an invalidator is omitted (§4).
-Revocation removes the serving deny, but does not fabricate
-Facts skipped during suppression: re-extraction is explicit. Historical `T`
-never bypasses current policy. Privileged raw operator access and existing
-backups are outside suppression. There is no `gc --erase` or GDPR erasure
-guarantee; suppression is not deletion.
+Policy publication and response publication share one Meta write barrier
+(docs/02 §1). Missing or incompatible policy authority is never overwritten:
+only a database with no Elements, no `PolicyEvent` and no legacy
+`anamnesis.memory-policy/1` Element bootstraps revision zero. With the
+authority unavailable, requests fail with `policy_unavailable`.
+
+Suppression is not deletion. Originals stay on disk, existing backups keep
+them, and privileged raw operator access is outside policy. There is no erase
+operation. Revocation removes the deny; it doesn't re-extract what was skipped
+while the deny was active.
 
 ### 3.3 Echo lineage (D49)
 
@@ -459,40 +374,21 @@ Fact copies the Episode's root union and depth. Neither adds the assistant
 Episode as another root. A union over 16 roots keeps its first 16 IDs in
 bytewise order and computed depth over 8 stores 8; either overflow sets
 `complete=false`, `echo_state=unknown` and `echo_lineage_truncated=true`, and
-no omitted ancestor is treated as a new root. With complete receipt lineage,
+no omitted ancestor is treated as a new root. With complete parent-Usage lineage,
 `known_echo` requires an L4 `DUPLICATE_OCCURRENCE` against an exact delivered
 result ID whose roots and depth agree byte-for-byte across every parent
-receipt that contains it; any other Fact from that Episode is
+Usage that contains it; any other Fact from that Episode is
 `context_derived`, and a disagreement is `unknown`. Historical assistant
-input without authenticated receipt metadata is `unknown`, never presumed
+input without authenticated lineage metadata is `unknown`, never presumed
 independent.
-
-A synthesis has no source Episode lineage to copy, so it materializes one
-from its exact 1..16 non-synthesis support Facts before Fact identity is
-computed. With
-`lineage_complete(f) = f.echo_state ≠ unknown ∧ ¬f.echo_lineage_truncated`,
-let `P` be the sorted distinct union of the supports' stored
-`parent_recall_ids` and `R` the sorted distinct union of their stored
-`corroboration_root_episode_ids`, both in unsigned UTF-8 byte order. The
-synthesis stores `first_4(P)`, `first_16(R)`,
-`echo_depth = max(support.echo_depth)` with no added receipt hop, and
-`echo_of_element_id = null`. It is `context_derived` with
-`echo_lineage_truncated=false` **iff** every support is lineage-complete,
-`|P| ≤ 4` and `|R| ≤ 16`; otherwise it stores the capped arrays, `unknown` and
-`echo_lineage_truncated=true`. It never adds a support's primary or source
-Episode as another root. `verify` and generation mapping recompute this exact
-rule and require byte-identical results; the existing ban on
-synthesis-on-synthesis support keeps it a one-level materialization rather
-than an ancestry traversal.
 
 Storage still preserves the echoed Fact, its actor, time, modality and its own
 Episode provenance. Occurrence count and root count never alter confidence,
-`m0`, mass, utility, rank or adjudication, and neither can elect a conflict
+`m0`, mass, utility or rank, and neither can elect a conflict
 winner. The gate covers the source Episode itself: an assistant Episode with
 unknown or incomplete lineage, and every output derived from it, is stored but
-ineligible for semantic candidates, for synthesis and for invalidation
-(`echo_lineage_unavailable`). An unknown synthesis is retained under the same
-rule. Only a new source revision with complete bounded metadata changes that
+ineligible for semantic candidates and for invalidation
+(`echo_lineage_unavailable`). Only a new source revision with complete bounded metadata changes that
 state. A later user-authored statement
 is a new direct occurrence; reporting an outcome is usage evidence, not
 semantic corroboration. Lineage never supplies or changes Fact event time,
@@ -502,538 +398,97 @@ properties and policy checks at most 16 roots.
 
 ## 4. Derived layer and generations
 
-The derived layer is split into three streams.
-
-```text
-  extraction   Fact · Entity · MENTIONS · RELATES_TO · DERIVED_FROM · Fact→Fact INVALIDATES · CONTRASTS
-               selector active[extraction] = integer generation
-  community    Community · HAS_MEMBER
-               selector active[community]  = integer generation
-  embedding    embedding_m_<modelhex> property + vector index   (not shipped; see §4 "Shipped today")
-               selector active[embedding]  = embedding_profile_id. No generation — a property is present or absent
-```
-
-Why separate streams: when dreaming rebuilds communities there is no reason to
-re-extract Facts, and swapping the embedding model does not change extraction
-output. Switching one stream's selector never touches another stream.
+The derived layer is one extraction stream (Fact, Entity, MENTIONS,
+RELATES_TO, DERIVED_FROM, Fact→Fact INVALIDATES, CONTRASTS) plus Fact
+embedding vectors. No community stream exists
+([09-roadmap](09-roadmap.md)).
 
 ### Originals-layer links have no generation
 
-`HAS_PAYLOAD`, `HIT_OF` and `Episode → Episode INVALIDATES`
-are created by remember and commit, never by a pipeline. They carry no
-`generation`, are CREATE-only like their endpoints, and are always
-generation-visible.
+`HAS_PAYLOAD`, `HIT_OF` and `Episode → Episode INVALIDATES` are created by
+`remember` and `report_outcome`, never by a pipeline. They carry no
+`generation` and are CREATE-only like their endpoints.
 
-### Generation lifecycle and visibility
+### Extraction generation lifecycle
 
-Every derived element and derived link belongs to one integer `generation`.
-Individual nodes and links are immutable; a generation is appendable only in
-the lifecycle states that say so.
+Every derived element and derived link carries one `generation`. Nodes and
+links are immutable once written.
 
 ```text
-  BUILDING     backfill plus dual-tail; hidden from recall
-  ACTIVE       selected for recall; appendable for newly committed Episodes
-  CATCHING_UP  inactive rollback target being advanced; hidden
-  INACTIVE     complete only through its recorded covered_ingest_seq
-  RETIRED      no operational reference; eligible for gc after retention
-
-  visible_gen(x, stream) = x has no generation
-                        || x.generation = active[stream]
+  (:ExtractionGeneration {id, state, covered_ingest_seq, body})
+      state = active | catching_up | cutover | retired
+  (:ExtractionCoverage {key, generation_id, partition, covered_ingest_seq, body})
+      partition = episodes | active_extraction
+  (:Meta {key:'extraction_selector', generation_id, selector_version})
 ```
 
-`(:Generation {stream, generation, state, next_ingest_seq,
-covered_ingest_seq, source_extraction_generation?})` is unique by
-`(stream,generation)`. A target sequencer permits only its
-`next_ingest_seq` job to read candidates and commit; retry cannot be overtaken.
-`(:EmbeddingCoverage {stream, generation, embedding_model_id, ...})` is
-unique by `(stream,generation,embedding_model_id)` and advances contiguously
-over a terminal prefix. An in-flight profile swap owns one
-`(:EmbeddingBuild {embedding_profile_id, state, ...})` plus immutable
-`(:EmbeddingBuildSource {embedding_model_id,stream,generation,high_watermark})`
-rows (see **The embedding stream** below).
+Recall, projection and the relation judge read only the selected generation.
+A generation pins its extraction configuration, including
+`fact_language_policy ∈ {source, en}` (D48). Changing that configuration
+means a new generation, never an in-place rewrite. Because `generation` is
+part of Fact, Entity and link identity, the same claim in two generations is
+two rows, and only the selected one serves.
 
-An extraction generation's immutable configuration additionally pins
-`fact_language_policy ∈ {source, en}`, the extraction prompt artifact digest,
-`extractor_profile_id`, the grouping/scope schema version, the relation judge
-profile, and the validator version.
-Changing the language policy is a replacement generation with the normal
-cutover and rollback path, never an in-place rewrite (D48). Exact-copy
-reconciliations also require content equality. A `source ↔ en`
-generation may differ in content only under an explicit one-to-one
-`TranslationMapping {mapping_id, from_generation, to_generation, from_fact_id,
-to_fact_id, source_episode_ids[1..16], source_span, mapper_profile_id,
-prompt_digest, decision_digest}`. That mapping is a versioned pairwise
-judgment over the same exact source evidence, not a hash-based equivalence
-claim and never a global Fact or Entity identity claim; a missing span, a
-changed authority or frame, or any duplicate, fuzzy, one-to-many or
-many-to-one mapping blocks activation (D48).
+Coverage is the only cursor. The scheduler reads Episodes above
+`covered_ingest_seq` in ingest order and seals each source's terminal outcome
+into coverage: a materialized pipeline, or a content-free omission for a
+failed or cancelled stage. Coverage moves forward only.
 
-Generation partitioning is physical and Neo4j-realizable:
+Cutover is one transaction under the Meta writer fence. It requires a
+`catching_up` or already `active` target, caught-up coverage, the ordered
+access indexes ONLINE (`ordered_probe_unavailable` otherwise),
+`Meta.conducting_arc_ready` with COMPLETE ConductingArc coverage
+(`degree_probe_unavailable` otherwise), the Entity witness check of §3.2 and,
+when an embedding provider is configured, a vector for every Fact of the
+target generation. A generation with zero Facts satisfies the vector
+requirement. Cutover then marks the target `active`, points the selector at
+it and increments `selector_version`.
 
-```text
-  extraction node generation 43  → technical label :ExtractionG43
-  community node generation 7    → technical label :CommunityG7
-  Fact/Entity fulltext + vector  → indexes scoped to :ExtractionG43
-  RELATES_TO vector              → generation-specific property
-                                    embedding_g43_<model> on fixed RELATES_TO type
-```
+Rollback reopens a `retired` generation as `catching_up` with a fresh source
+high watermark. It serves again only after it catches up and crosses the same
+cutover.
 
-The label/property names are generated only from validated integer generation
-IDs. Recall chooses the active label/index before top-k; hidden generations
-cannot crowd active candidates. GC drops a RETIRED generation's indexes before
-deleting its nodes/relationships.
-
-Extraction-candidate fulltext indexes set
-`fulltext.eventually_consistent=false`; sequence N+1 cannot run until N's
-transaction and synchronous index update commit. Async embeddings are never an
-extraction-judge candidate source.
-
-### Atomic full-generation build
-
-A replacement extraction generation is built completely while the previous
-generation continues serving recall. `Meta.ingest_seq` is incremented in the
-same transaction that creates each Episode, giving one immutable total order
-independent of event-time backfill.
-
-This extraction workflow is distinct from policy reconciliation: reconciliation
-does not call the judge again to decide whether an existing assertion or its
-invalidation was correct. Both workflows obey the validity-preservation
-activation gate below; suppression is never a reason to discard a marker.
-
-```text
-  1. In one transaction, open target 43 as BUILDING, capture
-     source_high_watermark = Meta.ingest_seq and initialize its sequencer;
-     active remains 42
-  2. Enqueue only Episodes in (covered_ingest_seq, source_high_watermark] in
-     ingest_seq ASC order. Outbox has a unique constraint on
-     (stage, target_generation, ingest_seq, model_key), so crash/resume is a no-op:
-       · every rebuild Outbox entry carries target_generation = 43
-       · candidate reads use already-built generation 43 plus original Episodes
-       · extraction-stream derived endpoints and links are generation 43
-       · DERIVED_FROM may additionally target original Episodes
-  3. Because state and watermark were captured atomically, every later
-     remember receives ingest_seq > source_high_watermark and exclusively
-     enters through dual-tail: one extraction entry for ACTIVE and every
-     BUILDING/CATCHING_UP extraction generation
-  4. The target sequencer commits strictly in ingest_seq order. Three
-     automatic failures pause that exact head entry as BLOCKED; later entries
-     cannot pass it. Manual retry resumes the same sequence. Advance
-     covered_ingest_seq only after the head commits or deterministically
-     produces no output
-  5. Acquire the write queue as a short cutover barrier. While no remember can
-     allocate another ingest_seq, verify:
-       covered_ingest_seq = Meta.ingest_seq, no target work is in flight,
-       target_embedding_profile = null,
-       EmbeddingCoverage(target, active model).covered_ingest_seq
-         = covered_ingest_seq,
-       EmbeddingCoverage(episode, 0, active model).covered_ingest_seq
-         = Meta.ingest_seq,
-       all generation-scoped indexes ONLINE, authority and links valid,
-       ConductingArc coverage COMPLETE for every retained physical partition,
-       invalidation marker coverage and target mappings complete,
-       source-validity/invalidation outcomes preserved at every supported T,
-       every content-changing language pair carried by a one-to-one
-       TranslationMapping
-  6. In that same transaction transition BUILDING→ACTIVE (or
-     CATCHING_UP→ACTIVE), mark 42 INACTIVE,
-     set active[extraction] := 43 and increment structure_revision once
-```
-
-BUILDING writes and index population are invisible and do **not** increment
-`structure_revision`; active-generation appends do. The barrier closes the
-tail race without holding a lock across an LLM call. Event-time backfills
-receive a later `ingest_seq` and are dual-tailed like any other remember.
-
-Because `generation` is part of every derived `idem_key`, re-creating "the same"
-Fact or link in generation 43 does not collide with its generation-42
-predecessor — the two coexist and only the selected serving generation is
-visible.
-
-### Invalidation markers survive suppression and reconciliation (D43, D46)
-
-Creating an INVALIDATES edge atomically appends content-free
-`InvalidationEvidence {id, target_id, effective_time_utc, generation,
-source_episode_ids}` to the non-serving control ledger. `generation=0` denotes
-original Episode revision evidence; derived evidence records its owning
-generation. This is an audit projection of the existing INVALIDATES decision,
-not a new semantic relation, original deletion, or an inferred invalidation.
-Before reconciling older data, backfill this metadata from retained edges and
-authority under the generation barrier. Evidence stores no invalidator text
-or invalidator Fact ID. Original target/source IDs are private audit metadata.
-
-Rebuild `InvalidationMarker {target_id, generation, effective_time_utc,
-evidence_id}` cache rows from that retained evidence and the build's explicit
-old/new target mappings. For reconciliation, mapping means the same assertion
-occurrence, time, modality, entity bindings and Episode authority in the new
-generation, not a new semantic similarity judgment. Episode target IDs remain
-unchanged. An ambiguous/missing mapping for a retained assertion blocks
-activation. Evidence and mapping audit records needed for marker replay are
-not receipt-TTL data and cannot be garbage-collected with a retired generation;
-GC refuses to remove their last retained reconstruction authority.
-
-Markers supply only an indexed existence predicate to validity. They are not
-Elements, candidates, PPR conductors, embeddings, provenance companions or
-ordinary RPC output: neither marker text nor IDs may be returned. The denied
-invalidator's content can therefore leave serving indexes without reviving its
-target. Cache loss fails closed until marker replay completes; policy revoke
-does not remove established invalidation evidence.
-
-Before any new generation activates, verify that every retained assertion's
-source-live and invalidation predicates agree with the pinned predecessor for
-every supported T, independent of policy visibility. These predicates are step
-functions: compare canonical target mappings and sorted effective-time
-boundaries (including the interval before the first boundary and equality at
-each boundary), rather than sampling T. New explicit semantic corrections may
-create new assertions under docs/03 §5; they cannot erase a retained target's
-invalidation history. Missing authority, marker coverage, or an unprovable
-equivalence rejects cutover and leaves the previous policy-filtered generation
-serving. No response may treat unknown validity as valid.
-
-### Cross-stream compatibility
-
-Extraction links (`MENTIONS`, `RELATES_TO`, Fact→Fact `DERIVED_FROM`,
-`INVALIDATES`, `CONTRASTS`) and all their derived endpoints share one
-extraction generation. A `DERIVED_FROM` endpoint may instead be an original
-Episode, which has no generation.
-
-A Community generation records `source_extraction_generation`. Its
-`HAS_MEMBER` links and Community endpoints use the community generation;
-their Fact/Entity member endpoints must use the pinned extraction generation.
-Therefore:
-
-```text
-  visible_community(c, g_c, g_e)
-    = c.generation = g_c
-   && Generation(community,g_c).source_extraction_generation = g_e
-
-  visible_has_member(l, g_c, g_e)
-    = l.generation = g_c
-   && l.from.generation = g_c
-   && l.to.generation = g_e
-```
-
-An extraction cutover atomically sets `active[community] = null`. Community
-and profile channels remain absent until dreaming builds against the new
-active extraction snapshot and switches its selector; old cross-stream
-endpoints are never followed.
-
-### Rollback and gc
-
-Rollback is a catch-up operation, not a blind selector SET. In one transaction
-an INACTIVE generation enters CATCHING_UP and captures
-`rollback_high_watermark=Meta.ingest_seq`; history enqueue covers only
-`(covered_ingest_seq,rollback_high_watermark]`, while later remembers
-dual-tail above it under the same unique Outbox key. After extraction and
-embedding coverage catch up, it crosses the same cutover barrier before
-becoming ACTIVE. Serving continues on the current generation until then.
-
-GC refuses every ACTIVE, BUILDING or CATCHING_UP generation and the
-configured rollback target. Only RETIRED generations past retention are
-deletable. Deleting hidden generation data does not change the serving view
-and does not increment `structure_revision`.
+Generation admission, cutover and rollback are Engine and Store operations
+that the scheduler drives. No RPC exposes them and nothing garbage-collects a
+retired generation. The pipeline contract is in
+[extraction-audit](../app/anamnesis/extraction-audit.md) and docs/02 §5.
 
 ### The embedding stream
 
-Embeddings are per-model properties and per-index vector indexes, and their
-identity is three separate fingerprints (D51). Each is the SHA-256 of the
-named canonical RFC-8785 object:
+Only Facts are embedded (D54, D56). A vector is an `EmbeddingVector` node,
+also labelled `Embedding_<profileId>`, with `fact_id`, `profile_id`,
+`input_revision`, `input_digest`, `operation_id` and `vector`. `profileId`
+is the SHA-256 of the canonical profile JSON
+(`packages/core/src/embedding.ts`) and is stored as
+`(:EmbeddingProfile {id, body})`. Each profile has its own cosine index,
+`vec_fact_<profileId>` over `(v:Embedding_<profileId>) ON (v.vector)`, so two
+profiles can't overwrite one another. On startup a vector index over that
+label under any other name is dropped and recreated under this name.
 
-- `embedding_model_id` covers repository/revision, artifact file, SHA-256,
-  size and quantization, tokenizer artifact and runtime, request
-  serialization, pooling, dimension and normalization, document prefix, the
-  exact query template, and context length.
-- `vector_index_id` covers `embedding_model_id`, layout version, Neo4j version
-  family and provider, dimension, similarity, index quantization and HNSW
-  settings.
-- `embedding_profile_id` covers the exact `(embedding_model_id,
-  vector_index_id)` pair and is the value of `active[embedding]`.
+The runtime sets the profile's `model_incarnation` to
+`sha256([baseUrl, model, dimensions])`. That is a configuration fingerprint,
+not proof of frozen weights. The provider must echo `model` and
+`model_incarnation` or the call fails with `profile_mismatch`.
 
-A model-field change builds a new vector property and new indexes. An
-index-only change may reuse vectors with the exact same `embedding_model_id`
-but builds a new index; it never mutates an active index in place. Technical
-tokens use the 64 lowercase hex characters with no `sha256:` prefix:
+The lane scans every generation for Facts with no vector under the configured
+profile. Its attempt and quarantine state is `embedding-state.json`, not the
+graph. An attempt ends `succeeded`, `quarantined` or `deferred`, with reason
+`provider_unavailable`, `provider_unavailable_exhausted`,
+`provider_rejected`, `profile_mismatch`, `invalid_vector`,
+`input_too_large` or `stale_input`. Only `provider_unavailable` defers; the
+ninth transient failure in a row quarantines as
+`provider_unavailable_exhausted`. An input is never truncated, chunked or
+zero-filled to produce a vector.
 
-```text
-  node property         embedding_m_<modelhex>                    (not shipped)
-  RELATES_TO property   embedding_g<N>_m_<modelhex>
-  physical indexes      vec_fact_g<N>_<indexhex>
-                        vec_rel_g<N>_<indexhex>
-  active[embedding] = <embedding_profile_id>
-```
-
-**Shipped today**. The scheme above is the normative
-target; the code is narrower. Vectors belong to Fact targets on
-separate nodes labelled `Embedding_<profileId>` with `fact_id`,
-`profile_id`, `input_revision`, `input_digest` and `vector` properties.
-The index is `CREATE VECTOR INDEX vec_fact_<profileId> IF NOT EXISTS FOR
-(v:Embedding_<profileId>) ON (v.vector)` (`packages/core/src/store.ts`),
-where `profileId` is the SHA-256 of the canonical profile JSON
-(`packages/core/src/embedding.ts:23`), a single fingerprint rather than the
-three above. The runtime sets `model_incarnation` to
-`sha256([baseUrl, model, dimensions])` (`app/anamnesis/runtime.ts:93`), a
-configuration fingerprint, not a proof of frozen weights; the provider must
-echo `model` and `model_incarnation` or the call fails with
-`profile_mismatch`. There is no `embedding_m_<modelhex>` property or
-relationship vector index. The missing-vector scan and activation gate count
-generation Facts, with zero Facts satisfying embedding coverage.
-
-The experimental baseline profile is the resolved Qwen Q8_0 artifact:
-
-```text
-embedding_model_id:
-  711660f809e00490d029df7e65b19dfccc0dda52c81a8a93a5ab0fed796e13e9
-vector_index_id:
-  0dfe3d3a058d2ec25ed9fd9193227f94782bddc269e2fc66f148816eebef81a9
-embedding_profile_id:
-  16d404a70ca92beccbe06fae1c1bc400d924223a09c498c7f01278b0f795405b
-artifact:
-  repository Qwen/Qwen3-Embedding-0.6B-GGUF
-  revision   370f27d7550e0def9b39c1f16d3fbaa13aa67728
-  file       Qwen3-Embedding-0.6B-Q8_0.gguf, quantization Q8_0
-  sha256     06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439
-  size       639,150,592 bytes
-runtime:  tokenizer from that GGUF; llama.cpp 0.4.0-dev build 10819,
-  commit 6a1a922d269908a29cbd4b49c27e6a8e7fd10fae, CPU-only, 4 threads,
-  n_gpu_layers=0, embeddings enabled, OpenAI-compatible serialization
-encoding: context 4096, last-token pooling, 1024 dimensions, L2 normalized;
-  Episode/Fact/Entity documents are exact normalized-content UTF-8 and
-  RELATES_TO documents are exact content UTF-8, both without instruction;
-  queries are the exact verbatim UTF-8 RecallRequest.query and use the frozen
-  Qwen retrieval template
-  "Instruct: Given a web search query, retrieve relevant passages that answer
-   the query\nQuery:{query}"
-index: layout anamnesis.neo4j-vector-layout/1; Neo4j 5.26.x, provider
-  vector-2.0, cosine, 1024 dimensions, vector.quantization.enabled=false,
-  vector.hnsw.m=16, vector.hnsw.ef_construction=100
-```
-
-Q8_0 weight quantization and Neo4j vector quantization are different settings:
-the first is part of the artifact and the second is disabled. Q8_0/FP16 parity
-is unmeasured, so an FP16 build necessarily has a different model and profile
-ID. The query instruction is a frozen operational default, not a measured
-optimum. Preflight tokenizes the complete endpoint-formatted request including
-special and framing tokens; it never assumes a raw `/tokenize` count equals
-the embedding endpoint's count. The client rejects zero or nonfinite output
-and L2-normalizes every document and query vector before persistence or
-search. Every index uses this exact options object:
-
-```text
-indexProvider: "vector-2.0"
-indexConfig: {
-  `vector.dimensions`: 1024,
-  `vector.similarity_function`: "cosine",
-  `vector.quantization.enabled`: false,
-  `vector.hnsw.m`: 16,
-  `vector.hnsw.ef_construction`: 100
-}
-```
-
-Instantiate these DDL shapes with a validated integer `<N>` and lowercase hex
-IDs; those schema tokens are never request text (normative, not shipped;
-the shipped DDL is the `vec_fact_<profileId>` statement above):
-
-```cypher
-CREATE VECTOR INDEX `vec_fact_g<N>_<indexhex>` IF NOT EXISTS
-FOR (n:ExtractionG<N>) ON (n.`embedding_m_<modelhex>`) OPTIONS <options-above>;
-CREATE VECTOR INDEX `vec_rel_g<N>_<indexhex>` IF NOT EXISTS
-FOR ()-[r:RELATES_TO]-() ON (r.`embedding_g<N>_m_<modelhex>`)
-OPTIONS <options-above>;
-```
-
-The exact Neo4j patch and image digest is captured in build and qualification
-receipts; a minor-version change requires a new index ID.
-
-#### Per-entry work, failure and coverage
-
-```text
-  PENDING -> RUNNING
-  RUNNING -> SUCCEEDED | NO_VECTOR_REQUIRED | RETRY_WAIT | BLOCKED
-  RETRY_WAIT -> RUNNING
-  BLOCKED -> PENDING                authenticated retry after repair
-  BLOCKED -> RESOLVED_NO_VECTOR     authenticated operator skip
-  PENDING | RUNNING | RETRY_WAIT | BLOCKED -> CANCELLED
-                                    unreferenced target work only
-```
-
-`SUCCEEDED`, `NO_VECTOR_REQUIRED`, `RESOLVED_NO_VECTOR` and `CANCELLED` are
-terminal; every unlisted transition rejects. `stream = episode | extraction`,
-with `generation=0` only for `episode`. `EmbeddingWork` is unique by
-`(embedding_model_id, stream, generation, ingest_seq, item_ordinal)`, where
-`item_ordinal` is the deterministic `(kind_order, id)` position in 0..1023
-(`Episode=0`, `Fact=1`, `Entity=2`, `RELATES_TO=3`, sentinel `=4`), and stores
-`source_id?`, `input_digest`, state, `attempts_in_cycle`, `attempts_total`,
-`retry_cycle` and `next_retry_at`. `input_digest` is SHA-256 of the exact
-UTF-8 string presented as that endpoint input before JSON escaping. Attempt
-records are not graph nodes. In the shipped lane each failed attempt is
-an `RpcEmbeddingAttempt` (`operation_id`, `fact_id`, `profile_id`,
-`input_revision`, `input_digest`, model identity, timestamps, `state`,
-`reason`, bounded `detail`) appended to the Fact's entry in the embedding
-ledger (`embedding-state.json`, D54), keyed by Fact and carrying no source
-text; the work-item shape below is the design for the generation-scoped lane.
-Each immutable attempt `{attempt_id, embedding_model_id, stream, generation,
-ingest_seq, item_ordinal, source_id?, input_digest, attempt_ordinal,
-started_at, finished_at, outcome, error_code, error_digest}` is appended to
-that item's ledger entry; `attempt_id` is SHA-256 of the canonical work key
-plus `attempt_ordinal`. Outcome is `succeeded | no_vector_required |
-transient_failure | permanent_failure | worker_lost | cancelled`, and error
-code is one of `unavailable | timeout | rate_limited | server_error |
-invalid_input | context_overflow | zero_norm | nonfinite | wrong_dimension |
-profile_mismatch | cardinality_mismatch | malformed_response | client_error |
-worker_lost | cancelled`. A worker-lease loss closes the RUNNING attempt as
-`worker_lost` and follows the same retry rule; it never silently resets a
-counter.
-
-One sequencer per `(embedding_model_id, stream, generation)` publishes only
-the current lexicographic `(ingest_seq, item_ordinal)` head. An ingest
-sequence with no vector-bearing item has one ordinal-0 sentinel. A batch is a
-contiguous prefix from that head and obeys docs/02's 256 KiB encoded outbound
-body cap; preflight tokenizes every item, commits only the successful prefix,
-and leaves every row after the first failure unpublished, so no later vector
-appears across a hole. More than 1,024 vector-bearing outputs in one ingest
-sequence rejects that producer transaction rather than omitting a tail.
-`NO_VECTOR_REQUIRED` is permitted only for a schema excluded by contract (a
-policy or control Episode, for instance) or an extraction sequence with no
-vector-bearing output; it is not a failure escape hatch.
-
-Retry covers only the transient `unavailable`, `timeout`, `rate_limited`
-(429) and `server_error` (5xx) classes. Each automatic cycle has three
-attempts with fixed, no-jitter delays of `[1000, 10000]` ms after attempts one
-and two; a third transient failure becomes `BLOCKED`. Authenticated retry
-increments `retry_cycle`, zeros `attempts_in_cycle` and opens another
-identical cycle, while `attempts_total` and the immutable attempt rows never
-reset. Invalid input, tokenizer or context overflow, zero, nonfinite or
-wrong-dimension vectors, artifact/profile mismatch, response-cardinality
-mismatch, `malformed_response` output and deterministic `client_error` (4xx)
-responses become `BLOCKED` immediately. Never
-truncate, chunk, silently skip, synthesize a zero vector or advance coverage
-past a nonterminal entry.
-
-`EmbeddingCoverage` stores `health = HEALTHY | BLOCKED`, `covered_ingest_seq`,
-`resolved_no_vector_count` and
-`omission_digest = sha256(RFC-8785(sorted [{stream, generation, ingest_seq,
-item_ordinal, source_id, input_digest}]))` ordered lexicographically by the
-first four fields. Its cursor is the greatest contiguous ingest sequence for
-which every item is `SUCCEEDED`, `NO_VECTOR_REQUIRED` or
-`RESOLVED_NO_VECTOR`. A BLOCKED head freezes publication and that model's
-cursor while BM25 and session recall continue and the currently active profile
-keeps serving through its prior prefix. Any coverage advance affecting the
-ACTIVE profile, including publication released by a skip, increments
-`structure_revision` in the same transaction; hidden-profile progress does
-not. Status reports profile, stream/generation, ingest sequence, source ID,
-attempt count, bounded error code and digest, and first/last failure time,
-with no source text.
-
-Recall diagnostics identify the selected embedding profile and channel state. Usage stores only the final ordered primary/source selection and lineage (§3); it does not store vectors or diagnostics.
-
-#### Operator recovery
-
-Recovery is authenticated and runs only through the daemon's three shipped
-RPCs; there is no skip, cancel or free-form resolution record in v0.1.
-
-- `embedding.recover {operation_id, episode_id}` is one explicit retry of one
-  Episode under a fresh UUIDv7 operation. Reusing a completed operation is a
-  no-op; a quarantined or deferred attempt is retried with a new operation ID.
-  Provider work never runs inside the retried transaction, an operator retry
-  never exhausts (transient failure defers again), and a successful outcome
-  deletes the Episode's ledger entry while a quarantine marks it. It cannot
-  alter source text or profile identity.
-- `embedding.requeue {limit<=1000, reasons?}` deletes quarantined ledger
-  entries of the active profile (optionally filtered by the latest attempt's
-  reason) so the missing-vector scan finds those Episodes again, and wakes
-  the lane at once, which also retries any deferred entry whose backoff has
-  elapsed. Calling it again with nothing left returns `{requeued: 0}`.
-- `embedding.status {operation_id}` reports one operation's attempt, from the
-  ledger or synthesized from the `EmbeddingVector` that carries that
-  `operation_id`.
-
-Input transformation, meaning a larger context, deterministic chunking, a
-changed prefix, tokenizer or pooling, or a corrected artifact, requires a
-**new model ID and profile** and a complete build; it is never an operator
-mutation of one job.
-Later GC removes only unreferenced property and index state. The active
-profile cannot be cancelled.
-
-Operation IDs are UUIDv7. The same ID with a byte-identical canonical body is
-a no-op; a different body is `operation_conflict`. Retry and skip require the
-named row to be the current BLOCKED tuple head, so stale or non-head
-operations reject. Resolution records are retained control authority, included
-in backup and `verify`, and are not removed by `gc --embedding`; this contract
-defines no audit-retention deletion.
-
-#### Build lifecycle and activation
-
-```text
-  EmbeddingBuild {embedding_profile_id, embedding_model_id, vector_index_id,
-                  neo4j_version, neo4j_image_digest, deployment_mode, state,
-                  episode_high_watermark, extraction_generation,
-                  extraction_high_watermark, qualification_id?,
-                  created_at, activated_at?}
-  deployment_mode = development | production        immutable
-  state = BUILDING | BLOCKED | ACTIVE | INACTIVE | CANCELLED | RETIRED
-```
-
-A BUILDING head failure moves the build to BLOCKED; a successful retry or skip
-returns it to BUILDING once no head is blocked. An ACTIVE head failure leaves
-the selector and build ACTIVE, marks coverage health BLOCKED, and serves the
-prior prefix until recovery. Only BUILDING can become ACTIVE at cutover, and
-the previous ACTIVE becomes INACTIVE atomically. BUILDING or BLOCKED may
-become CANCELLED; INACTIVE may reopen as BUILDING for a caught-up rollback or
-become RETIRED after retention; CANCELLED may become RETIRED for GC. ACTIVE
-has no direct cancellation transition, at most one profile is ACTIVE, and
-every unlisted transition rejects.
-
-Opening a target build retains the write-queue capture, the exclusive
-`target_embedding_profile`, the dual tail and mutual exclusion with an
-extraction build or rollback:
-
-1. Acquire the lifecycle/write-queue barrier and require no extraction
-   generation is BUILDING or CATCHING_UP. In one transaction create the
-   BUILDING `EmbeddingBuild`, set `target_embedding_profile=<new>`, and
-   capture immutable source rows for global Episodes at `Meta.ingest_seq` and
-   every ACTIVE extraction generation at its `covered_ingest_seq`; the old
-   profile stays active.
-2. Enqueue target-model jobs through every captured source high watermark,
-   using the model-aware Outbox key.
-3. Every later remember and every ACTIVE extraction commit enqueues embedding
-   jobs for both the active and target models, so target jobs are an
-   exclusive dual tail above the captured watermarks.
-4. Under the write-queue barrier, require target-model Episode coverage equal
-   to **current** `Meta.ingest_seq` and target coverage for the ACTIVE
-   extraction generation equal to that generation's **current**
-   `covered_ingest_seq`. Through those cursors, additionally require no
-   PENDING, RUNNING, RETRY_WAIT or BLOCKED entries, every required physical
-   index ONLINE with the exact profile settings, a qualification whose mode
-   admits the requested deployment, and a skip count within policy. Then
-   switch active, clear the target and increment `structure_revision` in one
-   transaction.
-
-`ONLINE` means only that an index can answer queries; it is not quality
-approval. Development activation additionally requires
-`EmbeddingQualification {qualification_id, embedding_profile_id,
-mode: development | production, fixture_manifest_digest, result_digest,
-thresholds_digest, max_resolved_no_vector, omission_digest, operator,
-accepted_at}`, where `max_resolved_no_vector` is a nonnegative integer over
-all required target-model rows through the activation watermarks and the
-record carries the matching omission digest. The record is authenticated and
-append-only. **Production activation is disabled** until a later qualification
-references machine-validated manifests from the applicable M4/M5 gate and
-supplies predeclared quality and resource thresholds; operator attestation or
-ONLINE status alone cannot satisfy it, and this contract invents no
-thresholds. Authenticated `gen {stream: embedding, action: qualify,
-qualification: <exact record above>}` appends it, with the same replay and
-conflict semantics as the other control operations. Qualification never
-activates a profile by itself.
-
-Failure leaves the old profile active; there is no partial activation.
-Opening a rebuild or rollback extraction generation is refused while
-`target_embedding_profile` is set, so the vector-bearing generation set cannot
-change between the build's atomic capture and activation. The old profile
-remains a rollback target for 30 days, and a rollback must catch it up and
-cross the same barrier. The previous property and index are removed by
-`gc --embedding <embedding_profile_id>` under the same retention rule; GC
-refuses ACTIVE, BUILDING and BLOCKED profiles, rollback targets, and shared
-model properties still referenced by any retained index. `RELATES_TO.content`
-is embedded under the same rule.
+Recovery is authenticated and explicit:
+`embedding.recover {operation_id, fact_id}`,
+`embedding.requeue {limit ≤ 1000, reasons?}` and
+`embedding.status {operation_id}`. The provider wire format, backoff and
+idempotency rules are in
+[embedding-recall](../app/anamnesis/embedding-recall.md). The dated probe of
+one local model is in
+[research/embedding-runtime](research/embedding-runtime.md). Entity and
+relationship vectors don't exist ([09-roadmap](09-roadmap.md)).
 
 ### Markdown projection (G10, #268)
 
@@ -1172,10 +627,11 @@ any derived element's content; a longer link content rejects the write, it's
 never truncated. The cap bounds what `RELATES_TO` embedding and provenance
 assembly must carry per link.
 
-Links carry **no per-link weight.** PPR transition strength is a per-role
-constant `w_role` in `config.jsonc`; each retained visible row normalizes its
-role weights (docs/06 §4). This keeps the TypeScript and GDS transition
-matrices identical ([10-decision-log](10-decision-log.md) D24).
+PPR transition strength is a per-role weight, default 1, and the solver
+rejects an arc that carries its own weight (docs/06 §4). The protocol's
+`MemoryLink.weight` field is not read by the solver. D24's promise that links
+never carry a weight was released on 2026-10-23
+([10-decision-log](10-decision-log.md#d24--role-weights-only-each-retained-row-normalizes-itself)).
 
 Every INVALIDATES relationship copies `target_id` and the source's
 `effective_time_utc`. Fact invalidation also carries `generation`. These
@@ -1183,21 +639,8 @@ immutable fields support a relationship-index seek for `valid(T)` without
 expanding all incoming invalidators. One Fact may create at most eight
 outgoing INVALIDATES links.
 
-For bounded conflict completion, each endpoint has a rebuildable indexed
-`ConflictAdjacency {generation, fact_id, peer_id, link_id}` row per CONTRASTS
-peer, maintained atomically with link creation. The peer ID is the deterministic
-order key; reverse lookup is explicit rather than an unbounded expansion.
-Read at most 65 raw rows in peer-ID order: inspect the first 64 with bounded
-visibility, validity and policy checks; the 65th is only a has-more sentinel.
-Return the first four eligible peers. There is no eligibility cache for every
-possible T and no unbounded filtered scan or COUNT (docs/05 §6).
-Unavailable adjacency/checks reject the bundle as `conflict_unavailable`.
-`conflict_included_count` is the actual selected count. If more than four
-inspected peers are eligible or a sentinel exists, `conflict_truncated=true`
-and `conflict_total=null`; otherwise the exhausted scan supplies the exact
-eligible total. An actually inspected policy-hidden peer sets
-`conflict_redacted=true`, without its ID, text or hidden count. Uninspected
-peers are unknown, not certified absent; incomplete warnings remain mandatory.
+Recall reads at most four `CONTRASTS` peers per Fact under a current-policy
+check (docs/05 §6). No conflict adjacency cache and no conflict count exist.
 
 | Role | Direction | Layer | Meaning | Conducts PPR |
 |---|---|---|---|---|
@@ -1205,7 +648,7 @@ peers are unknown, not certified absent; incomplete warnings remain mandatory.
 | `REPLIES_TO` | replying Episode → answered Episode | cache | Explicit reply address or Slack thread parent; no generation or content in its key | no |
 | `MENTIONS` | Episode\|Fact → Entity | derived | What it is about | yes |
 | `RELATES_TO` | Fact\|Entity ↔ Fact\|Entity | derived | Free natural-language relation | yes |
-| `HAS_MEMBER` | Community → Entity\|Fact | derived (community) | Topic membership; captures `member_visible_from_utc` at build | yes |
+| `HAS_MEMBER` | Community → Entity\|Fact | derived | In the lattice. Nothing writes it (docs/09) | yes |
 | `DERIVED_FROM` | Fact → Episode\|Fact | derived | Provenance chain. Provenance is snapshot-exempt, **never policy-exempt** (docs/03 §3) | yes |
 | `INVALIDATES` | Fact → Fact / Episode → Episode | derived / originals | The target is not valid from this event's time onward | no |
 | `CONTRASTS` | Fact ↔ Fact | derived | An unresolved contradiction, preserved | no |
@@ -1290,7 +733,7 @@ The mandatory rebuildable cache is a node, not another semantic relationship:
   (:ConductingArc {source_id, link_id, peer_id, role,
                    generation?, source_extraction_generation?})
   (:ConductingArcCoverage {stream, generation, state})
-      stream = cache | extraction | community; cache generation = 0
+      stream = cache | extraction; cache generation = 0
       state = COMPLETE | UNAVAILABLE
 ```
 
@@ -1306,8 +749,7 @@ verify reports the self-link contract violation; fixtures must not imply that
 ordinary writes accept self-links. Nonconducting roles get no rows.
 
 Copy role and generation from the relationship; generation is absent for
-NEXT_EPISODE. HAS_MEMBER additionally copies its Community generation's
-source_extraction_generation. Rows include hidden, inactive and retired
+NEXT_EPISODE. Rows include hidden, inactive and retired
 relationships until physical deletion, regardless of time or current policy.
 They contain no semantic content and are neither authority, Element,
 candidate, conductor, embedding input nor ordinary output. Physical links and
@@ -1356,6 +798,7 @@ repaired, never certifies a smaller physical degree.
 
 ```text
   Episode        --NEXT_EPISODE--> Episode
+  Episode        --REPLIES_TO----> Episode
   Episode|Fact   --MENTIONS------> Entity
   Fact|Entity    --RELATES_TO----> Fact|Entity
   Community      --HAS_MEMBER----> Entity|Fact
@@ -1383,111 +826,94 @@ copy.
 ## 6. Filesystem
 
 ```text
-~/.anamnesis/                 mode 0700
-├── sock                      UDS, mode 0600 (docs/02 §10)
-├── socket.token              32-byte UDS capability, mode 0600
-├── daemon.lock/              atomic-mkdir lease + owner nonce/heartbeat
-├── config.jsonc              calibration parameters and modes (docs/04 §9)
-├── neo4j.auth                per-install random Neo4j password, mode 0600
-├── embedding-state.json      embedding attempt/quarantine ledger (D54); operational, not authority
-├── extraction-state.json     extraction pipeline journal: tasks, leases, attempts, decisions (D55)
+<runtime root>/               mode 0700 (ANAMNESIS_RUNTIME_ROOT)
+├── anamnesis.sock            UDS, mode 0600 (docs/02 §10)
+├── token                     installation token for hello, mode 0600
+├── owner/                    ownership claim on this root
+├── incarnation.json          data incarnation of this root
+├── config.jsonc              backed up with the authority
+├── neo4j.auth                Neo4j credentials, mode 0600
+├── embedding-state.json      embedding attempt and quarantine ledger (D54)
+├── extraction-state.json     extraction journal: tasks, leases, attempts, decisions (D55)
 ├── materialization-state.json  materialization custody and replay intent (D53)
 ├── objects/                  Payload bytes (§2). Part of the authority
-├── tmp/dream/                bounded disposable GDS exports
-├── neo4j/                    container volume (data/, dumps/)
-└── compose.yaml              container definition managed by the CLI
+├── uploads/                  in-progress object uploads
+└── backup.state              journal of a running backup (§9)
 ```
 
-The parent directory also holds the fixed, root-hash-namespaced writer pointer
-and backup/restore activation journals; they remain discoverable while the
-data root is renamed (docs/02).
+The sibling paths `<runtime root>-operation.lock` and
+`<runtime root>-restore.state` hold the backup/restore lock and the restore
+activation journal, so they stay discoverable while the root is renamed (§9).
+Install paths, units and environment are in [deploy](deploy.md).
 
 The three state files hold pipeline bookkeeping, never memory. Each is a
 single JSON document rewritten atomically (temporary name plus rename) on
 every change and schema-validated on load. `embedding-state.json` keeps an
-entry only while an Episode lacks its profile's vector (§4, D54).
-`extraction-state.json` keeps one entry per extraction pipeline, including
-relation premises, verdicts and attempt failures in
-`ExtractionJournalEntry.relations`, and prunes it once coverage has sealed the
-source and materialization is terminal, so the
-file stays bounded by in-flight work rather than growing with the corpus
-(docs/02 §5, D55). `materialization-state.json` keeps operation custody and
-replay intent until the source settles. None is part of the backup authority:
-losing one
-re-drives unsealed work and forgets failure history, and the structured
-audit log lines are the durable record of what happened.
+entry only while a Fact has a failed or deferred attempt and no vector.
+`extraction-state.json` keeps one entry per pipeline and prunes it once
+coverage has sealed the source and materialization is terminal, so the file
+is bounded by in-flight work (docs/02 §5, D55).
+`materialization-state.json` keeps operation custody and replay intent until
+the source settles. None is part of the backup authority: losing one
+re-drives unsealed work and forgets failure history. The structured audit log
+lines are the durable record of what happened.
 
 ## 7. Indexes and constraints
 
+The statements are `SCHEMA_STATEMENTS` in
+`packages/core/src/store/schema.ts`; that file is the source of truth.
+
 ```text
-unique    Element.id · Episode.revision_key · Episode.ingest_seq · Fact.idem_key · Entity.entity_key · Payload.hash · Hit.idem_key
-          · ExtractionGeneration.id · ExtractionCoverage.key
-          · Usage.usage_id · UsageOutcome.usage_id · UsageOutcome.idempotency_key
-          · ActivePolicy.policy_id · ConflictAdjacency(generation, fact_id, peer_id)
-          · InvalidationEvidence.id
-          · InvalidationMarker(generation, target_id, evidence_id)
-          · Fact(generation, meaning_digest, primary_episode_id) (`fact_identity`)
-          · TranslationMapping(from_generation, to_generation, from_fact_id)
-          · TranslationMapping(from_generation, to_generation, to_fact_id)
-          <role>.idem_key (7) · <role>.id (7; indexed per-role link-ID resolution)
-          · ConductingArc(source_id, link_id)
-          · ConductingArcCoverage(stream, generation)
-          · Outbox(stage, target_generation, ingest_seq, model_key)
-          · EmbeddingCoverage(stream, generation, embedding_model_id)
-          · EmbeddingWork(embedding_model_id, stream, generation, ingest_seq, item_ordinal)
-          · EmbeddingResolution.operation_id
-          · EmbeddingQualification.qualification_id
-          · EmbeddingBuild.embedding_profile_id
-          · EmbeddingBuildSource(embedding_model_id, stream, generation)
-          · Meta.key (single node, key = 'meta')
-range     Episode.origin_key · Episode.ingest_seq · Element.time_utc · Element.schema · Element.generation
-          composite Episode(session_key, time_utc, ingest_seq)
-          composite Episode(origin_key, ingest_seq) (`episode_origin_head`: newest revision per origin)
-          composite Entity(witness_generation, witness_policy_revision) (`entity_witness`)
-          composite Fact(generation, primary_episode_id, time_utc, id)
-          Outbox.processed_at
-          composite EmbeddingVector(fact_id, profile_id) (missing-vector discovery, §4)
-          composite ConductingArc(source_id, link_id)
-          composite Fact-INVALIDATES(target_id, generation, effective_time_utc, id)
-          composite Episode-INVALIDATES(target_id, effective_time_utc, id)
-          composite InvalidationMarker(target_id, generation, effective_time_utc, evidence_id)
-          composite ConflictAdjacency(generation, fact_id, peer_id)
-          composite EmbeddingWork(embedding_model_id, stream, generation, state, ingest_seq, item_ordinal)
-          composite Fact(generation, duplicate_group_key)
-fulltext  Episode.content (global) · Fact/Entity content (one index per generation)
-vector    :ExtractionG<N>.embedding_m_<modelhex> (vec_fact_g<N>_<indexhex>)   (not shipped)
-           · RELATES_TO.embedding_g<N>_m_<modelhex> (vec_rel_g<N>_<indexhex>)   (not shipped)
-           (one node/relationship index per generation and vector_index_id)
-           shipped: vec_fact_<profileId> over (:Embedding_<profileId>).vector, see §4 "Shipped today"
+unique    Element.id · Episode.revision_key · Episode.ingest_seq · Payload.hash · Meta.key
+          Fact(generation, meaning_digest, primary_episode_id)   fact_identity
+          ExtractionGeneration.id · ExtractionCoverage.key
+          Usage.usage_id · UsageOutcome.usage_id · UsageOutcome.idempotency_key
+          Hit.id · Hit.idem_key · HitCache.episode_id
+          PolicyAuthority.key · PolicyEvent.revision · PolicyEvent.key
+          EmbeddingVector.key · EmbeddingProfile.id
+          <role>.idem_key for all eight roles
+          <role>.id for the five conducting roles
+          ConductingArc(source_id, link_id) · ConductingArcCoverage(stream, generation)
+          Generation(stream, generation)                         conducting partition registry
+          RoomAssignment(source, room)
+          Account.key · AccountSession(account_key, session_key)
+          DirectoryEntry(source, actor) · IdentityDecision.id · IdentityState.key
+range     Episode.origin_key · Episode(origin_key, ingest_seq)   episode_origin_head
+          Episode(session_key, time_utc, ingest_seq)
+          Episode(origin_source, room, ingest_seq)
+          Episode(origin_source, origin_session, origin_record, ingest_seq)
+          Episode.space · Element.time_utc · Element.schema
+          Fact(generation, id) · Entity(generation, entity_key)
+          Entity(witness_generation, witness_policy_revision)
+          Hit(episode_id, t, id)
+          EmbeddingVector(fact_id, profile_id)
+          ConductingArc.link_id
+          INVALIDATES(target_id, effective_time_utc, id) · INVALIDATES.id
+          AccountSession.account_key · Person(generation, id)
+fulltext  element_content over Element.content, cjk analyzer
+vector    vec_fact_<profileId> over (:Embedding_<profileId>).vector, one per profile (§4)
 ```
 
+Startup also drops the constraints and indexes of removed mechanisms
+(`hub_arc_link`, the six `adjudication_*` constraints, the four recall
+receipt constraints and `receipt_expiry`). It refuses to become ready on a
+store recorded before schema version 2 that still holds receipt-era rows or
+an incompatible Hit: those rows are never converted or dropped (D62).
+
 No extraction task, attempt, pipeline, judge-input or decision label exists in
-the graph, and no constraint backs one; that state is the `extraction-state.json`
-journal (§6, D55). Of the extraction bookkeeping only `ExtractionGeneration` and
-`ExtractionCoverage` remain as nodes, because coverage is the cursor the
-scheduler resumes from.
+the graph. That state is the `extraction-state.json` journal (§6, D55). Only
+`ExtractionGeneration` and `ExtractionCoverage` remain as nodes, because
+coverage is the cursor the scheduler resumes from.
 
-The global Episode memory indexes use a semantic-only technical label that
-excludes policy/control Episodes; an audit query may still use `:Element`.
-Active policy filtering is required even before reconciliation finishes.
-The two UsageOutcome constraints enforce one verdict per Usage and one meaning per idempotency key. A unique Hit key prevents duplicate source credit.
+The two UsageOutcome constraints enforce one verdict per Usage and one meaning
+per idempotency key. The unique Hit key prevents duplicate source credit.
 
-Every ingest-derived Outbox sets every unique-key component:
-`target_generation=0` for global Episode work and `model_key='-'` for
-non-embedding stages. Re-queuing a different embedding model uses
-`model_key=embedding_model_id`, so it cannot collide with an older model's
-completed entry.
-
-The ConductingArc uniqueness constraint's backing RANGE index may satisfy
-the composite range requirement; do not create an equivalent duplicate index.
-For source_id equality it must supply link_id ASC directly, with LIMIT 256
-before collection/counting and any non-index filter/sort. Per-role id
-uniqueness likewise supplies the relationship RANGE indexes used by bounded
-link resolution. EXPLAIN/PROFILE must prove these access paths (docs/07).
-No O(1) claim is made for a native degree COUNT. DegreeProbe counts only the
-captured ConductingArc rows: <256 is exact under complete, consistent coverage;
-256 saturates; that source contributes no traversal rows until a qualified shortlist exists. Seed damping uses that same
-capped physical value, min(deg,256), never an unbounded count (docs/05–06).
+The ConductingArc uniqueness constraint's backing RANGE index is the ordered
+access path. For `source_id` equality it supplies `link_id ASC` directly,
+with LIMIT 256 before any filter or sort. Per-role id uniqueness supplies the
+relationship indexes used by bounded link resolution. EXPLAIN/PROFILE fixtures
+prove these access paths (docs/07). DegreeProbe counts only the captured rows:
+fewer than 256 is exact under complete coverage, and 256 means saturated.
 
 ## 8. Immutability discipline
 
@@ -1496,78 +922,45 @@ Neo4j Community has no database triggers. The discipline is two-fold.
 1. **The daemon is the only write path.** Bolt is bound to 127.0.0.1, the
    password is per-install random, and only the daemon holds a connection
    (docs/02 §10).
-2. **An exhaustive list of every SET/DELETE in the code** — anything outside
-   this list is rejected in review.
+2. **SET and DELETE stay inside the cache and cursor state below.** Anything
+   else is rejected in review.
 
 ```text
 SET allowed
-  Episode.{s, t_last_hit, hit_count}           hit cache (docs/04)
-  Episode.{utility_weight, utility_reward_sum} utility cache from outcome Hits only
-  Element.m_cache                              mass snapshot for ordering, refreshed by maintenance (docs/06 §2)
-  Entity.visible_from_utc                      min visible mention time, updated on active backfill
+  HitCache.{s, t_last_hit, hit_count, u_anchor, u_at}   hit and utility cache (docs/04)
+  Episode.{room, space}                        recomputable labels (§5, D58)
   Entity.{witness_generation,
-          witness_policy_revision}             current-generation/policy-revision witness marker, set with an allowed mention
-  ConductingArcCoverage.state                  rebuild availability/publication barrier
-  Element.embedding_m_<modelhex>               backfill; write-once null → vector (not shipped; vectors live on Embedding_<profileId> nodes today)
-  RELATES_TO.embedding_g<N>_m_<modelhex>        generation-partitioned relationship vector (not shipped)
-  Outbox.{state, attempts, next_retry_at,
-          error, processed_at}                 sequencer/blocked-head cursor
-  Generation.{state, next_ingest_seq,
-               covered_ingest_seq}              build/cutover lifecycle
-  EmbeddingCoverage.{covered_ingest_seq, health,
-         resolved_no_vector_count, omission_digest}
-                                                 model-scoped contiguous embedding cursor and blocked state
-  EmbeddingWork.{state, attempts_in_cycle,
-         attempts_total, retry_cycle, next_retry_at}
-                                                 per-entry embedding state machine (§4)
-  EmbeddingBuild.{state, qualification_id, activated_at}
-                                                 BUILDING→ACTIVE/INACTIVE/BLOCKED/CANCELLED/RETIRED lifecycle
-  Meta.{structure_revision, policy_revision, ingest_seq,
-         last_server_time, writer_epoch, active_*,
-         target_embedding_profile,
-         conducting_arc_ready}                   serving selectors, profile build, clock, fencing and cache gate
+          witness_policy_revision}             witness marker, set with an allowed mention
+  ConductingArcCoverage.state                  rebuild and publication barrier
+  ExtractionGeneration.{state, covered_ingest_seq, body}
+  ExtractionCoverage.{covered_ingest_seq, body}
+  IdentityState, Account, AccountSession       identity lane caches (§4)
+  Meta.{structure_revision, policy_revision, ingest_seq, schema_version,
+        writer_epoch, conducting_arc_ready}    revisions, clock, fencing and cache gate
+  Meta(extraction_selector).{generation_id, selector_version}
 CREATE/DELETE allowed in caches
-  session NEXT_EPISODE                         local rewire or full topology rebuild
-  ConductingArc                                atomic physical link create/delete/rewire/GC; retained-graph rebuild
-  ConductingArcCoverage                        per-partition completeness publication and lifecycle
-  ProfileCache                                 dreaming rebuild
-  ActivePolicy                                 fold immutable policy Episode events
-  ConflictAdjacency                            bounded conflict completion and policy-aware summaries
-  InvalidationMarker                           replay retained content-free evidence/target mappings
-  TranslationMapping                           per-build one-to-one language pairing (§4)
-retained authority                           Usage, UsageOutcome, Hit, Episode lineage, and embedding qualification records
+  session NEXT_EPISODE                         local rewire or topology rebuild
+  REPLIES_TO                                   reply cache rebuild
+  ConductingArc, ConductingArcCoverage         maintained with every physical link write
+  Person, OF_PERSON                            one identity generation at a time
+  EmbeddingVector index                        a wrongly named profile index is dropped and recreated
+retained, append-only
+  Usage, UsageOutcome, Hit, PolicyEvent, IdentityDecision, Episode lineage properties
 never SET on any Episode
   Episode.{episode_digest_version, digest,
            origin_role, lineage_digest}        version-1 rows stay byte-identical; verify, retry,
-                                                journal replay, backup/restore and rebuild dispatch
-                                                on the stored version and migrate nothing (§1)
-DELETE allowed in derived/authority-adjacent state
-  gc --derived                                 derived output of retired generations (§4)
-  gc --embedding                               retired embedding property + index (§4)
-  gc --objects                                 unreferenced Payload files (§9)
+                                                backup/restore and rebuild dispatch on the stored
+                                                version and migrate nothing (§1)
 ```
 
-Integrity is checked by `verify` (every Episode digest recomputed under that
-row's own `episode_digest_version`, with an absent value verified by the frozen
-version-1 serializer and no SET of `episode_digest_version`, `digest`,
-`origin_role` or `lineage_digest` on any Episode + Payload existence and
-hash + bounded Fact authority/list↔link agreement + Hit ledger ↔ cache replay
-agreement + utility sufficient-statistic replay + policy event/cache agreement
-+ UsageOutcome exact-once constraints and captured attribution
-+ invalidation evidence/marker replay and generation validity preservation
-+ lineage properties for version-2 Episodes only, none required or
-  materialized for a version-1 Episode, `lineage_digest` agreement with the stored body, bounded parent/root
-  arrays, `context_digests` equal to the parent Usage nodes’ stored
-  `selection_digest` values, Fact lineage-copy agreement, and each synthesis
-  reproducing the bounded support-union rule (§3.3)
-+ complete translation maps for activated language-changing generations
-+ embedding work/attempt/coverage agreement: one terminal attempt row per
-  attempt, coverage cursor equal to the contiguous terminal prefix, recorded
-  omission digest matching the resolved-no-vector set, and every resolution
-  and qualification record present
-+ ConductingArc endpoint coverage, unique identities, role/generation/peer
-agreement with every retained conducting link, exclusion of nonconducting
-roles, ONLINE ordered access indexes and COMPLETE publication state).
+Integrity checks recompute every Episode digest under that row's own
+`episode_digest_version`. An absent value is verified by the frozen version-1
+serializer, and no check sets `episode_digest_version`, `digest`,
+`origin_role` or `lineage_digest`. The authority snapshot used by backup and
+restore covers Element IDs, physical links, invalidation outcomes and Episode
+digests (§9). `hit-cache.verify` and `hit-cache.rebuild` compare and replay
+the Hit ledger against HitCache. `anamnesis-ops verify` is a runtime
+admission health check, not a full database audit.
 
 ConductingArc verification is a maintenance scan of the retained graph, not
 a recall-time full-degree scan. Missing/extra/stale rows or false completeness
@@ -1588,42 +981,11 @@ The data authority is exactly two things: the Neo4j database and
 | Step | Guarantee |
 |---|---|
 | objects write | fsync both temps; rename data first; rename metadata sidecar last as commit marker; fsync directory. A hash is committed iff its valid sidecar and matching data both exist |
-| Neo4j | its own WAL. Every remember/commit/extract is one transaction, so there is no partially applied state |
+| Neo4j | its own WAL. Every remember, report_outcome and materialization is one transaction, so there is no partially applied state |
 
-Object startup recovery counts every temp byte toward the global quota,
-and deletes expired temps. The object-maintenance owner handles committed-path
-states explicitly:
-
-| State | Outcome |
-|---|---|
-| data, no sidecar | uncommitted orphan; retain for the one-hour floor, then delete only after node recheck |
-| sidecar, no data | move sidecar to `objects/quarantine/`; report `object_corrupt`; refuse that hash |
-| sidecar + wrong size/hash data | move both to quarantine; report `object_corrupt`; refuse that hash |
-| sidecar + matching full SHA-256 data | committed and reusable |
-
-`object.begin` performs the full data SHA-256 recheck before returning
-`present:true`; daily `verify --scope objects` does the same for every
-committed pair. `object.commit` re-checks the marker under the object lease.
-ENOSPC removes/truncates the current temp and returns `resource_exhausted`
-before publication.
-
-### gc --objects safety
-
-A payload file is deleted only if **no** `(:Payload {hash})` node references it. A file younger than 1 hour is never deleted (covers the
-window between the objects write and its transaction).
-
-All `objects/` mutations run through the daemon's write queue. `gc --objects`
-takes an exclusive object lease against upload, backup
-and restore, then re-checks the node reference and age floor immediately before each unlink.
-Restore operates only in an empty staging root while holding that root's
-daemon lock. The age floor is defense in depth, not the synchronization
-mechanism.
-
-The object lease is cross-process: atomic mkdir at the fixed parent path
-`~/.anamnesis-object.<root_hash>.lock/`, with owner `fs_epoch` and PID. It is
-never stolen while that PID is live. Every holder reasserts the fixed
-`writer.current` epoch immediately before a live-root mutation; restore uses a
-different empty root and the parent activation lock.
+An interrupted upload leaves only temporary files, which count toward the
+upload quota until they expire. Data without a committed sidecar is not a
+committed object. No command garbage-collects committed objects.
 
 ### Backup
 
@@ -1641,7 +1003,7 @@ digests, the small sorted unique retained-generation list and cutoff coverage.
 Backup and restore share the atomic sibling
 `~/.anamnesis-operation.lock/`. Backup refuses when
 `~/.anamnesis-restore.state` exists; restore refuses while the live-root
-`backup.state` is not cleared. A backup destination must not exist—v0.1 has no
+`backup.state` is not cleared. A backup destination must not exist; there is no
 overwrite/force mode—so a prior complete or partial archive is never reused.
 
 ```text
@@ -1653,20 +1015,18 @@ overwrite/force mode—so a prior complete or partial archive is never reused.
       2. daemon acquires the backup gate; briefly take the object lease, finish
          in-flight publications and writes
     CUTOFF
-      3. under the write queue, pause every Neo4j writer (commit, extraction,
-         generation, embedding, maintenance, gc, policy, remembers and Usage creation)
+      3. under the write queue, pause every Neo4j writer (remember, recall Usage
+         creation, report_outcome, extraction, embedding, identity and policy)
       4. record structure_revision, ingest_seq, schema/Neo4j versions and the
-         policy_revision, receipt retention configuration and exact live container
+         policy_revision and exact live container
          image digest plus committed Payload hash manifest; record the highest
          stored `episode_digest_version` in use so a restore verifies each
          Episode under its own version and rewrites none; record the active
-         embedding_profile_id with its model and index IDs, each model-scoped
-         coverage cursor with its health and omission digest, and the active
-         extraction generation's fact_language_policy, grouping_version and
-         judge_profile_id, so a restore can prove it came back on the same
+         embedding profile and the selected extraction generation's
+         configuration, so a restore can prove it came back on the same
          contract;
          fsync backup.state=CUTOFF, then release the object lease. Upload may
-         proceed; GC and Neo4j writers remain paused
+         proceed; Neo4j writers remain paused
     DUMP
       5. fsync backup.state=STOPPING; stop the Neo4j service; fsync
          backup.state=DB_STOPPED
@@ -1783,8 +1143,6 @@ process—not either daemon—holds the parent lock throughout handoff.
 runtime access state, not backed up; first start of the activated root creates
 a fresh 0600 token.
 
-Caches are rebuilt on demand (`anamnesis rebuild --hit-cache`, maintenance
-job for `m_cache`); they are not part of what must be restored.
-ConductingArc is reconstructed from restored physical links and published
-complete by partition before PPR becomes available (§5), never replaced with
-a native adjacency fallback.
+Caches are not part of what must be restored. `hit-cache.rebuild` replays
+the Hit ledger, and ConductingArc is reconstructed from the restored physical
+links and published complete before PPR is available (§5).

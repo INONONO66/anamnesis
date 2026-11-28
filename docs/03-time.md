@@ -1,15 +1,14 @@
 # 03 — Time
 
 The semantic time axis is **event time**. Operational server times are stored
-for ingestion, Hits, policy events and receipts, but there is no bitemporal
+for ingestion, Hits, policy events and Usage, but there is no bitemporal
 transaction-time validity interval. `snapshot(T)` therefore means "what the
 record currently says the world was like at T", not "what the system knew at T"
 ([10-decision-log](10-decision-log.md) D4).
 
 ## 1. Stored time
 
-Only Episode and Fact carry a semantic event time. Control Episode event times
-record command acceptance and are not selectable historical memory content.
+Only Episode and Fact carry a semantic event time.
 
 | Property | Meaning |
 |---|---|
@@ -22,7 +21,8 @@ record command acceptance and are not selectable historical memory content.
 - Fact: **the time the claim took effect.** "I moved to Seoul in 2019" said in
   2026 gives Fact.time = 2019, Episode.time = 2026.
 - Episodes additionally carry `ingested_at` (server ms), written once at
-  CREATE, immutable, and **not used in snapshot computation** — audit only.
+  CREATE and immutable. `snapshot(T)` never reads it; the `known_by`
+  predicate and the retention clock do (§6).
 
 ## 2. Time resolution (extraction)
 
@@ -39,70 +39,26 @@ only honest choice.
 
 ## 3. visible(x, T)
 
-Does x exist in `snapshot(T)`? The definition differs per kind, and for
-Entity, Community and Link it is **derived**.
+Does x exist in `snapshot(T)`?
 
 ```text
-  visible(Episode e, T)   = e.time_utc <= T
-  visible(Fact f, T)      = f.time_utc <= T && visible_gen(f)
-  visible(Entity n, T)    = visible_gen(n)
-                          && n.visible_from_utc <= T
-  visible(Community c, T) = visible_community(c, active[community], active[extraction])
-                          && c.visible_from_utc <= T
-  visible(Link l, T)      = visible_gen(l) && visible(l.from, T) && visible(l.to, T)
+  visible(Episode e, T) = e.time_utc <= T
+  visible(Fact f, T)    = f.time_utc <= T && f.generation = selected extraction generation
+  visible(Link l, T)    = visible(l.from, T) && visible(l.to, T)
 ```
 
-These are temporal/generation predicates only. Ordinary serving additionally
-requires `allowed_now(x)` under the current pinned `policy_revision` (D43).
-Policy/control Episodes and Usage records are never memory candidates
-or conductors. `T` cannot restore a currently denied original or derived item;
-confidence and low mass cannot substitute for policy/validity checks.
+These are temporal and generation predicates only. Serving also requires the
+current policy to allow the item (D43). `T` can't restore a currently denied
+original or derived item, and confidence or low mass never substitutes for a
+policy or validity check.
 
-`visible_gen` is defined in [01-storage](01-storage.md) §4. Reasons:
-
-- `Entity.visible_from_utc` is a rebuildable cache: the minimum visible time
-  of its MENTIONS sources in that extraction generation. Active backfill may
-  lower it in the same transaction that adds the mention.
-- A Community generation captures each member's visibility threshold on
-  HAS_MEMBER. For `k=max(1,ceil(0.5·member_count))`,
-  `Community.visible_from_utc` is the k-th smallest captured threshold. The
-  half-members threshold is therefore one property comparison at recall, not an
-  unbounded member count. Empty communities are not created (there is no
-  first member threshold for zero members).
-- A Link exists iff both ends exist. Links have no time of their own.
-
-Cached thresholds do not prove policy permission. An Entity needs a current
-allowed supporting mention that is itself visible at `T`; an affected
-Community/profile/synthesis must be suppressed until rebuilt from allowed
-supports. Current policy gates endpoints and link content before conduction,
-even when structural caches are stale.
-
-The Entity witness is an activation prerequisite, not a per-request scan:
-
-```text
-  witnessed(n, g_e, policy_revision) = n.witness_generation = g_e
-                                     && n.witness_policy_revision = policy_revision
-  activate(g_e) requires witnessed(n, g_e, policy_revision)
-                for every distinct Entity n that g_e's Facts mention
-  visible(n, T)  = n.generation = g_e && n.visible_from_utc <= T
-```
-
-The witness is stored on the Entity itself as the indexed marker
-`Entity.{witness_generation, witness_policy_revision}` (index `entity_witness`,
-docs/01 §7), set in the transaction that writes an allowed mention for
-the current generation and policy revision. Activation
-(`entity_witness_policy_coverage`) requires the marker on every distinct
-Entity the generation's Facts mention, at the pinned generation and policy
-revision; an absent or mismatched marker keeps that generation from
-activating and never falls back to `visible_from_utc` alone. There is no
-separate witness row. Request-time Entity queries run against the activated
-generation and compare only `visible_from_utc <= T`; they do not re-read the
-marker, because activation already proved it for every mentioned Entity.
-Echo lineage adds nothing to this axis:
-`echo_depth`, roots and Usage timestamps are operational provenance and never
-supply or shift a Fact's event time or its visibility at `T` (D49). There is no cache keyed by an arbitrary
-request `T`; the request supplies `T` and compares `visible_from_utc`
-(docs/01 §3.2, §7).
+A Link exists iff both ends exist; links have no time of their own. Entities
+carry no event time and are not recall results. An Entity is admitted to a
+generation through its policy witness, checked once at cutover
+(docs/01 §3.2), not through a per-request scan. Echo lineage adds nothing to
+this axis: `echo_depth`, roots and Usage timestamps are operational
+provenance and never supply or shift a Fact's event time or its visibility at
+`T` (D49).
 
 ### The DERIVED_FROM exception — provenance only
 
@@ -117,165 +73,66 @@ Episode (2026) is not. Two rules diverge here.
 
 The exception is temporal, never a policy bypass. A denied source cannot
 support a visible derived result; reject the whole affected Fact, rather than
-dropping its denied source from attribution. Suppress denied companion and
-superseded text too; a hidden conflict may produce only a redacted warning,
-without its text, ID or hidden-peer count. The serving publication barrier
-revalidates policy after assembly (docs/02 §1).
+dropping its denied source from attribution. Denied companion and superseded
+text is withheld too, with a warning in its place (docs/05 §6).
 
 ## 4. valid(x, T) — non-recursive INVALIDATES
 
 ```text
-  invalidated(target, generation, T)
-    = ∃ retained INVALIDATES edge OR replayed InvalidationMarker for target:
-        owning/mapped generation matches && effective_time_utc <= T
+  invalidated(target, T)
+    = ∃ INVALIDATES link for target: effective_time_utc <= T
+                                     && known(link, known_by)
 
-  source_live(e, T) = !invalidated(e.id, 0, T)
-
-  valid(Episode e, T) = visible(e, T) && source_live(e, T)
-
-  support_valid(f, T) = true                                      if f is not synthesis
-                      = ∀ u ∈ f.support_fact_ids : valid(u, T)     if f is synthesis
-
-  valid(Fact f, T) = visible(f, T)
-                   && ∃ e ∈ f.source_episode_ids : source_live(e, T)
-                   && support_valid(f, T)
-                   && !invalidated(f.id, f.generation, T)
+  valid(Episode e, T) = visible(e, T) && !invalidated(e.id, T)
+  valid(Fact f, T)    = visible(f, T) && !invalidated(f.id, T)
 ```
 
-An operator acceptance time is operational too. Reviewing or correcting an
-adjudication never changes an `effective_time_utc`, never backdates an
-existing edge and never removes one; a repair adds new records and, where
-needed, a replacement Fact under §5.
+A Fact is also dropped at assembly when any of its source Episodes is not
+servable: denied by policy, invalidated by a revision effective at T, or not
+yet known at `known_by`.
 
 An invalidator Fact's own validity is **not consulted.** "Does the original come back when its
 invalidator is invalidated" is the doorway to recursion, cycles and rule
 explosion, and we keep that door shut. Anything that should come back is
 *created anew* by the replacement protocol in §5.
 
-`source_live` deliberately does not require the source Episode itself to be
-visible at T. A Fact backdated to 2019 from an Episode uttered in 2026 remains
-visible in a 2020 world snapshot under the provenance exception, while a 2027
-revision of that Episode can stop the Fact from 2027 onward.
-
-Both existential INVALIDATES checks use bounded index seeks: the existing
-relationship index `(target_id, generation?, effective_time_utc, id)` and the
-marker index `(target_id, generation, effective_time_utc, evidence_id)`, with
-`effective_time_utc <= T`, ordered by time/ID and `LIMIT 1` each. Either match
-invalidates; duplicate edge/marker evidence does not change the predicate.
+The check is a bounded index seek on the relationship index
+`(target_id, effective_time_utc, id)` with `effective_time_utc <= T`. Validity
+never expands an unbounded incoming adjacency list.
 
 INVALIDATES links carry `ingested_at`, copied from the invalidating element's
 `ingested_at` (null means always known). Under a recall `known_by`, a link
 with `ingested_at > known_by` is not yet known and does not invalidate its
 target; without `known_by` the predicate above is unchanged (D57).
-Validity never expands an unbounded incoming adjacency list. Complete marker
-coverage is required before serving a reconciled generation.
-
-Synthesis support is one bounded level: `support_fact_ids` may reference only
-non-synthesis Facts. If any support becomes invalid, the synthesis becomes
-invalid and the next dreaming run creates a replacement; it is never
-resurrected recursively.
-
-Temporal invalidation is not suppression, within or across generations. An
-established INVALIDATES decision continues to determine validity when its
-source is denied: preserve content-free target/effective-time/generation
-markers in the non-serving view, rebuilt from retained authority (docs/01 §4).
-No marker or denied-source text/IDs are returned or conducted. Policy
-reconciliation is not semantic re-extraction and cannot remove these outcomes.
-Activation requires preservation at every supported T or fails closed. This
-keeps invalidation non-recursive and prevents suppression-induced resurrection.
-Independently, `allowed_now(f)` fails if any materialized Episode authority or
-required support Fact is denied. A policy revoke cannot manufacture outputs
-that were never extracted while denied (D43).
-
-Boundary fixture (A and B have live original authority; no other invalidation):
-
-```text
-  A.time = 10; B.time = 20; B -[:INVALIDATES]-> A
-  deny B; reconcile generation 42 -> 43
-  marker(target = A_in_43, generation = 43, effective_time_utc = 20)
-
-  T                 9       10       19       20       21
-  valid(A), before  false   true     true     false    false
-  valid(A), after   false   true     true     false    false
-```
-
-B's content is suppressed after the deny; its invalidating effect is not.
-Revoking the deny does not remove the marker. Omitting the marker or failing
-to reconstruct its target mapping rejects activation rather than making A
-valid at T=20. Every interval and equality boundary must agree, not just the
-five illustrative T values.
 
 - INVALIDATES is meaningful only as `Fact → Fact` and `Episode → Episode`
   (revisions).
 - CONTRASTS has no effect on validity and elects no winner by confidence or
-  recency. After primary ranking, assembly completes up to four valid,
-  non-denied peers per primary through indexed adjacency with limit+1,
-  deterministic peer-ID order, even if peers were not retrieval candidates.
-  The scan reads at most 65 raw `CONTRASTS` rows: it inspects the first 64
-  with bounded visibility, validity and policy checks and treats the 65th
-  only as a has-more sentinel. `conflict_total` is the exact eligible count
-  only when the scan exhausted the rows within 64 and found at most 4
-  eligible peers; otherwise it is `null`, and `conflict_truncated=true`
-  says the bundle is explicitly incomplete. A hidden peer yields only a
-  redacted indicator, with no ID, text or hidden count. Budget admission includes the full permitted companion
-  text and mandatory warnings, otherwise skips the primary bundle (D44, D46;
-  docs/05). There is no unconditional both-sides guarantee beyond this bound.
+  recency. Recall attaches up to four peers per primary as companions
+  (docs/05 §6).
 
 ## 5. Change vs correction
 
-"A is no longer right" comes in two kinds, and the extraction judge outputs
-`mode`.
+A Fact→Fact INVALIDATES link is written when the relation judge (D53) decides
+that a new Fact invalidates an existing one. The link copies `target_id` and
+the invalidating Fact's `effective_time_utc` and `ingested_at`. From that
+time onward the target isn't valid; before it, the target still serves in
+historical snapshots.
 
 ```text
-  change      the world changed.   "I moved"           → new Fact C, C.time = the event's time
-  correction  the record was wrong. "No, that's not it" → new Fact C, C.time := B.time (B = the corrected Fact)
+  T ──A────────C──▶    C invalidates A
+                       snapshot(T < C.time): A is valid
+                       snapshot(T ≥ C.time): A is not valid, and A appears
+                                             under C's provenance.supersedes
 ```
 
-Both create `C -[:INVALIDATES]-> B`. The only difference is C.time.
-
-```text
-  change      T ──A────B────C──▶    in snapshot(B.time ≤ T < C.time) B is valid. B was true in the past
-  correction  T ──A────B/C─────▶    in snapshot(T ≥ B.time) B was never valid at any T
-```
-
-Backdating a correction is **a direct consequence of defining Fact.time as
-"effective time"**: a correction says B was wrong from the very moment it was
-recorded as taking effect.
-
-### Replacement protocol — restoring a wrongly invalidated A
-
-If B invalidated A, B turned out to be wrong, and A is still true:
-
-```text
-  before               A  ◀──INVALIDATES── B
-  correction C arrives A  ◀──INVALIDATES── B  ◀──INVALIDATES── C(time := B.time)
-                       A is still invalid (non-recursive — the A ← B edge stands even though B is invalid)
-  create replacement   A′ {content = A.content, time = A.time,
-                           sub_kind = A.sub_kind, modality = A.modality}
-                       A′ ─DERIVED_FROM─▶ A,  A′ ─DERIVED_FROM─▶ C     (provenance)
-                       A′.source_episode_ids = [C's correction Episode]
-                           + deterministic top 15 of authority(A)
-                       A′ ─INVALIDATES──▶ A                             (A leaves for the whole range)
-```
-
-Absent later invalidation or denial, A′ is valid for T ≥ A.time, and A is
-invalid over that range; B is invalid for T ≥ B.time and not yet visible before
-it. The replacement protocol itself adds no duplicate current exposure, and
-the validity definition stays one hop. A′ retains the same meaning-bearing
-entity/property bindings; its confidence is judged for source-faithfulness and
-its immutable `m0` uses the pinned generation priors. Its accessibility is
-computed from its bounded Episode authority, so retained source histories
-carry over, while a truncated source does not. This is Episode-shared
-accessibility, not a per-Fact reinforcement guarantee
-([04-forgetting](04-forgetting.md) §3 — one of the reasons Hits attach to
-Episodes).
-
-The extraction judge decides whether a replacement is needed by looking up
-what the corrected Fact B had itself invalidated (if B carries INVALIDATES and
-C reverses it, create A′). If the LLM misses it, A stays invalid — a better
-failure mode than automatic restoration by a recursive rule: an invisible fact
-can be re-stated by the user, but a wrongly resurrected fact produces silent
-wrong answers.
+The pipeline has no separate correction mode that backdates the invalidating
+Fact to the target's time, and no replacement Fact that restores a wrongly
+invalidated target. Because INVALIDATES is non-recursive (§4), invalidating C
+doesn't bring A back; a user restating A creates a new Fact. Both designs are
+recorded in the decision log archive
+([D18](history/decision-log-archive.md#d18--corrections-are-backdated-ctime--btime))
+and listed in [09-roadmap](09-roadmap.md).
 
 ## 6. Why no transaction time
 
@@ -295,60 +152,26 @@ per-element valid-from/valid-to. And for an element with no Hit,
 `ingested_at` is the retention clock origin of its mass (Episode mass and the
 Fact accessibility A_Fact over its source Episodes).
 D57 records it as a narrow exception to D4, not a reversal. A structural
-revision log alone cannot reconstruct a result: policy/config versions, selected channels,
-candidate/index/cache state, degradation decisions, mass/utility reads, `now`
-and exact output budgeting also matter. Usage captures the final ordered source attribution. An unreported Usage is missing data. Current policy still governs historical recall and outcome acceptance after restart.
+revision alone can't reconstruct a result: policy, index and cache state,
+`now` and the output budget also matter. Usage captures the final ordered
+source attribution.
 
-## 7. Cypher sketch
+## 7. Where the predicates run
 
-Candidate search and envelope expansion apply visible(T) plus current policy
-before admitting seeds or conductors. Generation-scoped indexes exclude hidden
-generations before top-k;
-materialized visibility thresholds avoid nested graph scans.
-
-```cypher
-// Temporal candidate subquery, not a complete serving query.
-// The application selects this validated index from pinned active generation 43.
-// Apply current policy to every returned row before seed admission.
-CALL db.index.vector.queryNodes('vec_fact_g43_bge_m3_1024', 256, $q)
-YIELD node AS f, score
-WHERE f:Fact
-  AND f.time_utc <= $T
-RETURN f.id, score
-ORDER BY score DESC, f.id ASC
-LIMIT 64
-```
-
-```cypher
-// Entity witness coverage, checked once at activation per distinct mentioned Entity (docs/03 §3).
-MATCH (f:Fact {generation: $g_e}) UNWIND coalesce(f.entity_ids, []) AS entity
-WITH DISTINCT entity
-OPTIONAL MATCH (w:Entity {witness_generation: $g_e, witness_policy_revision: $policy_revision})
-WHERE w.id = entity
-RETURN entity, count(w) AS witnesses   // activation requires witnesses = 1 on every row
-```
-
-```cypher
-// Request-time Entity temporal visibility on the activated generation; the marker is not re-read here.
-MATCH (n:Entity {id: $entity_id})
-WHERE n.generation = $g_e AND n.visible_from_utc <= $T
-RETURN n.id
-```
-
-valid(T), including `known_by`, is applied at the candidate stage: every
+`valid(T)`, including `known_by`, is applied at the candidate stage: every
 Fact channel (BM25, vector) and every Episode channel filters on it, so a Fact
 with an effective known INVALIDATES at T never enters the candidate set and
-never seeds PPR. Source policy is not a channel predicate: a Fact whose source
-Episode is denied can still be a candidate and a seed, and is dropped at
-assembly. The PPR graph itself is built from the generation's arcs without
-re-checking peer validity, so an invalidated Fact can still appear as a graph
-peer that carries mass between seeds; it is never a seed and, by the assembly
-check below, never a result.
-valid is checked again at result assembly; a Fact with an effective
-INVALIDATES at T is never a primary, and when its invalidating Fact is served
-the invalidated Fact is attached under that result's `provenance.supersedes`
-(at most 8, `time_utc DESC, id ASC`, policy-denied content redacted), never
-through unbounded recursive traversal ([05-recall](05-recall.md) §6). The
-`time` window and `known_by` are likewise candidate-stage predicates on every
-channel, and the window is re-applied to the ranked list before packing
-(#263, #269, #270).
+never seeds PPR. Source policy is not a channel predicate for Facts: a Fact
+whose source Episode is denied can still be a candidate and a seed, and is
+dropped at assembly. The PPR graph is built from the generation's arcs without
+re-checking peer validity, so an invalidated Fact can still be a graph peer
+that carries mass between seeds. It's never a seed and never a result.
+
+Validity is checked again at assembly. When an invalidating Fact is served,
+the Facts it invalidates are attached under `provenance.supersedes` (at most
+8, `time_utc DESC, id ASC`, policy-denied content redacted), never through
+recursive traversal ([05-recall](05-recall.md) §6). The `time` window and
+`known_by` are candidate-stage predicates on every channel, and the window is
+re-applied to the ranked list before packing. The predicates are
+`RECALL_ALLOWED` and `FACT_VALID` in
+`packages/core/src/store/recall-store.ts`.
