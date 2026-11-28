@@ -1,8 +1,11 @@
-# Experimental Node ingest runtime
+# anamnesis daemon and ops CLI
 
-This is an experimental ingest/recovery application, not a production memory
-service. Recall, policy and commit RPCs are advertised; extraction and embedding
-capabilities reflect configured providers. No OS service manager is installed.
+This directory holds the anamnesis daemon and its operator CLI
+(`anamnesis-ops`). The daemon serves the remember, recall, policy and commit
+RPCs; extraction and embedding capabilities reflect configured providers.
+Production runs it under the systemd units in `deploy/vm/`, which start
+`ops foreground` ([deploy](../../docs/deploy.md)). `ops up` starts the local
+`managed` supervisor instead. Don't supervise one root both ways.
 
 ## Optional providers
 
@@ -88,15 +91,17 @@ The client has no Bolt connection or Bun runtime dependency.
   `Engine.remember` for every database write. It never reclaims an epoch after
   another writer has displaced it.
 - Object chunks stream to connection-owned temporary files with sequence and
-  byte reservations. Commit uses the existing `ObjectStore` API (which requires
+  byte reservations. `object.commit` uses the existing `ObjectStore` API (which requires
   one bounded whole-object buffer), verifies the hash, and fsyncs data/metadata.
 - A single bounded serial queue governs admission. Raw frame lengths, connection
   count, queued requests, uploads, reserved upload bytes, and response buffering
   are bounded. Unsupported future RPC methods return explicit errors.
-- Committed receipts are read back from Neo4j with their real ID and ingest
-  sequence. A versioned canonical RPC-body digest additionally binds fields such
-  as mass that the existing core digest does not cover. Both digests are checked;
-  matching only a revision key never makes a retry successful.
+- A `remember` reply for a revision that is already stored is built from the
+  row read back from Neo4j, with its real ID and ingest sequence. The retry
+  must match the RPC-body digest, which binds fields such as mass that the
+  core digest does not cover, and the stored core digest must verify. Matching
+  only a revision key never makes a retry successful. These replies are not
+  recall receipts.
 - `remember` and `remember.batch` write directly to Neo4j during the request.
   If storage is unavailable, the failed write is not accepted; the client
   receives retryable `storage_unavailable` and retries the same input. In a
@@ -107,9 +112,11 @@ The client has no Bolt connection or Bun runtime dependency.
   background probe resumes the identity, embedding, and extraction workers
   after storage recovery.
 - Startup ignores an absent or empty legacy `spool/` and refuses a nonempty
-  one, naming its path and preserving it. An absent or empty `deliveries/` is
-  fine; leftover reservation files were never acknowledgements and may be
-  cleaned up with a log event.
+  one, naming its path and preserving it. The daemon has no spool, no delivery
+  reservations and no `ingest.status` RPC. An absent or empty `deliveries/` is
+  fine; leftover `<sha256>.json` files there were pre-commit reservations,
+  never acknowledgements, and startup removes them with a
+  `legacy_deliveries_cleaned` log event.
 - SIGTERM/SIGINT and authenticated `shutdown` stop admission, finish accepted
   work, close clients/drivers, remove uploads/socket, and release ownership.
 
@@ -130,6 +137,7 @@ key file) and exits 2 with `{"error":"extraction_provider_required"}` when
 absent. Embeddings remain optional; `embed` reports a disabled no-op when no
 embedding endpoint is configured. `extract`, `embed`, and `recall <query>` are
 explicit foreground operations and print one JSON result.
+
 ## Loading a cleaned corpus
 
 `node dist/anamnesis-ops.mjs load <clean-dir> <source> <state-dir>` sends one source of a cleaned corpus
@@ -144,7 +152,9 @@ socket used by ops (including a transport relay).
 `node dist/anamnesis-ops.mjs managed` runs a foreground supervisor with at most
 three automatic restarts after unexpected child termination. It never signals an
 unrelated PID. SIGINT/SIGTERM stop and await its owned daemon; a clean RPC shutdown
-ends supervision. This is not an installed OS service or an unbounded restart loop.
+ends supervision. It is a bounded local supervisor, not an unbounded restart loop.
+Under systemd use `foreground`: `deploy/vm/anamnesis.service` runs
+`ops foreground` with `Restart=always`.
 
 The four recovery scenarios use owned, isolated Neo4j and real built Node UDS:
 
@@ -166,9 +176,9 @@ bun scripts/qa/runtime-scenarios.ts --case e2e-real --evidence-root .omo/evidenc
 This local QA script requires Docker and SSH access to `inonono`. It fetches the
 Haiku token-hub credential into a private temporary file, opens its own tunnel,
 and uses only a newly owner-labelled Neo4j container and temporary runtime root.
-Embeddings are deliberately disabled. It copies source transcripts read-only,
-tries Codex raw admission, and deterministically converts real Claude text turns
-when fewer than 200 Episodes are admitted. `ANAMNESIS_E2E_FALLBACK_PROJECT` can
+Embeddings stay off unless `ANAMNESIS_QA_EMBEDDINGS=1`. It copies a Claude
+project's transcripts read-only and deterministically converts their text turns
+into 200 Episodes with direct lineage. `ANAMNESIS_E2E_FALLBACK_PROJECT` can
 select the Claude project directory. Source rules/counts, provider errors, recall,
 crash recovery, and cleanup receipts are saved under the evidence directory.
 No credential or evidence file belongs in a commit.
@@ -190,9 +200,8 @@ It still deletes the token-hub credential and stops the tunnel. Manually remove
 only that recorded owner-labelled container (`docker rm -f -v`) and its temporary
 root afterward, and append the cleanup receipt. Success always cleans up.
 
-Extraction uses the Engine pipeline after daemon shutdown (`ops extract` only
-reports capability readiness). `Engine.digest` acknowledges the original-message
-Outbox only after generation coverage/cutover has accepted each extraction outcome.
+In this script extraction uses the Engine pipeline after daemon shutdown
+(`ops extract` only reports capability readiness).
 Recall records full-text/top-20 query results, one-based minimum Fact ranks and
 Fact-hit coverage; contrast companions are included under the same policy and
 output budget as their primary Facts. Since `verify` reports admission health rather
@@ -213,9 +222,9 @@ its ephemeral published port across restart. Readiness uses process/socket event
 with bounded deadlines, not sleeps. The harness removes its container/volumes,
 processes, sockets, relay, and temporary roots.
 
-Evidence is in `.omo/evidence/runtime-recovery/runtime-app-v3`. The initial process
-RED caught malformed-JSON and fabricated revision-identity behavior; its initial
-authentication assertions already passed. Later process tests additionally cover
-version mismatch, split/oversized frames, invalid UTF-8, uploads, and shutdown.
+The process tests (`process.test.mjs`) cover malformed JSON, unknown methods,
+authentication, refusal while storage is unavailable, legacy `spool/` and
+`deliveries/` handling at startup, version mismatch, split and oversized
+frames, invalid UTF-8, uploads, and shutdown.
 
 Committed objects are not garbage-collected by this runtime.

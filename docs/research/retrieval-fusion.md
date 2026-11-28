@@ -1,5 +1,10 @@
 # Original-query and English-query fusion probe
 
+> **Non-normative, dated 2026-09-07.** An offline experiment frozen on that
+> date. [docs/00 to 10](../00-overview.md) are the contracts, and the code
+> wins over this page. It doesn't measure the recall path in
+> [05-recall](../05-recall.md).
+
 This offline experiment reuses the captured Qwen3-Embedding-0.6B Q8_0
 1024-dimensional vectors from the earlier eight-Episode, twenty-query
 development pilot. It makes no model or embedding requests.

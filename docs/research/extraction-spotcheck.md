@@ -1,5 +1,10 @@
 # Source claims and English projections: six synthetic probes
 
+> **Non-normative, dated 2026-09-07.** A development spot check run on that
+> date. [docs/00 to 10](../00-overview.md) are the contracts, and the code
+> wins over this page. The models and prompt here aren't the production
+> extraction configuration.
+
 Two models each processed six newly written synthetic Episodes, one Episode
 per request. The prompt requested source-language claim content, a separate
 English search projection, modality, source-faithfulness confidence and an

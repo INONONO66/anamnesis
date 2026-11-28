@@ -1,5 +1,12 @@
 # Anamnesis vs Graphiti: real-case comparison (2026-09)
 
+> **Non-normative, dated 2026-09-25.** "Today" in this page means the
+> repository as of the G7 E2E artifact of 2026-09-24.
+> [docs/00 to 10](../00-overview.md) are the contracts, and the code wins
+> over this page. Known drift since then: link roles are eight
+> (`REPLIES_TO` was added by D58) and the `ingest-*` ops adapters were
+> replaced by `anamnesis-ops load`. Current state is in [09-roadmap](../09-roadmap.md#where-the-code-is-today).
+
 Audience: the anamnesis maintainer. Status: reviewed against the G7 E2E
 artifact of 2026-09-24.
 

@@ -1,6 +1,6 @@
 # Deployment runbook
 
-The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing else ([00-overview](00-overview.md) invariant 1). Durability comes from `backup`/`restore` over that authority. The episode journal is a disaster-recovery convenience — it lets the originals layer be re-ingested if the graph is lost before a backup exists — not a second store of record ([10-decision-log](10-decision-log.md) D0).
+The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing else ([00-overview](00-overview.md) invariant 1). Durability comes from `backup`/`restore` over that authority. The daemon keeps no spool and writes no episode journal: `remember` commits to Neo4j before it replies. `EpisodeJournal` in `packages/core` is a library class for callers that embed the engine themselves; where such a journal exists it's a disaster-recovery convenience, not a second store of record ([10-decision-log](10-decision-log.md) D0).
 
 ## First deploy
 
@@ -18,7 +18,7 @@ The data authority is the Neo4j database plus `~/.anamnesis/objects/`, nothing e
    set -a; . ./.env; set +a
    bun run migrate
    ```
-4. Retain failed ingest requests client-side and retry `storage_unavailable`. Before upgrading to D61, reconcile any acknowledged writes from a legacy runtime: startup refuses a nonempty `spool/` and leaves it untouched. An absent or empty directory needs no action. Leftover `deliveries/` files were pre-commit reservations and may be removed at startup with a log event.
+4. Retain failed ingest requests client-side and retry `storage_unavailable`; a retry of a stored revision answers `created: false`. When upgrading a runtime root from before D61 (the spool-based runtime), reconcile its acknowledged writes first: startup refuses a nonempty `spool/` and leaves it untouched. An absent or empty directory needs no action. Leftover `deliveries/` files were pre-commit reservations; startup removes them and logs `legacy_deliveries_cleaned`.
 
 ## Optional TCP listener
 
@@ -44,7 +44,7 @@ The listener is plain TCP without TLS. Bind to loopback or a private interface a
 
 ### Remote `ops` client
 
-The `ops` CLI (`dist/anamnesis-ops.mjs`, or `app/anamnesis/ops.ts`) talks to the local socket by default. Set `ANAMNESIS_RPC_TCP=host:port` to target a daemon's TCP listener instead; every command that needs a connection (`status`, `verify`, `recall`, the `ingest-*` adapters, `backup`, `down`) then goes over TCP.
+The `ops` CLI (`dist/anamnesis-ops.mjs`, or `app/anamnesis/ops.ts`) talks to the local socket by default. Set `ANAMNESIS_RPC_TCP=host:port` to target a daemon's TCP listener instead; every command that needs a connection (`status`, `verify`, `recall`, `load`, `projection write`, `embed-requeue`, `backup`, `down`) then goes over TCP.
 
 | Variable | Meaning |
 |---|---|
@@ -173,11 +173,16 @@ the verification target.
 
 ## Redeploy
 
-There is no application container yet. When a stateless ingestion service is added, rebuild and recreate only that service:
+There is no application container. Neo4j is the only compose service, and the daemon runs from `/opt/anamnesis/dist/` under `anamnesis.service`. The guest has Node but no Bun and `/opt/anamnesis` is not a git checkout, so the bundles are built on a development machine and copied over; leave the Neo4j container running:
 
 ```sh
-docker compose up -d --build --no-deps ingestion
+# on the development machine, at the commit being deployed
+bun run build:runtime
+rsync -a --delete dist/ <guest>:/opt/anamnesis/dist/
+ssh <guest> 'echo <commit> > /opt/anamnesis/DEPLOYED_COMMIT && systemctl restart anamnesis'
 ```
+
+Keep the previous `dist/` as `dist.bak-<commit>-<date>` on the guest before copying, so a rollback is a directory swap and a restart.
 
 Do not run `docker compose down -v`. Named volumes survive normal `up`, `restart`, and `down` operations, so app-only redeploys leave graph data untouched.
 
@@ -216,8 +221,7 @@ If loading fails, leave the graph stopped, preserve the failed volume state for 
 ## Rebuild after graph loss (no usable backup)
 
 1. Start Neo4j with empty named volumes and run `bun run migrate`.
-2. Point an `EpisodeJournal` at the durable journal directory.
-3. Create and initialize an `Engine`, then call `await journal.replay(engine)`.
-4. Run normal digest processing to regenerate downstream facts, entities, links, and communities.
+2. Re-send the originals. For a cleaned corpus, run `anamnesis-ops load` again with a fresh state directory ([Loading a cleaned corpus](#loading-a-cleaned-corpus)). The daemon writes no journal, so `EpisodeJournal` replay applies only where an embedding caller wrote one: point an `EpisodeJournal` at that directory, create and initialize an `Engine`, then call `await journal.replay(engine)`.
+3. Start the daemon with its extraction and embedding providers. The extraction scheduler regenerates facts, entities and links, and the embedding lane regenerates Fact vectors.
 
-Replay uses the normal `Engine.remember` path. Existing origin, element ID, and payload hash constraints make repeated replay safe and idempotent. Prefer `restore` from a verified dump when one exists — replay is the fallback for the window before the first backup, and it cannot recover Hit-ledger state, only originals.
+Both paths use the normal `Engine.remember` path. Existing origin, element ID, and payload hash constraints make a repeat safe and idempotent. Prefer `restore` from a verified dump when one exists. Re-sending is the fallback for the window before the first backup, and it can't recover Hit-ledger state, only originals.

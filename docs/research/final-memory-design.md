@@ -1,4 +1,10 @@
-> Historical design memo. The shadow adjudicator described here was removed by D60.
+> **Non-normative, dated 2026-09-07.** Historical design memo: it records the
+> state of the design thread on that date. [docs/00 to 10](../00-overview.md)
+> are the contracts, and the code wins over this page. The shadow adjudicator,
+> its `AdjudicationAttempt` / `AdjudicationProposal` records and the
+> `adjudication.*` RPCs described here were removed by D60
+> ([10-decision-log](../10-decision-log.md)). The "landing order" below
+> is not a plan of record; [09-roadmap](../09-roadmap.md) is.
 
 # Final memory design: decided defaults and their evidence
 

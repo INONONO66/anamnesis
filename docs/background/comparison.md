@@ -1,9 +1,12 @@
 # Comparison with Existing Memory Engines
 
-> Non-normative background (written 2026-08, anamnesis column corrected
-> 2026-09 to match the finalized design). The normative design is
-> [docs/00–10](../00-overview.md); where this document's description of
-> anamnesis differs from it, the normative docs win. Claims about other
+> **Non-normative, dated.** Written 2026-08; the anamnesis column was
+> corrected 2026-09 to match the design as finalized that month and has not
+> been kept current since. [docs/00 to 10](../00-overview.md) are the
+> contracts, and the code wins over this page. The anamnesis column describes
+> design targets, not shipped behavior: the code now has eight link roles,
+> not seven, and dreaming isn't built
+> ([09-roadmap](../09-roadmap.md#where-the-code-is-today)). Claims about other
 > engines are as of the 2026-08 reading of their papers and repos. Nothing
 > here is a measured comparison; anamnesis has no benchmark result yet.
 
