@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdir, mkdtemp, rm, stat, readFile, writeFile, readdir } from 'node:fs/promises';
-import { connect } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -36,8 +36,8 @@ async function fixture(run, configure = async () => ({})) {
   try {
     const env = { ...process.env };
     for (const name of Object.keys(env)) if (/^ANAMNESIS_(LLM_|EMBEDDING_|EXTRACTION_)/.test(name)) delete env[name];
-    Object.assign(env, await configure(root));
-    child=spawn(process.execPath,[entry],{env:{...env,ANAMNESIS_RUNTIME_ROOT:root,ANAMNESIS_RUNTIME_TOKEN:'correct-token',ANAMNESIS_NEO4J_PASSWORD:'unused-offline',ANAMNESIS_NEO4J_URI:'bolt://127.0.0.1:1'},stdio:['ignore','pipe','pipe']});
+    Object.assign(env, { ANAMNESIS_NEO4J_URI:'bolt://127.0.0.1:1' }, await configure(root));
+    child=spawn(process.execPath,[entry],{env:{...env,ANAMNESIS_RUNTIME_ROOT:root,ANAMNESIS_RUNTIME_TOKEN:'correct-token',ANAMNESIS_NEO4J_PASSWORD:'unused-offline'},stdio:['ignore','pipe','pipe']});
     lines=createInterface({input:child.stdout});
     const appeared=(async()=>{
       for await (const line of lines) if (JSON.parse(line).event==='listening') return;
@@ -110,6 +110,25 @@ test('actual Node/socket refuses single and batch ingestion while storage is una
   await assert.rejects(stat(root+'/spool'),{code:'ENOENT'});
   await assert.rejects(stat(root+'/deliveries'),{code:'ENOENT'});
 }));
+test('actual Node/socket keeps a connection whose request outlasts the idle deadline and closes an idle one', {timeout:15000}, async ()=>{
+  // The daemon starts against a closed port, then that port accepts Bolt connections and never answers,
+  // so the status storage probe waits for the driver's connection timeout.
+  const free=createServer();await new Promise(done=>free.listen(0,'127.0.0.1',done));
+  const port=free.address().port;await new Promise(done=>free.close(done));
+  await fixture(async ({client})=>{
+    const held=[];const silent=createServer(socket=>{held.push(socket)});
+    await new Promise(done=>silent.listen(port,'127.0.0.1',done));
+    try {
+      const p=client();await p.request('hello',hello);
+      const started=performance.now();
+      const status=await p.request('status');
+      assert.equal(status.result?.storage,'unavailable',JSON.stringify(status.error));
+      assert.ok(performance.now()-started>400,'the status probe must outlast the 200 ms idle deadline');
+      const idle=client();await idle.request('hello',hello);
+      await once(idle.socket,'close',{signal:deadline()});
+    } finally { for(const socket of held)socket.destroy(); silent.close(); }
+  }, async ()=>({ANAMNESIS_NEO4J_URI:`bolt://127.0.0.1:${port}`,ANAMNESIS_SOCKET_IDLE_MS:'200'}));
+});
 test('G005 RED: real Node/UDS backup restore require auth and refuse without trusted adapter', {timeout:15000}, ()=>fixture(async ({client,root})=>{
   const p=client();
   const operation_id='01900000-0000-7000-8000-000000000001';

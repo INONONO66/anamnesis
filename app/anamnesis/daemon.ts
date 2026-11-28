@@ -4,7 +4,7 @@ import { chmod, rm } from "node:fs/promises";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { once } from "node:events";
 import { RPC_LIMITS, RpcTcpAuth, type RpcRequest } from "@anamnesis/protocol";
-import { acquireInstallation, loadListenConfig, runtimeRoot, socketPath } from "./config.ts";
+import { acquireInstallation, loadListenConfig, runtimeRoot, socketIdleMs, socketPath } from "./config.ts";
 import { daemonTiming, timingContext, timingHash } from "./timing.ts";
 import { Runtime } from "./runtime.ts";
 import type { InstallationContext } from "@anamnesis/core";
@@ -14,6 +14,7 @@ import { FrameFault, Frames, RpcByteBudget, RpcFault, decodeRequest, encode, env
 interface Connection { socket: Socket; authorized: boolean; authenticated: boolean; context?: InstallationContext; pending: number; closed: boolean; bytes: ByteAccount; cancel: Set<() => void>; writes: Set<() => void>; }
 export async function foreground(): Promise<void> {
   const listen = await loadListenConfig(); // Refused before the root is claimed; never logged.
+  const idleMs = socketIdleMs();
   const bearer = listen && createHash("sha256").update(listen.token).digest();
   const installation = await acquireInstallation(runtimeRoot());
   const path = socketPath(installation.root);
@@ -167,8 +168,12 @@ export async function foreground(): Promise<void> {
     const connectionId = ++connectionSequence;
     if (transport === "tcp") socket.setNoDelay(true);
     daemonTiming?.({ layer: "daemon", event: "connection", connection: connectionId });
-    // Operational idle deadline; tests synchronize on socket/process events.
-    socket.setTimeout(30_000, () => { daemonTiming?.({ layer: "daemon", event: "socket_idle_deadline", connection: connectionId }); socket.destroy(); });
+    // Operational idle deadline; tests synchronize on socket/process events. A queued or running request is not idle:
+    // the response write restarts the timer, so a slow request never loses its connection.
+    socket.setTimeout(idleMs, () => {
+      if (connection.pending > 0) return;
+      daemonTiming?.({ layer: "daemon", event: "socket_idle_deadline", connection: connectionId }); socket.destroy();
+    });
     socket.on("error", error => {
       daemonTiming?.({ layer: "daemon", event: "socket_error", connection: connectionId, hash: timingHash(String(error)) });
       if (!("code" in error && ["ECONNRESET", "EPIPE"].includes(String(error.code)))) logError(error);

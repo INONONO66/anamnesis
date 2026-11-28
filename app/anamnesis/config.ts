@@ -124,6 +124,15 @@ export async function loadProviderConfig(env: NodeJS.ProcessEnv = process.env) {
   };
 }
 
+/** Socket idle deadline in milliseconds (default 30 s). A connection with a request in flight is never idle. */
+export function socketIdleMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env["ANAMNESIS_SOCKET_IDLE_MS"];
+  if (raw === undefined) return 30_000;
+  const ms = Number(raw);
+  if (!Number.isSafeInteger(ms) || ms < 1) throw new Error("ANAMNESIS_SOCKET_IDLE_MS must be a positive integer");
+  return ms;
+}
+
 export interface ListenConfig { host: string; port: number; token: string; }
 /** Optional TCP listener next to the socket. Present only with ANAMNESIS_LISTEN="host:port";
  * the bearer comes from ANAMNESIS_LISTEN_TOKEN_FILE (regular file, owner-only 0600).

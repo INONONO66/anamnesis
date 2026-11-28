@@ -97,6 +97,12 @@ The client has no Bolt connection or Bun runtime dependency.
 - A single bounded serial queue governs admission. Raw frame lengths, connection
   count, queued requests, uploads, reserved upload bytes, and response buffering
   are bounded. Unsupported future RPC methods return explicit errors.
+- A connection with no request queued or running is closed after the socket idle
+  deadline (`ANAMNESIS_SOCKET_IDLE_MS`, default 30000). A request that is still
+  queued or running keeps its connection open however long it takes.
+- A database that accepts connections but never answers is reported as
+  `storage: unavailable` (and `storage_unavailable` for writes), the same as a
+  refused connection.
 - A `remember` reply for a revision that is already stored is built from the
   row read back from Neo4j, with its real ID and ingest sequence. The retry
   must match the RPC-body digest, which binds fields such as mass that the
