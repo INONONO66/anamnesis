@@ -43,7 +43,7 @@ export type { IntegrityIssue } from "./store/integrity-store.ts";
 export class Store {
   private readonly core: StoreCore;
   private readonly receipts: ReceiptStore;
-  /** scripts/qa/g004-ordered-probe and g004-conducting-maintenance fixtures reach graphRawProbeTx through this field; renaming it breaks them. */
+  /** scripts/qa/graph-ordered-probe and graph-conducting-maintenance fixtures reach graphRawProbeTx through this field; renaming it breaks them. */
   private readonly conducting: ConductingStore;
   private readonly elements: ElementStore;
   private readonly embeddings: EmbeddingStore;

@@ -21,9 +21,9 @@ async function currentBundle(source: string, name: string, variable: string) {
 }
 
 test("G003 publication on real Node UDS and owned Neo4j", async () => {
-  const bundle = await currentBundle("app/anamnesis/g003-publication.fixture.mjs", "publication-fixture.mjs", "G003_PUBLICATION_BUNDLE");
+  const bundle = await currentBundle("app/anamnesis/recall-publication.fixture.mjs", "publication-fixture.mjs", "G003_PUBLICATION_BUNDLE");
   try {
-    const child = startProcess("node", ["--test", "app/anamnesis/g003-publication.test.mjs"], {
+    const child = startProcess("node", ["--test", "app/anamnesis/recall-publication.test.mjs"], {
       deadlineMs: 240000, env: { ...process.env, ...bundle.env }, onOutput: text => process.stdout.write(text),
     });
     const result = await child.done;

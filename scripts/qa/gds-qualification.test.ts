@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { exportFixedCsr, solveFixedCsr } from "../../packages/core/src/dynamics/ppr.ts";
-import { compareScores, exactReference, envelopeRefusal, FIXED20, ROLE_WEIGHTS, SEEDS20 } from "./g004-ppr-oracle.ts";
+import { compareScores, exactReference, envelopeRefusal, FIXED20, ROLE_WEIGHTS, SEEDS20 } from "./gds-ppr-oracle.ts";
 
 test("direct oracle agrees with a hand-solved two-cycle", () => {
   const exact = exactReference({ nodes: ["a", "b"], offsets: [0, 1, 2], targets: [1, 0], roles: ["X", "X"] }, new Map([["a", 1]]), {});
@@ -38,7 +38,7 @@ test("absent, partial and unpinned envelope access refuses qualification", () =>
 
 // A real pre-implementation admission check, not a fabricated failing assertion.
 test("independent fixed-20 qualification is available and meets numeric gates", async () => {
-  const oracle = await import("./g004-ppr-oracle.ts");
+  const oracle = await import("./gds-ppr-oracle.ts");
   const report = oracle.qualifyFixed20();
   expect(report.qualified).toBe(true);
   expect(report.nodes).toBe(20);

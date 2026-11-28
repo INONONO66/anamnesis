@@ -34,8 +34,8 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
   await mkdir(join(evidence, "dist"), { recursive: true });
   const fixtures: Record<string, { source: string; source_sha256: string; sha256: string }> = {};
   for (const source of [
-    "app/anamnesis/g003-publication.test.mjs",
-    "app/anamnesis/g003-v01-acceptance.scenarios.fixture.mjs",
+    "app/anamnesis/recall-publication.test.mjs",
+    "app/anamnesis/runtime-release-acceptance.scenarios.fixture.mjs",
     "app/anamnesis/embedding-recall.surface.mjs",
     "app/anamnesis/tokenizer.surface.mjs",
     "app/anamnesis/tokenizer.fixture.cjs",
@@ -45,15 +45,15 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
     const original = await readFile(source);
     let content = original;
     let name = source;
-    if (source === "app/anamnesis/g003-publication.test.mjs") {
+    if (source === "app/anamnesis/recall-publication.test.mjs") {
       // Substitute only the registration API, retaining every real scenario
       // body/assertion verbatim. There is no nested node:test invocation.
       const registration = "import test from 'node:test';";
       const text = original.toString();
       expect(text.split(registration)).toHaveLength(2);
       content = Buffer.from(text.replace(registration,
-        "import test, { runScenarios } from './g003-v01-acceptance.scenarios.fixture.mjs';") + "\nawait runScenarios();\n");
-      name = "app/anamnesis/g003-publication.surface.mjs";
+        "import test, { runScenarios } from './runtime-release-acceptance.scenarios.fixture.mjs';") + "\nawait runScenarios();\n");
+      name = "app/anamnesis/recall-publication.surface.mjs";
     }
     await mkdir(dirname(join(evidence, name)), { recursive: true });
     await writeFile(join(evidence, name), content);
@@ -65,7 +65,7 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
   for (const [source, name] of [
     ["app/anamnesis/main.ts", "dist/anamnesis-daemon.mjs"],
     ["app/anamnesis/client.ts", "dist/anamnesis-client.mjs"],
-    ["app/anamnesis/g003-v01-acceptance.fixture.mjs", "fixture.mjs"],
+    ["app/anamnesis/runtime-release-acceptance.fixture.mjs", "fixture.mjs"],
   ] as const) {
     const output = join(evidence, name);
     const build = await startProcess(process.execPath, ["build", source, "--target=node", "--outfile", output], { deadlineMs: 120000 }).done;
@@ -74,7 +74,7 @@ test("v01 acceptance is one current-built Node/UDS/owned Neo4j narrative", async
     bundles[name] = { source, sha256: sha(await readFile(output)) };
   }
   await record("bundles.json", bundles);
-  const command = ["app/anamnesis/g003-v01-acceptance.test.mjs"];
+  const command = ["app/anamnesis/runtime-release-acceptance.test.mjs"];
   await record("node-command.json", { command: ["node", ...command], workspace: evidence, concurrency: 1 });
   const result = await startProcess("node", command, {
     deadlineMs: 240000,

@@ -7,7 +7,7 @@ import {startProcess} from './runtime-scenarios.ts';
 test('claim/judge audit runs current-built Node, UDS, HTTP and owned Neo4j',async()=>{
  if(!process.env['ANAMNESIS_TEST_NEO4J_URI']||!process.env['ANAMNESIS_TEST_NEO4J_PASSWORD'])throw new Error('owned runner required');
  const parent=resolve(process.env['G004_PIPELINE_EVIDENCE']??'.omo/evidence/g004-derived-pipeline');await mkdir(parent,{recursive:true});const root=await mkdtemp(join(parent,'node-'));
- for(const [source,name] of [['app/anamnesis/main.ts','daemon.mjs'],['scripts/qa/g004-derived-pipeline.fixture.mjs','fixture.mjs']] as const){
+ for(const [source,name] of [['app/anamnesis/main.ts','daemon.mjs'],['scripts/qa/extraction-audit.fixture.mjs','fixture.mjs']] as const){
   const result=await startProcess(process.execPath,['build',source,'--target=node','--outfile',join(root,name)],{deadlineMs:120000}).done;
   await writeFile(join(root,name+'.build.json'),JSON.stringify(result,null,2));expect(result.code).toBe(0);
   await writeFile(join(root,name+'.sha256'),createHash('sha256').update(await readFile(join(root,name))).digest('hex')+'\n');

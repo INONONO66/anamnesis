@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { runG3ExtractionCrash } from "./g3-extraction-crash.ts";
+import { runG3ExtractionCrash } from "./extraction-crash.ts";
 
 test("daemon resumes a leased extraction after SIGKILL without duplicating Facts", async () => {
   const uri = process.env["ANAMNESIS_TEST_NEO4J_URI"];

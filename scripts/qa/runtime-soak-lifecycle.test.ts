@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createContinuousDriver } from "./g006-continuous-driver.ts";
-import { runContinuousSoak, type ContinuousSoakDriver } from "./g006-runtime-scenarios.ts";
+import { createContinuousDriver } from "./runtime-soak-driver.ts";
+import { runContinuousSoak, type ContinuousSoakDriver } from "./runtime-scenario-dispatch.ts";
 import type { startProcess } from "./runtime-scenarios.ts";
 
 const idleDriver = (): ContinuousSoakDriver => ({

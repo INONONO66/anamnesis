@@ -10,7 +10,7 @@ import neo4j from 'neo4j-driver';
 import { Engine } from '../../packages/core/src/engine.ts';
 import { exportFixedCsr, solveFixedCsr } from '../../packages/core/src/dynamics/ppr.ts';
 import { RpcResponse } from '../../packages/protocol/src/rpc.ts';
-import { compareScores, exactReference, envelopeRefusal, FIXED20, SEEDS20, ROLE_WEIGHTS, PIN20, qualifyFixed20 } from './g004-ppr-oracle.ts';
+import { compareScores, exactReference, envelopeRefusal, FIXED20, SEEDS20, ROLE_WEIGHTS, PIN20, qualifyFixed20 } from './gds-ppr-oracle.ts';
 
 function peer(path) {
   const socket = connect(path), waiting = new Map(); let buffer = Buffer.alloc(0), id = 0;

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import * as runner from "./g004-gds-solver-20.runner.ts";
+import * as runner from "./gds-solver-20.runner.ts";
 
 test("benchmark admits the default unlicensed Community runtime without Enterprise claims", () => {
   expect(runner.validateGdsEdition("Unlicensed", false)).toBe("default-community");
