@@ -10,7 +10,9 @@ export class FrameFault extends RpcFault {
 }
 export function storageUnavailable(error: unknown): boolean {
   if (!(error instanceof Error) || !("code" in error)) return false;
-  return ["ServiceUnavailable", "SessionExpired", "Neo.TransientError.General.DatabaseUnavailable"].includes(String(error.code));
+  // A database that accepts TCP but never answers surfaces as a pool acquisition timeout with code "N/A".
+  return ["ServiceUnavailable", "SessionExpired", "Neo.TransientError.General.DatabaseUnavailable"].includes(String(error.code))
+    || error.message.startsWith("Connection acquisition timed out");
 }
 export function fault(error: unknown): RpcFault {
   if (error instanceof RpcFault) return error;
