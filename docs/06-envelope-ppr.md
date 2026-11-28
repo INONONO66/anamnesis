@@ -1,403 +1,72 @@
 # 06 — Envelope and Local PPR
 
-The graph a recall actually sees is a **bounded envelope** two hops around the
-seeds. The envelope is pulled in one Neo4j transaction, and PPR runs on it in
-TypeScript. Everything outside the envelope is treated as non-existent. Each
-row is normalized over the retained visible links; a row with no retained link
-uses the fixed uniform dangling distribution. This normative future operator
-is distinct from retrieval utility and from the current originals/fulltext
-implementation (docs/09). D43 and D47 in [10-decision-log](10-decision-log.md)
-define current-policy eligibility and conditional replay.
+Two things live here. The first is the bounded physical graph read behind the
+`graph.envelope` RPC: a diagnostic surface over the ConductingArc cache. The
+second is the local PPR solver that recall runs in TypeScript. They are
+separate. Recall doesn't call `graph.envelope`; its own graph read is the
+seed-adjacent query in [05-recall](05-recall.md) §4–5. The two-hop,
+mass-ordered online envelope that would join them is a
+[09-roadmap](09-roadmap.md) target.
 
 ## 1. Limits
 
-| Item | Value | Derivation |
+| Surface | Item | Value |
 |---|---|---|
-| hops | 2 | fixed |
-| seeds | ≤ 128 | docs/05 §3 |
-| hop-1 node budget | 640 | |
-| hop-2 node budget | 1,232 | 2,000 − 128 − 640 |
-| total nodes | ≤ 2,000 | |
-| outgoing retained arcs per row | ≤ 10 (`L`) | selected independently per source row |
-| total directed CSR arcs | ≤ 20,000 | 2,000 × L |
-| fanout₁ | `clamp(⌊640 / \|S\|⌋, 4, 32)` | inversely proportional to seed count |
-| fanout₂ | `clamp(⌊1232 / \|H₁\|⌋, 2, 16)` | inversely proportional to hop-1 count |
-| hub threshold | DegreeProbe(n) = 256 | saturated physical conducting-arc probe |
-| probe inspections | (128 + 640 + 2,000) × 256 = 708,608 | classification before each expansion/arc row |
-| structural input budget | (128 + 640 + 2,000) × 512 = 1,417,216 | conservative: probe ≤ 256 plus non-hub link-ID reads < 256 per row; authority lookups separately bounded |
-| envelope tx deadline | 100 ms (config) | exceeded → whole PPR channel dropped |
+| `graph.envelope` | seeds per request | 1..128 |
+| `graph.envelope` | ordered probe per source | first 256 ConductingArc rows |
+| `graph.envelope` | nodes returned | ≤ 2,000 |
+| `graph.envelope` | arcs returned | ≤ 20,000 |
+| recall | seed-adjacent ConductingArc rows | `LIMIT 1024` |
+| solver | `α`, tolerance, iteration cap | 0.85, 1e-4, 64 |
 
-Budgets are hard limits. Fanout is derived from them: with 3 seeds and with
-128 seeds the same fixed fanout would leave the envelope either nearly empty
-or over budget. Because of the clamp minimum, the union at one hop can exceed
-its budget by a small margin (e.g. |H₁| = 630 → fanout₂ = 2 → up to 1,260 >
-1,232); when that happens, the hop is truncated to its budget by
-`coalesce(m_cache,m0) DESC, id DESC`.
-
-If S is empty, the PPR channel is absent: do not evaluate fanout₁, q or a
-normalization denominator. If `H₁` is empty, `H₂` is empty and `fanout₂` is not
-evaluated; there is no division by zero.
-
-Every envelope query starts from a bounded input pool, not merely a final
-LIMIT: ConductingArc(source_id, link_id) supplies the probe in link-ID
-index order, with LIMIT 256 before any non-index sort or eligibility filter. A
-plan that expands/sorts unrestricted adjacency is not a valid implementation.
-Entity and Community visibility are materialized threshold
-comparisons (docs/03 §3), never nested MENTIONS/HAS_MEMBER scans.
+The `graph.envelope` bounds are limits of that diagnostic read. They say
+nothing about what a recall sees.
 
 ## 2. Expansion
 
-```text
-  S  = at most 128 normalized, policy-eligible seeds         (hop 0)
-  H₁ = ∪_{v∈S}  expand(v, fanout₁)  \ S                    (hop 1, ≤ 640)
-  H₂ = ∪_{v∈H₁} expand(v, fanout₂)  \ (S ∪ H₁)             (hop 2, ≤ 1,232)
-  V  = S ∪ H₁ ∪ H₂                                         (≤ 2,000)
-  A  = for each v ∈ V: bounded top-L structural arcs to V, then policy-filtered
-```
-
 ### Canonical DegreeProbe(n)
 
-DegreeProbe(n) counts the **first 256 ConductingArc rows** for source_id=n.id
-in link_id ASC order. The cache has exactly one endpoint row per retained
-physical NEXT_EPISODE, MENTIONS, RELATES_TO, HAS_MEMBER or DERIVED_FROM link:
-ConductingArc {source_id, link_id, peer_id, role, generation?,
-source_extraction_generation?} (docs/01 §5). Parallel links count separately.
-The protocol rejects self-links; a defensive legacy rebuild emits a self-loop
-once for its single endpoint and verify reports the violation. Under complete,
-consistent coverage, values 0..255 are exact physical conducting degree; 256
-is saturated and classifies a hub, never an exact count beyond the cap.
+DegreeProbe(n) counts the **first 256 ConductingArc rows** for
+`source_id = n.id` in `link_id ASC` order. The cache has exactly one endpoint
+row per retained physical NEXT_EPISODE, MENTIONS, RELATES_TO, HAS_MEMBER or
+DERIVED_FROM link (docs/01 §5). Parallel links count separately. Under
+complete, consistent coverage, values 0..255 are the exact physical conducting
+degree. 256 is saturated: it classifies a hub and is never an exact count.
 
-The mandatory unique composite (source_id, link_id) RANGE access path performs
-source equality and ordered link iteration across all five roles. LIMIT 256
-precedes collection, counting, role/time/visibility/generation/policy filtering
-or any non-index sort. Rows and physical links change atomically on creation,
-deletion, topology rewire and GC; rebuild publication is complete by physical
-partition/generation, including hidden/retired partitions. Pin the complete
-coverage state via the single Meta.conducting_arc_ready gate before probing,
-not a recall-time scan of the generation registry. Missing/incomplete coverage or unavailable
-indexes drops PPR as degree_probe_unavailable, never treats an unavailable
-cache as degree zero. There is **no native adjacency fallback**. This cache
-is nonsemantic, not authority, candidate, conductor or output; reconstruct it
-from retained physical links, not a policy-filtered view (docs/01 §5).
+The unique composite `(source_id, link_id)` RANGE index performs the source
+equality and the ordered link iteration across all five roles. `LIMIT 256`
+precedes collection, counting, any role, time, generation or policy filter and
+any non-index sort. Rows and physical links change atomically on creation,
+deletion and topology rewire. `Meta.conducting_arc_ready` is the single
+completeness gate. Missing or incomplete coverage fails with
+`degree_probe_unavailable`, and an unavailable ordered access path fails with
+`ordered_probe_unavailable`. Neither is ever read as degree zero, and there is
+**no native adjacency fallback**. The cache is nonsemantic: it isn't
+authority, a candidate, a conductor or an output, and it is rebuilt from
+retained physical links, not from a policy-filtered view.
 
-Hidden/retired generations and denied relationships may saturate the probe;
-they still cannot conduct. Seed damping uses min(physical degree,256), an
-explicit approximation to eligible-degree damping (docs/05 §3). Capture the
-ordered probe rows (including endpoint/role/generation fields), bounded count,
-coverage state and saturation decision per stage/source.
-Hidden backfill can change these without changing structure_revision, so
-replay injects captured probes rather than re-counting today's adjacency.
-Non-hubs resolve only captured probe rows by the appropriate per-role unique
-link-ID index, checking physical endpoints, role and generation metadata.
-Stale rows still occupy raw probe slots but cannot conduct; discard them with
-no refill, capture the mismatch and invalidate coverage for repair. No second
-adjacency expansion can race new relationships into the bounded pool. Saturated sources contribute no outgoing rows. Unknown cache availability
-aborts PPR; a verified stale-row exclusion never authorizes a native scan.
+Rows of unselected generations and denied relationships can saturate a probe.
+They still can't conduct. A stale row occupies its probe slot, is discarded
+with no refill and invalidates coverage until repair.
 
-### expand(v, f)
+### graph.envelope
 
-```text
-  probe = first 256 ConductingArc rows for source_id=v.id by link_id ASC
-  if size(probe) == 256:                       # saturated hub probe
-      pool = []
-  else:
-      pool = neighbors m from the <256 captured probe arcs, visible(m, T) ∧ visible_gen(m) ∧ visible_gen(link)
-             ORDER BY w_role(link) DESC, coalesce(m.m_cache,m.m0) DESC, m.id DESC, link.id ASC
-             LIMIT f
-  apply hop-union structural budget as below
-  return policy-eligible pool only; no refill through unbounded adjacency
-```
-
-Policy eligibility of a candidate node includes its materialized
-corroboration roots: at most 16 bounded root IDs per node are checked as part
-of the same eligibility test, exactly like its other bounded sources. Roots
-never add a node or an arc, never change `w_role`, `m_cache` ordering or any
-row weight, and are never traversed; a node whose roots cannot be checked is
-excluded rather than admitted unverified (docs/01 §3.3, D49).
-
-The third sort key is **`id DESC`** for a reason: UUIDv7 is time-ordered, so
-an `id ASC` tie-break would systematically drop recent memories at every
-truncation. If a bias is unavoidable, we choose the one that keeps the recent.
-The first two keys (role weight, `coalesce(m_cache,m0)`) decide most cases; id only breaks
-ties.
-
-`m_cache` is the mass snapshot SET hourly by the maintenance job
-(docs/02 §6). It exists so that exact m(now) is not computed for thousands of
-neighbors during expansion. It controls truncation order and therefore **gates
-which nodes can enter the envelope**, not merely final-score weighting. A
-forgotten neighbor may lose its PPR opportunity. The final score uses exact
-m(now) plus separate utility (docs/05 §6). It is available from the first
-version that runs PPR (docs/09). Until a newly created node is maintained,
-immutable total `m0` is the fallback; no null reaches a DESC comparator.
-
-### Cypher shape
-
-Role weights are constants passed as a map and looked up by `type(l)`.
-The generation filter picks the selector by role (HAS_MEMBER → community,
-others → extraction) and lets originals-layer links (no `generation`) through.
-The following are **structural pool queries**, not sufficient serving filters.
-After each bounded hop query, inside the same read transaction, the daemon
-retains the resolved nodes/physical links, batch-loads their bounded authority and
-applies the pinned policy evaluator before constructing the next frontier.
-The final arc query receives only eligible V, then its returned arcs are also
-policy-filtered before CSR. It never refills a removed slot by scanning more
-adjacency; suppression can underfill the envelope until reconciliation. This
-preserves inspection/node/arc caps without letting stale index/cache entries
-conduct. These queries are bounded structural examples; policy evaluation is
-the required daemon-side stage described here, not a fictional Cypher function.
-The ConductingArc MATCH below uses its composite RANGE index: ORDER BY
-arc.link_id is index order, never a Sort/Top over expanded adjacency. The
-link_id IS NOT NULL predicate establishes the required second composite key
-for the planner; every valid cache row has this key, so it excludes no valid
-row and is not an eligibility filter. Its
-inner LIMIT precedes collection, so an empty source under COMPLETE coverage
-yields [] and count 0. Carry the captured row fields, not just IDs.
-
-Each non-hub resolution subquery uses a static role branch and its unique
-relationship id RANGE index. The directed relationship-index seek returns
-both physical endpoints once; only then verify their IDs against source_id
-and peer_id. No endpoint-bound Expand is permitted. Reuse already resolved
-non-hub physical links for policy checks; do not issue a second link read.
-Verify role, endpoints and
-copied generation fields, including HAS_MEMBER's source extraction generation,
-before accepting a cached link. Missing/mismatched links are discarded without
-refill and captured as stale; no cache row itself becomes a CSR arc.
-Entity witness thresholds are validated in the daemon-side policy stage below;
-the structural Entity predicates alone are not permission to serve.
-
-```cypher
-// hop-1. $frontier = seed ids, $exclude = seed ids, $hop_budget = 640,
-// $f = fanout₁, $T, $g_e, $g_c, $w = {NEXT_EPISODE: 1.0, MENTIONS: 1.0, …}
-UNWIND $frontier AS fid
-MATCH (v:Element {id: fid})
-CALL (v) {
-  CALL (v) {
-    MATCH (arc:ConductingArc {source_id: v.id})
-    USING INDEX arc:ConductingArc(source_id, link_id)
-    WHERE arc.link_id IS NOT NULL
-    RETURN arc { .source_id, .link_id, .peer_id, .role,
-                 .generation, .source_extraction_generation } AS probe_row
-    ORDER BY arc.link_id ASC LIMIT 256
-  }
-  RETURN collect(probe_row) AS probe_rows
-}
-WITH v, probe_rows, size(probe_rows) AS degree_probe
-CALL (v, probe_rows, degree_probe) {
-  WITH v, probe_rows, degree_probe
-  WHERE degree_probe < 256
-  UNWIND probe_rows AS row
-  CALL (row) {
-    WITH row WHERE row.role = 'NEXT_EPISODE'
-    MATCH (lo)-[l:NEXT_EPISODE]->(hi)
-    USING INDEX l:NEXT_EPISODE(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'MENTIONS'
-    MATCH (lo)-[l:MENTIONS]->(hi)
-    USING INDEX l:MENTIONS(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'RELATES_TO'
-    MATCH (lo)-[l:RELATES_TO]->(hi)
-    USING INDEX l:RELATES_TO(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'HAS_MEMBER'
-    MATCH (lo)-[l:HAS_MEMBER]->(hi)
-    USING INDEX l:HAS_MEMBER(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'DERIVED_FROM'
-    MATCH (lo)-[l:DERIVED_FROM]->(hi)
-    USING INDEX l:DERIVED_FROM(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-  }
-  WITH v, row, lo, l, hi
-  WHERE row.source_id = v.id AND type(l) = row.role
-    AND ((lo.id = row.source_id AND hi.id = row.peer_id)
-      OR (hi.id = row.source_id AND lo.id = row.peer_id))
-    AND coalesce(l.generation, -1) = coalesce(row.generation, -1)
-    AND (row.role <> 'HAS_MEMBER'
-      OR lo.source_extraction_generation = row.source_extraction_generation)
-  WITH v, row, l, CASE WHEN lo.id = v.id THEN hi ELSE lo END AS m
-  WHERE (
-      (m:Episode AND m.time_utc <= $T)
-   OR (m:Fact AND m.generation = $g_e AND m.time_utc <= $T)
-   OR (m:Entity AND m.generation = $g_e AND m.visible_from_utc <= $T)
-   OR (m:Community AND m.generation = $g_c
-       AND m.source_extraction_generation = $g_e
-       AND m.visible_from_utc <= $T)
-  )
-  AND (
-       type(l) = 'NEXT_EPISODE'
-    OR (type(l) = 'HAS_MEMBER' AND l.generation = $g_c)
-    OR (type(l) IN ['MENTIONS','RELATES_TO','DERIVED_FROM']
-        AND l.generation = $g_e)
-  )
-  AND NOT m.id IN $exclude
-  RETURN m AS candidate, row { .source_id, .link_id, .peer_id, .role,
-      .generation, .source_extraction_generation, physical_link: l } AS selected_arc
-  ORDER BY $w[type(l)] DESC, coalesce(m.m_cache,m.m0) DESC, m.id DESC, l.id ASC
-  LIMIT $f
-}
-WITH candidate, collect(DISTINCT selected_arc) AS selected_arcs
-RETURN candidate.id AS mid, coalesce(candidate.m_cache, candidate.m0) AS ordering_mass,
-       selected_arcs
-ORDER BY ordering_mass DESC, mid DESC
-LIMIT $hop_budget
-```
-
-Call with `$hop_budget=640` for hop 1 and `1232` for hop 2; this is the
-normative structural union truncation. hop-2 otherwise has the same shape.
-Policy-filter the result before it becomes H₁/H₂; sort selected_arcs by
-source_id/link_id before validation. Reuse returned physical_link
-records. Require at least one of those links
-from the eligible frontier to be current-policy eligible; otherwise discard
-the neighbor. Do not let a denied source/link enter the next frontier. Before
-fetching links, TypeScript allocates every eligible node in V with an empty
-adjacency list. The final query returns a
-bounded link pool, policy-filtered before normalization; a node with no
-eligible returned row remains present and becomes
-dangling rather than disappearing through a zero-row subquery.
-
-```cypher
-UNWIND $ids AS id
-MATCH (a:Element {id: id})
-CALL (a) {
-  CALL (a) {
-    MATCH (arc:ConductingArc {source_id: a.id})
-    USING INDEX arc:ConductingArc(source_id, link_id)
-    WHERE arc.link_id IS NOT NULL
-    RETURN arc { .source_id, .link_id, .peer_id, .role,
-                 .generation, .source_extraction_generation } AS probe_row
-    ORDER BY arc.link_id ASC LIMIT 256
-  }
-  RETURN collect(probe_row) AS probe_rows
-}
-WITH a, probe_rows, size(probe_rows) AS degree_probe
-CALL (a, probe_rows, degree_probe) {
-  WITH a, probe_rows, degree_probe
-  WHERE degree_probe < 256
-  UNWIND probe_rows AS row
-  CALL (row) {
-    WITH row WHERE row.role = 'NEXT_EPISODE'
-    MATCH (lo)-[l:NEXT_EPISODE]->(hi)
-    USING INDEX l:NEXT_EPISODE(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'MENTIONS'
-    MATCH (lo)-[l:MENTIONS]->(hi)
-    USING INDEX l:MENTIONS(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'RELATES_TO'
-    MATCH (lo)-[l:RELATES_TO]->(hi)
-    USING INDEX l:RELATES_TO(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'HAS_MEMBER'
-    MATCH (lo)-[l:HAS_MEMBER]->(hi)
-    USING INDEX l:HAS_MEMBER(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-    UNION ALL
-    WITH row WHERE row.role = 'DERIVED_FROM'
-    MATCH (lo)-[l:DERIVED_FROM]->(hi)
-    USING INDEX l:DERIVED_FROM(id)
-    WHERE l.id = row.link_id
-    RETURN lo, l, hi
-  }
-  WITH a, row, lo, l, hi
-  WHERE row.source_id = a.id AND type(l) = row.role
-    AND ((lo.id = row.source_id AND hi.id = row.peer_id)
-      OR (hi.id = row.source_id AND lo.id = row.peer_id))
-    AND coalesce(l.generation, -1) = coalesce(row.generation, -1)
-    AND (row.role <> 'HAS_MEMBER'
-      OR lo.source_extraction_generation = row.source_extraction_generation)
-  WITH a, row, l, CASE WHEN lo.id = a.id THEN hi ELSE lo END AS b
-  WHERE b.id IN $ids
-    AND (
-        (b:Episode AND b.time_utc <= $T)
-     OR (b:Fact AND b.generation = $g_e AND b.time_utc <= $T)
-     OR (b:Entity AND b.generation = $g_e AND b.visible_from_utc <= $T)
-     OR (b:Community AND b.generation = $g_c
-         AND b.source_extraction_generation = $g_e
-         AND b.visible_from_utc <= $T)
-    )
-    AND (
-         type(l) = 'NEXT_EPISODE'
-      OR (type(l) = 'HAS_MEMBER' AND l.generation = $g_c)
-      OR (type(l) IN ['MENTIONS','RELATES_TO','DERIVED_FROM']
-          AND l.generation = $g_e)
-    )
-  RETURN b.id AS bid, type(l) AS role, l.id AS lid,
-      row AS cached_row, l AS physical_link
-  ORDER BY $w[type(l)] DESC, coalesce(b.m_cache,b.m0) DESC, b.id DESC, l.id ASC
-  LIMIT $L
-}
-RETURN a.id, bid, role, lid, cached_row, physical_link
-```
-
-After at most 256 ConductingArc inspections, the non-hub branch resolves
-fewer than 256 captured rows by per-role relationship-ID seeks, so its
-eligibility sort is bounded. Never re-expand the source's native adjacency.
-A saturated source contributes no outgoing row.
-Each returned
-eligible row is one directed retained arc `a→b`. A
-physical conducting relationship is eligible from both endpoints, but each
-endpoint selects and caps its row independently; the local graph may therefore
-be asymmetric after truncation. Arc identity is `(a.id,lid)`, with no global
-link deduplication or forced reverse insertion. The total CSR arc count is at
-most `|V|·L = 20,000`.
-
-The three structural queries and bounded policy/source batch reads form one
-read transaction. If it exceeds 100 ms, abandon the entire envelope and
-proceed with `ppr_used = false`; never solve a timeout-partial graph. The
-1,417,216 bound counts probe inspections plus bounded link-ID reads (non-hubs at most 255 + 255 <= 512), not additional bounded policy/source
-lookups. Per checked Fact, at most 16 direct source Episodes plus 16
-non-synthesis support Facts and their at most 16 source Episodes each means
-at most 272 Episode ID lookups and 16 support Fact ID lookups before dedup.
-Resolved entity bindings and Entity witness-property checks use their existing bounded
-materialized IDs/indexes, never native witness expansion. Evaluate at most
-256 active policies and 512 scalars per
-literal (docs/01-02). Policy/control Episodes and their links never conduct.
-A derived node with any denied supporting source is ineligible; filtering its
-source list and keeping it would silently change support. Entity/community
-cache summaries must prove eligibility at the pinned policy revision or are
-excluded until rebuilt; absence of such proof is not permission. An Entity's
-allowed witness must itself be visible at historical T: a denied old mention
-plus an allowed future mention cannot make that Entity eligible in the past.
-The rebuildable earliest_allowed_from cache is the minimum visibility threshold
-among allowed MENTIONS witnesses (including eligible link/source authority),
-pinned to extraction generation and policy_revision. Require matching versions
-and earliest_allowed_from <= T as well as structural visibility. Rebuild
-before that Entity serves; missing/stale/null proof excludes it with
-entity_witness_unavailable. This is one threshold per Entity/generation/policy,
-not a cache per arbitrary T or a recall-time witness scan. Capture the exact
-threshold/version used for replay. Community summaries likewise require their
-policy-eligible rebuilt state. Content on a retained relationship is checked
-too, not just its endpoints. Indexed link-ID
-lookups verify cached ConductingArc tuples still reference live links
-with the recorded endpoints, role and generation before eligibility checks.
-
-Current policy applies even at historical T and to snapshot-exempt provenance.
-The policy revision barrier before response is stricter than structure_revision
-retry/torn behavior (docs/05 §7); a policy race never becomes a torn-policy
-result. Policy command text is not ingested instruction execution.
+`graph.envelope {seed_ids[1..128], T?}` is authenticated and read-only. For
+each seed it runs the probe above and reports `{source_id, count, saturated,
+coverage: "complete"}`. An unsaturated source contributes its probe rows as
+arcs and their peers as nodes. A saturated source contributes none. The read
+stops at 2,000 nodes or 20,000 arcs and then sets `truncated` and the
+`overflow {nodes, arcs, saturated_sources}` counters. The result carries its
+`pin {policy_revision, generation_id, coverage_revision, covered_ingest_seq,
+T}`. The read takes the same Meta fence as policy and generation writes, so it
+never sees a torn policy or selector.
 
 ## 3. Hubs
 
 A saturated probe never authorizes traversal over sampled rows or native
-adjacency. With no qualified shortlist, its outgoing row is dangling; other
-rows may still select incoming arcs. A bounded shortlist is deferred (D60).
+adjacency. A saturated source has no outgoing rows in the envelope; other
+sources may still reach it. No hub shortlist exists: the HubArc cache was
+removed in D60.
 
 ## 4. Retained-row normalization
 
@@ -408,19 +77,16 @@ rows may still select incoming arcs. A bounded shortlist is deferred (D60).
   d_i  = 1 if Z_i = 0, otherwise 0                       dangling indicator
 ```
 
-Every non-dangling row sums to one in exact arithmetic (binary64 checks use a
-stated tolerance) over the graph the solver actually received. Invisible,
-policy-denied, retired and truncated relationships are absent rather
-than contributing to a denominator computed from another graph. This gives
-the TypeScript solver and GDS the same transition matrix. Envelope
-normalization can overemphasize a boundary edge; v0.3 measures that quality
-cost against full-view GDS instead of hiding it inside a non-equivalent leak
-model.
+Every non-dangling row sums to one over the graph the solver actually
+received. Relationships that weren't read are absent; they don't contribute to
+a denominator computed from another graph. This gives the TypeScript solver
+and GDS the same transition matrix (docs/07).
 
-Every configured `w_role` must be finite and strictly positive; configuration
-loading fails before the daemon starts otherwise. Parallel physical links are
-separate arcs in `A_i` and contribute separately to both `Z_i` and their
-aggregated matrix cell.
+Each `w_role` must be finite and strictly positive, or the solver throws. A
+role without a configured weight uses 1, and recall configures none. The
+solver rejects an arc that carries its own weight. Parallel physical links are
+separate arcs in `A_i` and contribute separately to `Z_i` and to their matrix
+cell.
 
 ## 5. PPR
 
@@ -434,133 +100,82 @@ aggregated matrix cell.
   α = 0.85,  τ = 1e-4,  maxIter = 64
 ```
 
-- Σ p = 1 in exact arithmetic at every iteration (each row is normalized or
-  dangling). Require finite nonnegative seeds with positive total, normalize
-  once in UUID order, and reject malformed CSR/weights at the solver boundary.
-  An empty graph has no distribution and makes the channel absent. A one-node
-  dangling graph has q=s=p=1 and converges in one update.
-- **Local error bound**: F is an α-contraction in L1, so for returned p^n,
-  `‖p^n − p*‖₁ <= α/(1−α) · δ_n`. At δ_n < 1e-4 this is less than
-  `0.85/0.15 · 1e-4 = 0.000566666667`. Diagnostics distinguish
-  `iterate_delta_l1 = δ_n`, `fixed_point_residual_l1 = ‖F(p^n)−p^n‖₁`
-  if computed, and `fixed_point_error_bound_l1 = α/(1−α)·δ_n`.
-  The true residual gives the alternative bound residual/(1−α).
-  Neither bound measures envelope truncation or retrieval usefulness.
-- **maxIter 64**: with p⁰=s, `δ_1 = α‖W′ᵀs−s‖₁ <= 2α` and
-  `δ_n <= 2α^n`. `2·0.85^61 ≈ 0.000098988436` is already below τ,
-  so the fixed defaults reach the stopping threshold within 61 updates in
-  exact arithmetic. Report cap_reached/nonconvergence if numeric checks
-  contradict it; never claim convergence solely because the cap fired.
-  The default count is a bound, not a measured 20–30-iteration promise.
-- **No deadline.** The arc work is bounded: 64 × 20,000 ≤ 1.28M
-  multiply-adds, plus O(64·|V|) vector/dangling work. A deadline would make the same input produce
-  different output, so there is none.
+- Σ p = 1 in exact arithmetic at every iteration, because each row is
+  normalized or dangling. Seeds must be finite and nonnegative with a positive
+  total. Malformed nodes, arcs or weights are rejected at the solver boundary.
+- **Local error bound**: the update is an α-contraction in L1, so for the
+  returned p^n, `‖p^n − p*‖₁ <= α/(1−α) · δ_n`. At δ_n < 1e-4 this is less
+  than `0.85/0.15 · 1e-4 = 0.000566666667`. The solver returns
+  `iterateDeltaL1`, `residualL1` and `errorBoundL1`. Neither bound measures
+  what the graph read left out, or retrieval usefulness.
+- **maxIter 64**: with p⁰=s, `δ_n <= 2α^n`, and `2·0.85^61 ≈ 0.000098988436`
+  is already below τ, so the defaults reach the threshold within 61 updates in
+  exact arithmetic. The count is a bound, not a typical iteration promise.
+- **No deadline.** In recall the arc work is bounded by 64 iterations over at
+  most 1,024 rows. A deadline would make the same input produce different
+  output, so there is none.
 
 ### Conduction rules
 
 | Role | Conducts | Direction |
 |---|---|---|
-| NEXT_EPISODE, MENTIONS, RELATES_TO, HAS_MEMBER, DERIVED_FROM | yes | each endpoint is independently eligible to select an outgoing arc; stored direction is semantic |
-| INVALIDATES, CONTRASTS | no | negation and contradiction are not relevance conductors |
+| NEXT_EPISODE, MENTIONS, RELATES_TO, HAS_MEMBER, DERIVED_FROM | yes | both ways; the stored direction is semantic |
+| INVALIDATES, CONTRASTS, REPLIES_TO | no | negation, contradiction and reply addressing are not relevance conductors |
 
-Role weights `w_role` start at **1.0 for all**. `config.jsonc` has the
-role → weight table and it is a calibration target. There is no per-link
-weight (docs/01 §5).
+Role weights are 1 for all roles. Recall's seed-adjacent query filters on the
+selected generation, so NEXT_EPISODE rows, which carry no generation, don't
+enter the recall graph.
 
 ### Data structures
 
-```text
-  nodes     V sorted by UUID bytes ASC → index 0..|V|−1
-  CSR       rowPtr Int32Array(|V|+1), colIdx Int32Array(|A|), val Float64Array(|A|)
-  vectors   p, pNext, s: Float64Array(|V|)
-  dangling  Uint8Array(|V|)
-```
-
-Within each source row, arc accumulation order is `(role bytes ASC, link UUID
-ASC, neighbor UUID ASC)`. When several physical links produce the same
-directed `(i,j)`, their values are summed in that order. A physical link can
-produce `i→j`, `j→i`, both or neither depending on the two independent row
-caps.
+`exportFixedCsr` in `packages/core/src/dynamics/ppr.ts` sorts nodes ascending
+and arcs by a fixed arc order, then builds `{nodes, offsets, targets, roles}`.
+Production solving and external qualification use this same export, so no
+result depends on caller order. Vectors are `Float64Array`. When several
+physical links produce the same directed `(i, j)`, their values are summed in
+that fixed order.
 
 ## 6. Cost
 
-| Stage | Size | Estimate |
-|---|---|---|
-| hop-1 query | 128 nodes, ≤ 32,768 probe inspections + ≤ 32,768 pool reads | 5–15 ms |
-| hop-2 query | ≤ 640 nodes, ≤ 163,840 probe inspections + ≤ 163,840 pool reads | 10–40 ms |
-| bounded link query | ≤ 2,000 rows: ≤ 512,000 probe inspections + ≤ 512,000 pool reads; each row returns ≤ 10 | 5–25 ms |
-| CSR build | ≤ 20,000 directed entries | < 1 ms |
-| PPR, 64 iterations | ≤ 1.28M multiply-adds | 1–3 ms |
-
-The separate seed-probe stage costs at most 274 × 256 = 70,144 inspections
-under its 50 ms timeout (docs/05 §3). Envelope probes plus bounded pool reads
-cost at most 1,417,216 structural inputs; with seed probes the per-attempt
-total is 1,487,360, excluding separately bounded authority lookups. Capture
-probe/pool counters and saturation state internally, not hidden physical
-counts in ordinary response metadata.
-
-The envelope tx total, including policy validation, is what the 100 ms deadline
-applies to. These timings are estimates, not measurements. Scale benches use
-100k and 1M Episodes (approximately 0.421M and 4.21M Elements) as defined in
-docs/07 §4; record actual node/link counts rather than equating Episodes with
-Elements. Wall-clock channel drops are captured degradation inputs, not
-mathematically deterministic decisions.
+No timing in this set is a measurement. The sizes are bounded: a recall solve
+touches at most 1,024 arcs for at most 64 iterations, and a `graph.envelope`
+read inspects at most 128 × 256 probe rows.
 
 ## 7. Determinism — ordering conventions
 
 | Place | Order |
 |---|---|
 | vector / BM25 candidates | score DESC, id ASC |
-| session candidates | Episodes: time_utc DESC, ingest_seq DESC; Facts: time_utc DESC, id ASC; merge by time, kind, id (docs/05 §2) |
-| degree probe (all stages) | ConductingArc(source_id, link_id) RANGE seek, link_id ASC, LIMIT 256 before collection or any role/time/generation/policy filtering |
-| seed selection | capped-degree affinity DESC, id ASC; normalize selected set |
-| expansion fanout | w_role DESC, coalesce(m.m_cache,m.m0) DESC, **m.id DESC**, link.id ASC |
-| hop budget truncation | coalesce(m_cache,m0) DESC, id DESC |
-| per-row arc selection (L) | w_role DESC, coalesce(neighbor.m_cache,neighbor.m0) DESC, neighbor.id DESC, link.id ASC |
-| CSR node order | UUID bytes ASC |
-| CSR arc accumulation | source UUID, role bytes, link.id, neighbor UUID — all ASC |
+| session candidates | `time_utc DESC, ingest_seq DESC, id ASC` |
+| degree probe | ConductingArc `(source_id, link_id)` RANGE seek, `link_id ASC`, LIMIT 256 before any filter |
+| CSR node and arc order | ascending, fixed by `exportFixedCsr` |
 | PPR list | p DESC, id ASC |
 | primary ranking | score DESC, relevance DESC, mass DESC, id ASC |
-| conflict companions | raw peer ID ASC, LIMIT 65 (64 inspected + sentinel), first four policy/validity-eligible peers; nullable total if truncated (docs/05 §6) |
+| conflict companions | peer id ASC, LIMIT 4 (docs/05 §6) |
 | delivered primaries | greedy complete-bundle packing in primary order; rank 0..n−1 afterward |
-| RRF ranks | 1-based in each channel; absent item contributes zero |
+| RRF ranks | 1-based in each channel; an absent item contributes zero |
 
 The numeric PPR kernel uses fixed-order binary64 arithmetic. With identical
-CSR, seeds, runtime/implementation and options it is bit-reproducible; this is
-not a guarantee that rerunning ANN queries, concurrent cache reads or timeout
-races produces the same envelope. Native transcendental calls in recall-time
-accessibility/mass scoring and `Math.log2` in hub damping may differ in the last
-ulp across runtimes; cross-runtime comparisons give these values tolerance
-1e-12. This is not permission to use fuzzy equality for persisted Hit caches:
-the G003 `binary64-adoption-v1` kernel in docs/04 section 7 uses fixed-order
-arithmetic for producer and replay, with exact versioned cache comparison.
-RRF itself is rank-based addition/division, not an exp/pow formula.
-
-Capture the candidate/index/coverage state, ConductingArc completeness and
-stage/source ordered probe rows/counts, stale-row exclusions and saturation
-decisions, earliest_allowed_from thresholds and their generation/
-policy versions, m_cache/profile and utility snapshots, selected channels
-and degradation reasons, policy/config/generation versions, and actual CSR
-in addition to structure_revision (docs/05 §11).
-Policy changes force retry/rejection, not a determinism exception. Numeric
-replay and reconstruction of Usage attribution are distinct from full retrieval
-reproduction (D47).
-
-A property test creates mixed maintained/unmaintained nodes and asserts that
-every truncation comparator uses `coalesce(m_cache,m0)`; raw nullable
-`m_cache DESC` is forbidden.
+CSR, seeds, runtime and options it is bit-reproducible. That isn't a guarantee
+that rerunning an ANN query or reading a concurrently updated cache produces
+the same input. Native transcendental calls in recall-time retention and mass
+scoring may differ in the last ulp across runtimes; cross-runtime comparisons
+give these values a tolerance of 1e-12. That tolerance never applies to
+persisted Hit caches: the adoption kernel behind docs/04 §7 uses fixed-order
+arithmetic for producer and replay, with exact cache comparison. RRF is
+rank-based addition and division, not an exp/pow formula.
 
 ## 8. Why not GDS online
 
 - GDS PPR runs on an in-memory graph **projection**. The projection must be
-  rebuilt whenever the graph changes, and that cost lands in recall latency.
-- A procedure call is a JVM round trip plus result streaming; what we want is a
-  2 ms computation on 2,000 nodes.
-- Determinism, deadlines, retained-row normalization and dangling behavior are
-  controls we need to
-  control ourselves.
+  rebuilt whenever the graph changes, and that cost would land in recall
+  latency.
+- A procedure call is a JVM round trip plus result streaming. Recall needs a
+  small computation over a bounded row set.
+- Determinism, retained-row normalization and dangling behavior are things
+  the engine has to control itself.
 
-GDS 2.13.12 is the pinned offline baseline for same-operator solver error and
-full-view truncation comparisons (docs/07). It is not a truth oracle or evidence
-that PageRank improves downstream retrieval; that needs separate utility and
-ablation evaluation (D47).
+GDS 2.13.12 is the pinned offline baseline for same-operator solver error
+([07-gds-validation](07-gds-validation.md)). It isn't a truth oracle, and it
+isn't evidence that PageRank improves retrieval; that needs separate utility
+and ablation evaluation (D47).

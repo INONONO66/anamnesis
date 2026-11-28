@@ -1,42 +1,35 @@
 # 07 — GDS Validation
 
-Three questions must remain separate: **solver error** on the same retained
-operator, **truncation error** from a different envelope/operator, and **retrieval
-utility** to a caller. GDS is a numeric baseline for the first two, not a truth
-or downstream-utility oracle, and is never on the online path. D47 in
-[10-decision-log](10-decision-log.md) defines this separation; D43-D46 supply
-policy, budget, feedback and occurrence/conflict contracts being evaluated.
-All gates and targets here are normative future work, not claims that the
-current originals/fulltext code implements or has passed them (docs/09).
+Three questions stay separate: **solver error** on the same retained operator,
+**truncation error** from reading a smaller graph than the full one, and
+**retrieval utility** to a caller. GDS is a numeric baseline for the first, not
+a truth or utility oracle, and it is never on the online path (D47). Only the
+solver comparison and the access-path fixtures below exist in the repository.
+Truncation validation, scale benches and the GDS uses that depend on dreaming
+are [09-roadmap](09-roadmap.md) targets.
 
 ```text
-  ① solver validation    same envelope graph  ─┬─ TS local PPR ─┐
-                                               └─ GDS PPR      ─┴─ compare: L1, top-k
-  ② envelope validation  full-view GDS PPR vs envelope + TS PPR ─ compare: L1, overlap, boundary mass
-  ③ retrieval evaluation delivered budgeted bundles vs baselines ─ task utility, faithfulness, coverage
+  ① solver validation    same captured graph ─┬─ TS local PPR ─┐
+                                              └─ GDS PPR      ─┴─ compare: L1, top-k
+  ② truncation           full-view GDS PPR vs recall's bounded graph   (docs/09)
+  ③ retrieval evaluation delivered bundles vs baselines                (scripts/eval, §7)
 ```
 
 ## 1. Environment
 
 - The live authority never loads GDS and never grants a second Bolt client.
-  `anamnesis bench …` starts a disposable, loopback-only Neo4j+GDS container
-  and loads a synthetic fixture or verified point-in-time dump.
-- Pin **GDS 2.13.12**, a compatible Neo4j 5.26 release, exact container/JAR
-  SHA-256 digests, procedure config, projection code and runtime in the bench
-  manifest. Refuse version mismatch; no claim about master/latest behavior.
-  Upgrading the baseline requires rerunning operator fixtures, not assuming
-  sourceNodes/damping/normalization contracts stayed unchanged.
-- The disposable container has a distinct random credential and temporary
-  volume, network disabled except the isolated local control channel, no live
-  credentials and no live write path. Destroy it after results/log capture.
-  Export/import and control RPCs are authenticated explicit operator commands;
-  ingested content never starts a benchmark or policy command.
-- Fixture graphs: synthetic (§4) and redacted/locally retained real-usage
-  snapshots (dumps), both.
+  Validation starts a disposable, loopback-only Neo4j+GDS container owned by
+  the test runner and loads a fixture.
+- **GDS 2.13.12** and a compatible Neo4j 5.26 release are pinned, with their
+  artifact digests and procedure configuration recorded in the run's evidence.
+  A version mismatch is refused. Nothing here is claimed about master or latest.
+- The container has its own credential and temporary volume, no live
+  credentials and no live write path, and is removed after the run.
+- An unavailable GDS reports UNKNOWN with its reason. It's never a pass.
 
-## 2. Solver validation (v0.2)
+## 2. Solver validation
 
-**Question**: is our PPR implementation mathematically correct?
+**Question**: is the PPR implementation mathematically correct?
 
 The pinned baseline invokes personalized PageRank with the singleton
 `sourceNodes=[σ]`; it does not depend on undocumented weighted-source support.
@@ -81,6 +74,12 @@ construction is unavailable, linearity gives `p(s)=Σ_i s_i·p(e_i)`; at most
 128 normalized, residual-checked singleton runs can replace it, recorded as a
 different baseline path rather than a silent fallback.
 
+The runner is `scripts/qa/g004-gds-solver-20.runner.ts` over the twenty
+fixtures in `g004-gds-solver-20.fixtures.ts`; the independent oracle is
+`scripts/qa/g004-ppr-oracle.ts`, which shares no numeric code with the
+production solver. Both export the graph through the same fixed CSR as
+docs/06 §5.
+
 ### Acceptance
 
 | Criterion | Value | Basis |
@@ -107,203 +106,86 @@ numeric proximity, not rank-set stability.
 
 ### Execution
 
-Planned CI runs 20 fixed-seed synthetic graphs per PR; real-usage snapshots
-nightly. Include singleton and all-dangling graphs, two-cycle, disconnected
-components, unequal seeds, parallel arcs, asymmetric row caps, maintained and
-missing hub shortlists, generation/time/policy exclusions and near-tied ranks.
-Reject malformed seeds (NaN, infinity, negative or zero-total), invalid CSR
-indices and nonpositive/nonfinite role weights before arithmetic. Separate
-projection/normalization mismatch from solver failure; never loosen thresholds
-to conceal either. Await explicit container/job completion with a bounded
-timeout, never fixed sleeps or timing-dependent assertions.
+The twenty fixed-seed graphs include singleton and all-dangling graphs, a
+two-cycle, disconnected components, unequal seeds, parallel arcs and near-tied
+ranks. Malformed seeds (NaN, infinity, negative or zero total), invalid CSR
+indices and nonpositive or nonfinite role weights are rejected before
+arithmetic. A projection or normalization mismatch is reported separately from
+a solver failure, and thresholds are never loosened to hide either. Runs await
+explicit container and job completion with a bounded timeout, never fixed
+sleeps.
 
-## 3. Envelope validation (v0.3)
+## 3. Envelope validation
 
-**Question**: how well does the 2-hop / 2,000-node truncation reproduce
-full-graph PPR?
+Not built. Comparing full-graph PPR with recall's bounded graph read needs a
+fixed online graph read to compare against; see [09-roadmap](09-roadmap.md).
 
-Let `U` be the complete visible, **current-policy-eligible** vertex set for the
-pinned snapshot and generation pair. `V ⊆ U` is the local envelope. The full
-operator uses all eligible conducting links, independent of m_cache, hub
-shortlists and row caps; local normalization uses only retained arcs. Keep the
-same normalized seed vector and weights in both. This comparison measures
-truncation/renormalization, not a second solver-quality criterion.
+## 4. Scale benches
 
-```text
-  1. Full-view projection on U (visible(T), visible_gen and current policy applied, conducting roles, both directions,
-     relationship weight = w_role)
-       · GDS normalizes each row over exactly the visible projected links, the
-         same retained-row rule used by local PPR. Any positive role weights are fine
-       · each dangling row has explicit uniform transitions to U, not to σ
-       · add σ → seeds with weight s_i as in §2; sourceNodes = [σ]; normalize scores on U
-  2. gds.pageRank.stream(personalized) → p_full
-  3. recall's envelope + TS PPR → p_local (0 outside the envelope)
-  4. Compare
-```
-
-Do not silently exclude isolated seeds: that changes the real query
-distribution and dangling operator. Explicit full-view dangling rows may cost
-`|dangling(U)| × |U|` offline relationships. The manifest declares projection
-byte/relationship limits; if this exceeds them, report `oracle_unavailable`
-for that query, not a fabricated exact GDS result. A separately labelled
-non-isolated cohort can be reported, never substituted for the all-query
-cohort. Independently evaluated sparse full-view power iteration with uniform
-dangling redistribution is a reportable alternate reference, not a GDS run.
-
-### Metrics
-
-| Metric | Target | Meaning |
-|---|---|---|
-| overlap@20 | aspirational ≥ 0.80; report, not proof | share of full-PPR top 20 present in local top 20; report tie-aware variant |
-| overlap@50 | report only | |
-| envelope recall | report only | share of full top 50 inside the envelope — what truncation missed |
-| Σ_{V} p_full | report only | share of full-PPR mass the envelope contains |
-| boundary mass | report only | `Σ_{i∈U\V} p_full(i)` |
-| `‖p_local−p_full‖₁` / full-operator residual of p_local | report only | local p is zero-extended to U; distinct from same-envelope solver residual |
-| oracle coverage | report only | eligible queries, unavailable projections and reasons, isolated-seed cohort |
-
-If overlap@20 < 0.8, **do not raise the limits first** — look at the cause:
-hub shortlist quality, fanout ordering bias, seed distribution. Raising limits
-trades against the latency budget and is the last resort.
-
-### Query distribution
-
-Sample from held-out recall requests and capture channels, budget and policy/config versions in the evaluation harness. Include unreported Usages and disclose sampling and redaction; missing outcomes are not negative labels.
-
-## 4. Scale benches (v0.3)
-
-Synthetic graph generator `anamnesis bench gen --episodes N`:
-
-- Episodes N, Facts ≈ 3N, Entities ≈ 0.2N (Zipf mention distribution → hubs
-  emerge naturally), Communities ≈ 0.01N
-- log-normal session lengths, NEXT_EPISODE chains
-- times uniform over a 2-year span, 5 % backdated Facts
-- Hit ledger: recency-biased sample → caches regenerated by replay
-
-| N | Nodes | Links | Measures |
-|---|---|---|---|
-| 100k | ~0.421M Elements | ~2M | recall p50/p95, envelope tx distribution, structural torn and policy-retry rates |
-| 1M | ~4.21M Elements | ~20M | same + page cache, cold start, dreaming, Usage write latency and size |
-
-Counts follow N+3N+0.2N+0.01N=4.21N; ledger, policy and cache/control nodes
-are additional and reported separately. Link counts are generator targets,
-not inferred exact counts. Record actual counts, hardware/runtime, warm/cold
-state, concurrency, query distribution, budget units and policy-rule count.
-Record internal per-stage ConductingArc probe rows, coverage/publication state,
-saturation counts, per-role link-ID seeks, stale-row exclusions, link pool
-reads, seed-probe timeouts and missing witness-cache exclusions. Assert
-≤ 70,144 seed probe inspections, ≤ 708,608 envelope probe inspections and
-≤ 1,417,216 envelope probe-plus-pool reads per attempt (≤ 1,487,360 including
-seeds); report separately bounded authority lookups and retry multipliers.
-Inspect EXPLAIN/PROFILE plans at both scales: MATCH ConductingArc must seek
-the composite (source_id, link_id) RANGE index with source equality and
-link_id ASC index order, then LIMIT 256 before collection/counting or any
-role/time/generation/policy filter. A Sort/Top fed by unrestricted source rows,
-native Expand, label scan or all-relationship scan fails regardless of final
-row count or elapsed time. Record rows/db-hits at the index and Limit
-operators, not just returned counts; planner hints alone do not prove order.
-Non-hub captured-row resolution must use the row's static role branch and
-that role's unique relationship id index (at most one physical link per row),
-then verify endpoints/role/generation, with no second adjacency expansion.
-If any required cache/index/ordered plan is unavailable, assert whole-PPR
-degradation to channel-only fusion; native adjacency is never an alternative.
-Docs/05 targets p50 < 100 ms and p95 < 250 ms at a **1M-Element** reference
-scale. Run that scale explicitly as well as these Episode-count stress sizes;
-do not relabel 1M Episodes as 1M Elements. Target envelope timeouts below 1%
-of recalls; report whole-channel drop rates rather than hiding them in latency.
-These are unmeasured design targets, not a claim of resident GDS execution.
+Not built. No scale number in this set is a measurement
+([09-roadmap](09-roadmap.md)).
 
 ## 5. Other GDS uses (offline)
 
-| Use | Algorithm | Where the result goes |
-|---|---|---|
-| dreaming communities | Leiden | community generation (docs/02 §7) |
-| global centrality | PageRank, betweenness | reports only. Online hub classification uses saturated DegreeProbe, not full degree |
-| graph health | WCC, degree distribution | `anamnesis bench health` report |
+None ship. Community detection for dreaming is a
+[09-roadmap](09-roadmap.md) target. `scripts/qa/g004-gds-startup-diagnostic.ts`
+checks that a GDS container starts and admits a projection; it isn't a solver
+test.
 
 ## 6. CI gate summary
 
-| Gate | When | On failure |
-|---|---|---|
-| forgetting fixtures (docs/04 §10) | every PR | blocks merge |
-| PPR unit: convergence, mass conservation, deterministic fixed captured CSR/seeds/runtime | every PR | blocks merge |
-| RRF scale invariance (channel scores × finite c > 0 → same ranking; no overflow), 1-based ranks and relevance ≤ 1/61 | every PR | blocks merge |
-| ordering conventions (all of docs/06 §7 as property tests) | every PR | blocks merge |
-| ConductingArc coverage/ordered probes and historical Entity witnesses | every PR once implemented | blocks merge: composite RANGE/Limit plan, atomic physical-link cache maintenance, missing-cache PPR degradation, per-role bounded stale-link checks, captured saturation replay, no future-only allowed witness at past T |
-| solver validation, 20 synthetic | every PR (GDS container) | blocks merge |
-| solver validation, real dumps | nightly | auto-files an issue |
-| envelope validation | nightly | report. Persistent overlap@20 < 0.8 → issue |
-| budget/Usage contracts (D44/D62) | every PR once implemented | blocks merge: exact renderer count, rank packing, source credit conservation, restart/idempotency |
-| policy/conflict/occurrence contracts (D43/D46) | every PR once implemented | blocks merge: no denied serving/conduction/feedback, bounded companions and explicit incomplete/redacted state |
-| language and evidence contracts (D48) | every PR once implemented | blocks merge: required immutable `content_language`; an `en` generation rejecting `language_policy_mismatch` with no per-claim source fallback; a projection-derived name (`Jihyun`, `(Sato)`) rejected as an Entity alias and as `normalized_name`; Latin `a`/`c`/`e`/`o`/`p`/`x` distinguished byte-for-byte from their Cyrillic homoglyphs in identifiers, so a homoglyph swap fails `evidence_mismatch` rather than matching; literal `evidence_quote` of 1..8,192 bytes with the derived `[start,end)` span and a repeated quote without a valid span rejected; `RecallRequest.query` byte-identical on the BM25 and vector channels with no second generated query |
-| lineage and grouping contracts (D49) | every PR once implemented | blocks merge: version-1 verify/retry/rebuild/backup round trips byte-stable with zero SETs while a changed version-1 field still conflicts, and version-2 `origin_role`-only or lineage-body-only changes under one `revision_key` rejecting `revision_conflict`; bounded parents (≤4), roots (≤16) and depth (≤8) with overflow storing `unknown` + `echo_lineage_truncated`; the Usage node's stored `selection_digest` equal to the value `Episode.context_digests` copies; an unknown-lineage assistant **Episode** and every output derived from it ineligible for candidates, synthesis and invalidation; a complete synthesis support union storing `context_derived` with `max(support.echo_depth)` and no added hop, and an incomplete or over-cap union storing `unknown` + truncated; echo fields absent from every score, ordering and conflict decision; `same_scope_l1b` (equal non-null `correction_scope_text` with differing corrected value) accepted where `same_scope_group` (complete byte-identical RFC-8785 `scope`) is refused, and neither predicate substituted for the other; `subject_keys` null rather than a literal fallback; symmetric non-transitive `known_conflict` |
-| embedding identity, failure and coverage contracts (D51) | every PR once implemented | blocks merge: the three canonical fingerprints recomputing to `711660f8…96e13e9`, `0dfe3d3a…bef81a9` and `16d404a7…795405b`, with a quantization or HNSW change producing different IDs; emitted DDL matching `vec_episode_<indexhex>` / `vec_fact_g<N>_<indexhex>` / `vec_rel_g<N>_<indexhex>` and the exact options object (`vector-2.0`, 1024, cosine, quantization disabled, `hnsw.m=16`, `ef_construction=100`); every failure transition including `worker_lost` lease loss and `PENDING|RUNNING|RETRY_WAIT|BLOCKED → CANCELLED`, with `malformed_response` and `client_error` blocking immediately and only the four transient classes retrying three times at `[1000, 10000]` ms; coverage stopping at the hole; a vector-channel recall whose active profile has both an `(episode,0)` and an `(extraction,N)` partition simultaneously BLOCKED with different cursors and different omission digests recording **both** rows in `embedding_coverages`, sorted `episode` before `extraction`, each with its own `required_ingest_seq` (current `Meta.ingest_seq` for the Episode row, the active generation's current `covered_ingest_seq` for the extraction row) and exact `lag`, on the response diagnostics and the durable receipt alike, with a one-row array only when no active extraction generation exists and a missing applicable row refusing the vector channel instead of serving a partial array; cutover refused unless target-model episode coverage equals **current** `Meta.ingest_seq` and extraction coverage equals the active generation's current `covered_ingest_seq`; the zero-skip production default rejecting any nonzero skip that no qualification declared; authenticated retry/skip/cancel records; production activation refused on ONLINE status or operator attestation alone |
-| utility/calibration ablations (§7) | versioned evaluation runs | report held-out effect and uncertainty, never rewrite immutable m0 |
-| scale benches | before release | report |
+The repository has no CI workflow files. These are the commands that gate a
+change:
 
-Every D48–D51 row above says **once implemented** literally: these are the
-validation scenarios the eventual code must satisfy, written down now so the
-machine values cannot drift. No fixture in those four rows exists in the
-repository today, and none of them is evidence that the behavior works.
+| Command | What it runs |
+|---|---|
+| `bun run gate` | `tsc --build`, ESLint, knip, madge (no import cycles), the `any`/`unknown` gate, jscpd (no duplication) and `bun test --coverage` over `scripts/qa/pure-tests.txt` |
+| `bun run test` | builds the runtime, then the `foundation` case of `scripts/qa/runtime-scenarios.ts`: every test under `packages/` and `scripts/qa/` plus the two runtime test roots |
+| `bun scripts/qa/runtime-scenarios.ts --case <name>` | one named scenario set (`CASE_TEST_PATHS`), including the owned-Neo4j cases; run database cases serially |
+| `bun run schemas` | regenerates `packages/protocol/schemas/`; a diff after it means the committed schemas are stale |
+| `bun run test:runtime` | the built Node process tests in `app/anamnesis/process.test.mjs` |
+
+The GDS solver cases, the ConductingArc probe and plan fixtures, forgetting
+and replay fixtures, budget and packing fixtures, policy and outcome fixtures
+and the digest-version round trips are tests inside these runs. A behavior
+not covered by a test in these runs is not a gate.
 
 ## 7. Retrieval utility, calibration and replay (D47)
 
-A numerically correct PPR operator can retrieve the wrong material. Evaluate
-**delivered primary bundles**, not pre-budget ranks, against held-out tasks
-with independently judged relevance, source-faithfulness, conflict coverage
-and downstream task success. Report exact budget/unit/tokenizer, primary and
-companion counts, missing/conflict-redacted bundles, policy-denied rate and
-source-provenance completeness. Utility U and adoption are observational
-proxies, not truth or causal labels; a whole-recall reward is one dependent
-observation even when its conserved weight is distributed to many Episodes.
+A numerically correct PPR operator can still retrieve the wrong material.
+Utility is evaluated on **delivered primary bundles**, not pre-budget ranks.
+`scripts/eval/recall-eval.ts` runs labelled queries against a live daemon and
+compares them with a BM25 baseline. Utility `U` and adoption are
+observational proxies, not truth or causal labels, and a whole-recall reward
+is one dependent observation even when its weight is spread over many
+Episodes.
 
-Required ablations, keeping the query split, policy, budget/renderer and
-candidate capture fixed:
+Rules for any evaluation run:
 
-| Comparison | Question |
-|---|---|
-| BM25 originals; candidate-only RRF; RRF + local PPR | Does graph spreading add useful context over simpler retrieval? |
-| capped physical-degree seed damping vs no damping; exact eligible-degree damping offline only | Measure approximation cost, including hidden-generation saturation, without adding an online full-degree scan |
-| beta=0 vs beta=.25 | Does receipt utility improve held-out task results rather than amplify exposure bias? |
-| gamma=0 vs gamma=.5 | Does final mass weighting help? Separately remove mass ordering in envelope truncation; gamma=0 alone does not remove that gate |
-| sigma_fact=1 vs 30; modality/sub_kind priors flat vs defaults | Are slower derived decay and content priors useful assumptions? |
-| Episode-only sibling coupling and source-mean U | Quantify collateral refresh and shared-source utility correlation, not per-Fact selectivity |
-| bounded conflict/occurrence assembly vs no grouping | Measure warning/coverage cost under the same exact output budget without discarding occurrence provenance |
+- Don't tune on the evaluation split. Split chronologically and by source or
+  session, so shared-source siblings and repeat occurrences can't leak across
+  splits.
+- Report grouped uncertainty, support counts, the unreported-Usage rate and
+  channel and degradation cohorts.
+- Missing reward is not a negative label; reward zero is observed.
+- Without randomized exposure or recorded propensities, report associations,
+  not causal benefit.
+- No constant is refitted automatically from a few verdicts. Changing an
+  immutable `m₀` input needs a new derived generation; replay never rewrites
+  `m₀`.
 
-Do not tune on the evaluation split. Split chronologically and by source/
-session groups so shared-source siblings and repeat occurrences cannot leak
-across training and evaluation. Report grouped uncertainty, support counts,
-unreported Usage rate and channel/degradation cohorts. Exposure-only
-rows and missing reward are not negative labels; reward zero is observed.
-Without randomized exposure or documented propensity capture, report
-associations, not causal benefit. No automatic prior refit from a few outcome
-verdicts: retain raw judge outputs, prior/config versions and selection state;
-fit candidate parameters offline, evaluate held-out ablations, and activate
-only through authenticated operator configuration/generation commands.
+Replay has three levels, and a report says which one it reached:
 
-Intrinsic m0 calibration changes require a **new derived generation**.
-Accessibility/utility replay uses versioned dynamics and retained Hit events;
-it does not overwrite immutable m0. Accessibility initialization remains
-Episode S0(original m0) at ingestion. Test signed stability updates, zero and missing outcomes, utility saturation, shared sources and empty selections.
-
-Replay reports distinguish three levels:
-
-1. **Numeric replay**: captured CSR, seeds, config and runtime reproduce the
-   local solver; record iterate delta, actual fixed-point residual if computed,
-   mass conservation and error bounds.
-2. **Usage attribution**: retained primary order and source IDs reconstruct the report shares. Reproducing exact delivery requires the harness to capture the response separately.
-3. **Full retrieval reproduction**: additionally capture candidate/index/
-   coverage state, stage/source ConductingArc rows/counts/saturation and
-   publication state, stale-row exclusions, Entity
-   earliest_allowed_from thresholds pinned to generation/policy, cache snapshots,
-   policy/generation/config versions and channel/timeouts/degradation decisions.
-   structure_revision alone cannot reproduce ANN, hidden-generation adjacency
-   backfill, maintenance or concurrent feedback. Label unavailable capture
-   explicitly instead of calling a best-effort rerun deterministic.
-
-Ordinary reconstruction is still subject to **current** policy, including
-historical T. Privileged offline audit of suppressed data is a separate
-operator surface, never an ordinary-serving bypass.
+1. **Numeric replay**: captured CSR, seeds, options and runtime reproduce the
+   local solver, with iterate delta, residual, mass conservation and error
+   bound.
+2. **Usage attribution**: the retained primary order and source IDs
+   reconstruct the outcome shares. Reproducing the exact delivery needs the
+   harness to capture the response itself.
+3. **Full retrieval reproduction**: additionally needs captured candidate,
+   index, cache, policy and generation state. `structure_revision` alone can't
+   provide it; label missing capture explicitly instead of calling a rerun
+   deterministic.
 
 ### What the frozen screens do and do not establish
 
@@ -333,78 +215,27 @@ stays development-scoped and reversible.
 
 ### ConductingArc access-path fixtures
 
-Degree boundaries use physical conducting-link counts 0, 255, 256, 257 and
-a large hub, interleaving all five roles and parallel link IDs so that five
-separate per-role caps or peer deduplication cannot pass. Assert one row per
-distinct endpoint/link pair, unique (source_id, link_id), no INVALIDATES or
-CONTRASTS rows, copied generation/source extraction metadata and exact
-equality with the independently enumerated retained physical graph. Include
-original NEXT_EPISODE, active/hidden/retired extraction links and cross-stream
-HAS_MEMBER. The current protocol rejects a self-link before any physical/cache
-write; assert that rejection. A separate defensive legacy-corruption rebuild
-fixture emits only one row for a self-loop's single endpoint and reports the
-violation, not a newly permitted ordinary self-link.
+Degree boundaries use physical conducting-link counts 0, 255, 256, 257 and a
+large hub, interleaving all five roles and parallel link IDs, so neither
+per-role caps nor peer deduplication can pass. The fixtures assert one row per
+distinct endpoint and link, unique `(source_id, link_id)`, no INVALIDATES or
+CONTRASTS rows, copied generation metadata and exact equality with the
+independently enumerated physical graph. The protocol rejects a self-link
+before any physical or cache write, and a fixture asserts that rejection.
 
-Require exactly min(degree,256) globally link-ID-ordered ConductingArc rows,
-256 saturation, bounded collection even when empty, and no role/time/
-generation/policy predicate before the raw cap. At 257, put hidden/denied
-links among the first 256 and an eligible link at 257: it must never refill
-the probe. Non-hubs resolve only <256 captured rows via the correct role's
-unique link-ID index before sorting; saturated sources produce
-dangling rows, whereas missing/incomplete ConductingArc coverage or indexes
-drops the entire PPR channel as degree_probe_unavailable, not degree zero.
-Assert no native adjacency query executes in any missing-cache case.
-The online completeness check reads only Meta.conducting_arc_ready; verify
-its agreement with partition publication during rebuild/GC without a
-recall-time generation-registry scan. Missing/false gates are unavailable.
-
-Create/delete, session backfill rewire, retired-generation GC and rollback
-fixtures compare physical links and endpoint rows in the same committed
-transaction; aborted writes expose neither half. During a paged rebuild no
-incomplete partition is published COMPLETE. Include a hidden-generation
-rebuild: physical degree depends on it even when its semantic output is
-invisible. Subscribe to actual transaction/publication barrier events before
-triggering the write, then await the signal with a bounded timeout. Cache
-loss disables PPR until retained-graph reconstruction and verification
-publish complete coverage; channel-only recall remains available under its
-ordinary policy/receipt requirements.
-
-Inject captured stale rows for deleted links, wrong peer/source, wrong role
-and mismatched generation metadata (including HAS_MEMBER's extraction pin).
-Prove that each lookup is the recorded role's indexed ID seek, that endpoint/
-role/generation validation excludes mismatches without refill, and that stale
-rows still occupy the raw probe slots. Detect
-missing coverage rows during verify, invalidate coverage and require rebuild;
-never infer complete degree from a partially rebuilt source. No cached tuple
-is authority, a semantic candidate, conductor or output in these fixtures.
-
-Verify capped seed damping, fixed-capture replay despite hidden backfill,
-ordered-plan rejection and whole-PPR degradation on seed-probe failure.
-Prove the conservative counters with an exact small fixture as well as scale
-plans: each source-stage costs at most 512 structural inputs (non-hub
-255+255; hub 256+32+32), (128+640+2000)*512 = 1,417,216, and 274*256 seed
-rows bring the per-attempt ceiling to 1,487,360. Track policy/source work
-separately: per Fact at most 16 direct Episode sources plus 16 support Facts
-with 16 Episode sources each (272 Episode and 16 support-Fact ID lookups),
-at most 256 active policies and 512 scalars per literal. Never assert input
-work bounds from final result sizes or wall-clock timing alone.
-
-Entity witness fixtures include a denied old mention plus an allowed future
-mention: past T excludes the Entity even when its structural visible_from_utc
-is old. At earliest_allowed_from equality it can become eligible; matching
-generation/policy, link/source permission and structural visibility still
-apply. Missing/stale/null cache proof excludes at candidates, conduction and
-assembly; rebuild before serving, never scan MENTIONS or create a cache per T.
-Use explicit publication/barrier events to exercise policy changes and rebuild
-completion; replay captures the threshold and versions actually used.
-
-Boundary validation uses parsed values and resident arithmetic, not prose
-snapshots: malformed budget numbers/units/tokenizers, UTF-8 vs scalar counts,
-zero/exact-fit/oversized skipped bundles, shared-companion deduplication and
-post-budget ranks, 64-primary/256-companion caps, full-response 1 MiB cap, and
-reward clamping, restart and duplicate outcomes. For conflicts exercise raw
-adjacency sizes 0, 4, 5, 64 and 65 with denied/invalid peers; at most 64 peers
-are inspected, at most four included, totals are null when truncated, and
-unknown remainder always carries the mandatory incomplete warning. Policy
-races subscribe to the actual barrier state before triggering the command,
-then await completion with a bounded timeout, never sleeps or polling luck.
+They require exactly `min(degree, 256)` link-ID-ordered rows, saturation at
+256 and bounded collection even when empty, with no role, time, generation or
+policy predicate before the raw cap. At 257, hidden or denied links among the
+first 256 and an eligible link at position 257 must not refill the probe.
+Missing or incomplete coverage or indexes fail as `degree_probe_unavailable`
+or `ordered_probe_unavailable`, never as degree zero, and no native adjacency
+query runs in any missing-cache case. EXPLAIN/PROFILE plans must show the
+composite RANGE seek with `link_id ASC` index order and `LIMIT 256` before
+collection; a Sort/Top over unrestricted rows, a native Expand or a label scan
+fails whatever the row count. Create, delete and session-backfill rewire
+compare physical links and endpoint rows in the same committed transaction.
+Stale rows (deleted link, wrong peer, wrong role, mismatched generation) are
+excluded without refill and still occupy their probe slots. Fixtures subscribe
+to the publication event before triggering a write and await it with a bounded
+timeout. They live in `scripts/qa/g004-conducting-maintenance.*`,
+`g004-ordered-probe.*` and `g004-envelope-access.test.mjs`.
