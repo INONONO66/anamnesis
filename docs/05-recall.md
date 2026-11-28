@@ -58,7 +58,7 @@ recaptures serving revisions/selectors but preserves the request's T and now.
 | `active[*]` | The three stream selectors. A switch mid-request is caught by §7 |
 | `policy_revision` | Current suppression policy, regardless of historical T; checked at delivery and commit |
 | `config_version` | Ranking, prior/calibration, rendering, budget/tokenizer and receipt-retention versions |
-| pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the adjudication `judge_profile_id`, and the `embedding_profile_id` behind the vector channel. All are recorded on the receipt (D48–D51) |
+| pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the relation judge profile, and the `embedding_profile_id` behind the vector channel. All are recorded on the receipt (D48, D49, D51) |
 | request options | Session, `limit`, `window` (0..8), validated `budget`, `time` window, `order`, `known_by`, client mode and authenticated principal |
 | query embedding | One call to the embedding service, on the caller's verbatim query inside the active profile's pinned template. On failure the vector channel is absent |
 
@@ -352,7 +352,7 @@ Status — Shipped: `id`, `kind`, `schema`, `epistemic`, `content`, `time`,
 invalidator, with `supersedes_redacted` and the `supersedes_withheld` /
 `supersedes_incomplete` warnings, #263), `contrasts`, `warnings` and
 `channels`. Not shipped: `content_language`, `modality` on Facts, the
-conflict counters, the D49 echo lineage fields and `operator_corrected`.
+conflict counters, the D49 echo lineage fields.
 
 ```json
 {
@@ -371,8 +371,7 @@ conflict counters, the D49 echo lineage fields and `operator_corrected`.
     "conflict_included_count": 0, "conflict_total": 0,
     "conflict_truncated": false, "conflict_redacted": false, "warnings": [],
     "echo_state": "direct", "echo_depth": 0,
-    "corroboration_root_count": 1, "echo_lineage_truncated": false,
-    "operator_corrected": false
+    "corroboration_root_count": 1, "echo_lineage_truncated": false
   },
   "channels": ["vector", "bm25", "session", "identity", "ppr"]
 }
@@ -389,9 +388,7 @@ source snapshot, under the time-only exception (docs/03 §3).
 The lineage fields are provenance labels only. `echo_state`, `echo_depth`,
 `corroboration_root_count` and `echo_lineage_truncated` never enter
 `relevance`, `mass`, `utility`, `score` or ordering, and a high root count
-never elects a conflict winner (D49). `operator_corrected` is true when this
-result came from an authenticated repair of an adjudicator mistake
-(docs/03 §5); it marks provenance, not extra authority. Client-supplied
+never elects a conflict winner (D49). Client-supplied
 sources or ranks are never trusted at commit; the durable receipt is
 authority.
 
@@ -633,9 +630,7 @@ retry and `torn` diagnostics.
   backfill do not bump the revision (docs/02 §1). Global Episode or ACTIVE
   derived coverage for the active profile does, because it changes vector
   candidates, and so does an embedding skip that releases ACTIVE coverage.
-- An operator correction that creates ACTIVE structural output bumps the
-  revision like any other structural write; an accepted adjudication proposal
-  that has not been consumed yet changes nothing that is served.
+- Extraction writes that create ACTIVE structural output bump the revision like other structural writes.
 - Mass and utility inputs are read **once**, in ⑦. If a commit lands
   mid-assembly, this response finishes with the captured values. Cache writes
   do not bump structure_revision, so the revision alone is not a replay token.
@@ -789,7 +784,7 @@ any source resolved as `RESOLVED_NO_VECTOR` in the delivered set.
 
 Internal receipt/bench diagnostics record ConductingArc coverage state,
 seed/envelope ordered probe rows/counts, stale-row exclusions,
-saturated-source counts and bounded link/HubArc pool reads, plus witness-cache
+saturated-source counts and bounded link pool reads, plus witness-cache
 versions and unavailable state. Raw physical counts/IDs can reveal hidden
 generations or denied links: keep them out of ordinary response metadata;
 the response reports only the cap, approximation mode and capture status.
@@ -908,7 +903,7 @@ scores and channel availability; selected index/coverage state; selectors and
 structural reads; ConductingArc completeness and stage/source ordered degree-probe
 rows/counts, stale-row exclusions and saturation decisions;
 earliest_allowed_from thresholds with generation/policy versions; mass/utility
-snapshots; m_cache and HubArc/profile snapshots actually used; envelope
+snapshots; m_cache and profile snapshots actually used; envelope
 nodes/arcs/seeds; conflict/occurrence completion; policy and
 config/prior versions; renderer/tokenizer; and timeout/degradation decisions.
 ANN index rebuilds, hidden-generation adjacency backfill, cache maintenance,

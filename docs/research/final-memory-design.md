@@ -1,3 +1,5 @@
+> Historical design memo. The shadow adjudicator described here was removed by D60.
+
 # Final memory design: decided defaults and their evidence
 
 This report gathers what the memory-design research thread settled before
@@ -18,8 +20,7 @@ experiment disagree, the narrower experimental statement wins.
 
 Read this if you need to know which defaults are now settled and how far the
 supporting evidence actually reaches. Four research reports carry the
-measurements: [adjudication conformance](adjudication-conformance.md),
-[retrieval fusion](retrieval-fusion.md), the
+measurements: [retrieval fusion](retrieval-fusion.md), the
 [extraction spotcheck](extraction-spotcheck.md), and the
 [embedding runtime probe](embedding-runtime.md).
 
@@ -53,7 +54,6 @@ close only the gaps that blocked implementation.
 |---|---|---|
 | D48 | Facts carry source-language content by default. English content is a whole extraction generation, not a rewrite. Recall keeps the caller's verbatim query and global original-Episode candidates. | Configuration and replacement extraction generation |
 | D49 | Echo lineage is bounded and materialized: at most four parent receipts, 16 corroboration roots, depth 8. Every occurrence survives. Grouping and conflict predicates are pairwise and local. Episode digest identity gains a server-owned version discriminator that applies only to new revisions. | Per-generation fields, no global identity claim |
-| D50 | Adjudication runs shadow-first. `claude-opus-5` with thinking disabled is the development default for the frozen conformance prompt; `gpt-5.5` at reasoning `none` is the comparator. Operator repair is append-only. | New proposal or new profile, no deletion |
 | D51 | Separate `embedding_model_id`, `vector_index_id`, and `embedding_profile_id` fingerprints pin one profile. A permanent failure blocks contiguous coverage until an authenticated retry, skip, or cancel. | New model/profile build, old profile stays a rollback target |
 
 Concretely, the settled positions are these.
@@ -148,8 +148,8 @@ RFC-8785 object whose fields are enumerated in
 |---|---|---|
 | Original query plus original Episodes is at least as good as translated fusion on the development set | [retrieval-fusion.md Results](retrieval-fusion.md), commit `4bbbd7e` | Hit@1 20/20 original-query union versus 19/20 two-query RRF, MRR 1.000 versus 0.975, on 20 queries |
 | English-only retrieval is not justified | [retrieval-fusion.md](retrieval-fusion.md) | English Facts with English queries reached 19/20 Hit@1, MRR 0.967; no arm beat the original-query baseline |
-| Opus is the development adjudication default on the frozen prompt | [adjudication-conformance.md Results](adjudication-conformance.md) | 36/36 core exact versus GPT 31/36; 0 false-invalidating verdicts for both; 0 failures of any kind |
-| Missed invalidations are the failure mode worth separating | [adjudication-conformance.md, Where the answers diverged](adjudication-conformance.md) | GPT missed 3 required invalidations and 1 unresolved conflict; `unresolved_invalidated` is 0 for both models |
+| Opus is the development adjudication default on the frozen prompt | the historical relation conformance screen | 36/36 core exact versus GPT 31/36; 0 false-invalidating verdicts for both; 0 failures of any kind |
+| Missed invalidations are the failure mode worth separating | the historical relation conformance screen | GPT missed 3 required invalidations and 1 unresolved conflict; `unresolved_invalidated` is 0 for both models |
 | Exact-quote validation catches real extractor corruption | [extraction-spotcheck.md](extraction-spotcheck.md) | Opus collapsed distinct Latin/Cyrillic identifiers in 1 of 11 claims and changed its quote; GPT emitted 12 claims with no literal-quote error |
 | Confidence cannot gate admission | [extraction-spotcheck.md](extraction-spotcheck.md) | Opus assigned 0.95 to its corrupted claim; GPT assigned 1.0 to everything |
 | Generated name renderings must not become aliases | [extraction-spotcheck.md](extraction-spotcheck.md) | English projections invented `Jihyun` and `(Sato)` |
@@ -183,7 +183,7 @@ under prompt SHA-256
 `94a74ca2825e17d09188ae0af97c915c7a79a64a45ac998e2f584d8878c3275b` and
 fixtures SHA-256
 `5c3db78a88f524eabac1f29ed3c5535a2e15f5bf78e3ac9a99ce47a9060afc2d`
-([adjudication-conformance.md Setup](adjudication-conformance.md)).
+(the historical relation conformance screen).
 
 | Measure | gpt-5.5 (`none`) | claude-opus-5 (thinking disabled) |
 |---|---:|---:|
@@ -208,7 +208,7 @@ specification probes that over-sample hard boundaries; two gold labels
 one run, one setting per model, no interval belongs on any count. Captured
 rows replay byte-identically with no key and no network, and 61 runner tests
 pass with 1,352 assertions in this checkout
-([adjudication-conformance.md Reproducing, Limitations](adjudication-conformance.md)).
+(the historical relation conformance screen).
 
 ### Offline retrieval fusion, 20 queries
 
@@ -447,7 +447,7 @@ the text lands; each step depends on the one before it for vocabulary.
    trigger-gated qualification work to
    [`docs/09-roadmap.md`](../09-roadmap.md).
 8. **Research reports.** Append the disposition and cross-reference paragraphs
-   to [adjudication-conformance.md](adjudication-conformance.md),
+   to the historical relation conformance screen,
    [extraction-spotcheck.md](extraction-spotcheck.md), and
    [retrieval-fusion.md](retrieval-fusion.md), and publish
    [embedding-runtime.md](embedding-runtime.md). Existing results and

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import neo4j from "neo4j-driver";
-import { EpisodeLineageError, SCHEMA_ID, type SemanticClaim, type SemanticReviewPremises, type SemanticSourceContext, extractionBodyDigest, validateSemanticClaim } from "@anamnesis/protocol";
+import { EpisodeLineageError, SCHEMA_ID, type SemanticClaim, type SemanticSourceContext, extractionBodyDigest, validateSemanticClaim } from "@anamnesis/protocol";
 import { CANONICAL_DIGEST, StorageContractError, canonicalJson, elementDigest, linkIdemKey, originKey, semanticClaimTime, sessionKey, sha256, tupleHash, validatedFactTime, verifyLineageRetry } from "./digest.ts";
 import { decodeHistoricalElement, nodeProps, recordsToObjects, relProps, toElement } from "./records.ts";
 import { arcIdentity, arcTuple, conductingPartition, topologyExpectations, type TopologyRow } from "./conducting.ts";
@@ -42,7 +42,7 @@ describe("digest", () => {
       scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] },
       scope_complete: true, evidence: { kind: "source_locus", quote: content },
     });
-    const source: SemanticReviewPremises["source"] = { ...context.episode, time: { ...sourceTime, time_precision: "day" } };
+    const source: SemanticSourceContext["episode"] = { ...context.episode, time: { ...sourceTime, time_precision: "day" } };
     const inherited = validateSemanticClaim(claim({ ...sourceTime, time_precision: "inherited", resolution: "inherited", anchor_time_utc: sourceTime.time_utc }), context);
     expect(validatedFactTime(inherited, source)).toEqual({ value: "2026-09-10T12:00:00.000Z", precision: "day" });
     expect(validatedFactTime(inherited, { ...source, time: sourceTime })).toEqual({ value: "2026-09-10T12:00:00.000Z", precision: "second" });

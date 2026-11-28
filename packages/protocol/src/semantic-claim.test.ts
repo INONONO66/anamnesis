@@ -63,7 +63,6 @@ describe("semantic extraction boundary, not audit disposition or Fact permission
       expect(result.evidence).toEqual({ start: 0, end: Buffer.byteLength(content), text: content });
       expect(result.confidence_basis).toBe("source_fidelity");
       expect(result.semantic_writes).toBe(false);
-      expect(result.materialization_gate).toBe("independent_shadow_review_required");
     }
   });
   test("does not mistake a high confidence or exact source slice for truth/entailment", () => {

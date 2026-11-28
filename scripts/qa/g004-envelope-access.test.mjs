@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { test } from 'bun:test';
 import assert from 'node:assert/strict';
 import neo4j from 'neo4j-driver';
 import { Engine } from '../../packages/core/src/engine.ts';
@@ -22,4 +22,4 @@ test('G004 real bounded ConductingArc probe and fail-closed envelope',async()=>{
   const envelope=await e.store.graphEnvelope([source],{},context); assert.ok(envelope.nodes.length<=2000); assert.ok(envelope.arcs.length<=20000); assert.equal(envelope.probes[0].count,256);
   await d.executeQuery('MATCH (m:Meta {key:"meta"}) SET m.conducting_arc_ready=false'); await assert.rejects(e.store.graphEnvelope([source],{},context),/degree_probe_unavailable/);
  } finally { await e.close(); await d.executeQuery('MATCH (n) DETACH DELETE n').catch(()=>{}); await d.close(); }
-});
+}, 120_000);

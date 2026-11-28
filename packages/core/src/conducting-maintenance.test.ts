@@ -74,11 +74,9 @@ test("ConductingArc rows mirror every physical link through remember, rewire, pu
     await f.engine.init();
     expect((await f.state()).ready).toBe(true);
     const a = await f.engine.remember(episode("a", 1)), c = await f.engine.remember(episode("c", 3));
-    const [first] = await f.expectMirrored();
-    await f.run("CREATE (:HubArc {hub_id:$source,link_id:$link,rank:0})", { source: a.id, link: first!.link_id });
+    await f.expectMirrored();
     await f.engine.remember(episode("b", 2));
     await f.expectMirrored();
-    expect(await f.query("MATCH (h:HubArc {link_id:$id}) RETURN count(h) AS n", { id: first!.link_id }, z.object({ n: z.number() }))).toEqual([{ n: 0 }]);
     await f.run(`CREATE (:Element:Fact {id:$f,generation:42}),(:Element:Entity {id:$e,generation:42}),(:Element:Entity {id:$e2,generation:42}),
       (:Element:Community {id:$c,generation:7,source_extraction_generation:42}),(:Element:Community {id:$orphan,generation:8}),
       (:Generation {stream:"community",generation:7,source_extraction_generation:42,state:"RETIRED"}),(:Generation {stream:"extraction",generation:42,state:"BUILDING"})`,

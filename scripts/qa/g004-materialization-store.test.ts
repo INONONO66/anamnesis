@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { startProcess } from './runtime-scenarios.ts';
 
-test('retained materialization persists valid identities through real Node and owned Neo4j', async () => {
+test('extraction materializes Facts served through real Node and owned Neo4j', async () => {
   expect(process.env.ANAMNESIS_TEST_NEO4J_URI).toBeTruthy();
   expect(process.env.ANAMNESIS_TEST_NEO4J_PASSWORD).toBeTruthy();
   const parent = resolve(process.env.G004_MATERIALIZATION_EVIDENCE ?? '.omo/evidence/g004-materialization-store');

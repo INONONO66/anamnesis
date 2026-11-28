@@ -6,7 +6,7 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import neo4j from "neo4j-driver";
-import { extractionBodyDigest, type Generation, type SemanticClaim, type SemanticReviewProvider } from "../../packages/protocol/src/index.ts";
+import { extractionBodyDigest, type Generation } from "../../packages/protocol/src/index.ts";
 import type { ExtractionProviderInput } from "../../packages/core/src/extraction.ts";
 
 test("configured provider, recovery, hybrid recall and exact budgets on real Node/UDS/Neo4j", async () => {
@@ -34,18 +34,14 @@ const extractionProvider = {
     if (input.task === "claim") {
       const text = input.text.split("\n")[0]!;
       return { task: "claim", language: "en", modality: "text",
-        claims: [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text } }] };
+        claims: [{ text, confidence: 0.7, evidence: { start: 0, end: Buffer.byteLength(text), text } }] };
     }
     if (input.task !== "judge_claims" || !input.claim_context) throw new Error(`unexpected task ${input.task}`);
     return { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context.body_digest,
       decisions: input.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence })) };
   },
 };
-const semanticReviewProvider: SemanticReviewProvider = {
-  profileId: extractionBodyDigest("g003-review-fixture"),
-  async resolve() { return { entity_resolutions: [], attribution_speakers: [], allow_no_single_locus: false, content_language: "en" }; },
-  async review(input) { return { disposition: "retain", semantic_claim: input.premises.request.semantic_claim, reason: "fixture retained" }; },
-};
+
 async function factGeneration(engine: Engine, now = Date.now()): Promise<Generation> {
   const generation: Generation = { id: Bun.randomUUIDv7(), stream: "extraction", incarnation: extractionProvider.modelIncarnation,
     state: "catching_up", covered_ingest_seq: 0, created_at: now, updated_at: now };
@@ -60,22 +56,10 @@ async function materializeFact(engine: Engine, generation: Generation, content: 
   }, { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context })).id;
   const task = await engine.createExtractionPipeline({ id: Bun.randomUUIDv7(), generation_id: generation.id, source_id: sourceId }, context);
   const audit = await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "qa", lease_ms: 30000 }, context);
-  if (audit.state !== "known" || audit.judge_attempt?.state !== "succeeded" || audit.semantic_writes)
-    throw new Error("audit fixture must retain the claim without writing a Fact");
-  const source = await engine.store.semanticEpisode(sourceId, context);
-  const semantic: SemanticClaim = {
-    content, content_language: "en", sub_kind: "fact", modality: "asserted", confidence: 0.7,
-    time: { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited",
-      resolution: "inherited", anchor_time_utc: source.time.time_utc },
-    entities: [], subject_keys: null, predicate_text: content, scope_complete: false,
-    scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] },
-    evidence: { kind: "source_locus", span: { start: 0, end: Buffer.byteLength(content) } },
-  };
-  const request = { proposal_id: Bun.randomUUIDv7(), generation_id: generation.id, source_episode_id: sourceId,
-    judge_attempt_id: audit.judge_attempt.id, claim_index: 0, semantic_claim: semantic };
-  await engine.proposeRetainedClaim(request, context);
-  await engine.reviewRetainedClaim({ review_id: Bun.randomUUIDv7(), proposal_id: request.proposal_id, action: "accept", reason: "fixture accepted" }, context);
-  const id = (await engine.materializeRetainedClaim({ ...request, operation_id: Bun.randomUUIDv7() }, context)).fact_id;
+  if (audit.state !== "known" || !audit.semantic_writes) throw new Error("Fact extraction failed");
+  const custody = await engine.store.materializationState.byOccurrence(extractionBodyDigest([generation.id, sourceId]));
+  const id = custody?.fact_ids[0];
+  if (!id || custody?.fact_ids.length !== 1) throw new Error("expected one extracted Fact");
   return { id, sourceId };
 }
 
@@ -89,7 +73,7 @@ test("model-scoped vectors and an event-gated policy race preserve server-derive
   let gate: Promise<void> | undefined;
   let providerCalls = 0;
   const provider: EmbeddingProvider = { profile, async embed() { providerCalls++; announce?.(); await gate; return [1, 0]; } };
-  const first = new Engine({ uri, password, objectsRoot: root, embeddingProvider: provider, extractionProvider, semanticReviewProvider });
+  const first = new Engine({ uri, password, objectsRoot: root, embeddingProvider: provider, extractionProvider });
   const otherProfile = { ...profile, model_incarnation: "d".repeat(64) };
   const second = new Engine({ uri, password, objectsRoot: root, embeddingProvider: { profile: otherProfile, async embed() { return [0, 1]; } } });
   const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true });
@@ -156,14 +140,15 @@ async function deferralFixture(name: string) {
   const profile = EmbeddingProfile.parse({ model: `${name}-fixture`, model_incarnation: "e".repeat(64), dimensions: 2,
     query_prefix: "", document_prefix: "", max_input_bytes: 65536, norm: "unit_l2", norm_tolerance: 0.001 });
   const state = { now: Date.parse("2026-09-24T00:00:00Z"), mode: "unavailable" as "unavailable" | "rejected" | "ok", calls: 0 };
-  const provider: EmbeddingProvider = { profile, async embed() {
+  const provider: EmbeddingProvider = { profile, async embed(_text, purpose) {
+    if (purpose === "query") throw new EmbeddingError("provider_unavailable", "fixture has no query lane");
     state.calls++;
     if (state.mode === "unavailable") throw new EmbeddingError("provider_unavailable", "http 503");
     if (state.mode === "rejected") throw new EmbeddingError("provider_rejected", "http 400");
     return [1, 0];
   } };
   const engine = new Engine({ uri, password, objectsRoot: root, embeddingLedgerPath: ledgerPath, embeddingProvider: provider,
-    extractionProvider, semanticReviewProvider, clock: () => state.now });
+    extractionProvider, clock: () => state.now });
   const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true });
   // Earlier tests leave Facts behind; start from an empty graph so drain totals are exact.
   await driver.executeQuery("MATCH (n) DETACH DELETE n");

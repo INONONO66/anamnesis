@@ -35,8 +35,6 @@ export { ExtractionAttempt, Generation, ModelTask, Coverage, ExtractionSpan, Ext
 export { ExtractionClaimContext, ExtractionJudgeInput, CreateExtractionPipeline, RunExtractionPipeline, ExtractionPipelineStatus, ExtractionDisposition, ExtractionPipeline, ExtractionAuditError, FactRelationCandidate, FactRelationContext } from "./extraction-audit.ts";
 export type { ExtractionClaimContext as ExtractionClaimContextRecord, ExtractionJudgeInput as ExtractionJudgeInputRecord, CreateExtractionPipeline as CreateExtractionPipelineInput, RunExtractionPipeline as RunExtractionPipelineInput, ExtractionDisposition as ExtractionDispositionRecord, ExtractionPipeline as ExtractionPipelineRecord } from "./extraction-audit.ts";
 export type { ExtractionAttempt as ExtractionAttemptRecord, Generation as GenerationRecord, ModelTask as ModelTaskRecord, Coverage as CoverageRecord } from "./extraction.ts";
-export { GenerationIdentity, GenerationIdentityReceipt, bindGenerationProfile } from "./generation-identity.ts";
-export type { GenerationIdentity as GenerationIdentityRecord, GenerationProfileInput, GenerationIdentityReceipt as GenerationIdentityReceiptRecord, BoundGenerationProfile } from "./generation-identity.ts";
 
 export {
   RPC_VERSION,
@@ -77,8 +75,8 @@ export {
 } from "./rpc.ts";
 export type { RpcEpisodeInput, RpcRememberParamsInput, RpcRequestInput } from "./rpc.ts";
 
-export { ProposeRetainedClaim, MaterializeRetainedClaim, ReviewRetainedClaim, MaterializationResult, FactRelationDecision, SemanticResolution, SemanticReviewOutput, SemanticReviewPremises, RetainedSemanticProposal, semanticReviewClaimBody } from "./materialization.ts";
-export type { ProposeRetainedClaim as ProposeRetainedClaimInput, MaterializeRetainedClaim as MaterializeRetainedClaimInput, ReviewRetainedClaim as ReviewRetainedClaimInput, MaterializationResult as MaterializationResultRecord, SemanticResolution as SemanticResolutionRecord, SemanticReviewProvider } from "./materialization.ts";
+export { MaterializationResult, FactRelationDecision, SemanticResolution } from "./materialization.ts";
+export type { MaterializationResult as MaterializationResultRecord, SemanticResolution as SemanticResolutionRecord } from "./materialization.ts";
 export { parseEpisodeLineage } from "./episode-lineage.ts";
 export { RpcPolicySetParams, RpcPolicyRevokeParams, RpcEmbeddingRequeueParams, RpcExtractionPacing, RpcWorkersStatus, RpcPolicyResult, RpcEmbeddingRequeueResult } from "./rpc.ts";
 export { ReadExtractionCoverage, ExtractionSelection } from "./extraction.ts";

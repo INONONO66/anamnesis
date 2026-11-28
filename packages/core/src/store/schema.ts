@@ -4,6 +4,14 @@ const LINK_ROLES = Object.keys(LINK_LATTICE) as LinkRole[];
 export const CONDUCTING_ROLES = ["NEXT_EPISODE", "MENTIONS", "RELATES_TO", "HAS_MEMBER", "DERIVED_FROM"] as const;
 
 export const SCHEMA_STATEMENTS = [
+  // D60: remove obsolete schema objects from existing stores without rewriting data.
+  `DROP INDEX hub_arc_link IF EXISTS`,
+  `DROP CONSTRAINT adjudication_input_id IF EXISTS`,
+  `DROP CONSTRAINT adjudication_attempt_id IF EXISTS`,
+  `DROP CONSTRAINT adjudication_proposal_id IF EXISTS`,
+  `DROP CONSTRAINT adjudication_review_id IF EXISTS`,
+  `DROP CONSTRAINT adjudication_review_proposal IF EXISTS`,
+  `DROP CONSTRAINT adjudication_consumption_id IF EXISTS`,
   `CREATE CONSTRAINT identity_account_key IF NOT EXISTS FOR (a:Account) REQUIRE a.key IS UNIQUE`,
   `CREATE CONSTRAINT identity_account_session IF NOT EXISTS FOR (s:AccountSession) REQUIRE (s.account_key, s.session_key) IS UNIQUE`,
   `CREATE INDEX identity_account_session_account IF NOT EXISTS FOR (s:AccountSession) ON (s.account_key)`,
@@ -36,7 +44,6 @@ export const SCHEMA_STATEMENTS = [
     `CREATE CONSTRAINT graph_${role.toLowerCase()}_id IF NOT EXISTS FOR ()-[l:${role}]-() REQUIRE l.id IS UNIQUE`),
   `CREATE CONSTRAINT conducting_arc_coverage IF NOT EXISTS FOR (c:ConductingArcCoverage) REQUIRE (c.stream,c.generation) IS UNIQUE`,
   `CREATE INDEX conducting_arc_link IF NOT EXISTS FOR (a:ConductingArc) ON (a.link_id)`,
-  `CREATE INDEX hub_arc_link IF NOT EXISTS FOR (a:HubArc) ON (a.link_id)`,
   `CREATE CONSTRAINT conducting_generation_partition IF NOT EXISTS FOR (g:Generation) REQUIRE (g.stream,g.generation) IS UNIQUE`,
 
   `CREATE CONSTRAINT element_id IF NOT EXISTS
@@ -68,12 +75,6 @@ export const SCHEMA_STATEMENTS = [
    FOR (e:Element) ON (e.schema)`,
   // valid(T) seeks invalidators by target instead of expanding adjacency.
   `CREATE CONSTRAINT extraction_generation_id IF NOT EXISTS FOR (g:ExtractionGeneration) REQUIRE g.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_input_id IF NOT EXISTS FOR (a:AdjudicationInput) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_attempt_id IF NOT EXISTS FOR (a:AdjudicationAttempt) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_proposal_id IF NOT EXISTS FOR (a:AdjudicationProposal) REQUIRE a.id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_review_id IF NOT EXISTS FOR (a:AdjudicationReview) REQUIRE a.review_id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_review_proposal IF NOT EXISTS FOR (a:AdjudicationReview) REQUIRE a.proposal_id IS UNIQUE`,
-  `CREATE CONSTRAINT adjudication_consumption_id IF NOT EXISTS FOR (a:AdjudicationConsumption) REQUIRE a.proposal_id IS UNIQUE`,
   `CREATE INDEX fact_generation_id IF NOT EXISTS FOR (f:Fact) ON (f.generation,f.id)`,
   `CREATE CONSTRAINT fact_identity IF NOT EXISTS FOR (f:Fact) REQUIRE (f.generation,f.meaning_digest,f.primary_episode_id) IS UNIQUE`,
   `CREATE INDEX entity_generation_key IF NOT EXISTS FOR (e:Entity) ON (e.generation,e.entity_key)`,

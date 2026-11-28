@@ -13,7 +13,6 @@ packages/core/src/paced-extraction-provider.test.ts
 packages/core/src/empty-claim-judge-provider.test.ts
 packages/core/src/spool-paging.test.ts
 packages/core/src/objects-cleanup.test.ts
-packages/core/src/fact-materialization.test.ts
 packages/core/src/openai-extraction-provider.test.ts
 packages/core/src/extraction-chat-output.test.ts
 packages/core/src/spool-memory.test.ts
@@ -28,7 +27,6 @@ packages/protocol/src/rpc.test.ts
 packages/protocol/src/element.test.ts
 packages/protocol/src/semantic-claim.test.ts
 packages/protocol/src/extraction-lifecycle.test.ts
-packages/protocol/src/generation-identity.test.ts
 app/anamnesis/backup-operation.test.mjs
 app/anamnesis/wire.test.ts
 app/anamnesis/tokenizer.test.mjs
@@ -41,7 +39,6 @@ packages/core/src/backoff.test.ts
 app/anamnesis/timing.test.ts
 packages/core/src/store/digest.test.ts
 packages/core/src/store/schema.test.ts
-packages/protocol/src/materialization.test.ts
 packages/core/src/legacy-format.test.ts
 app/anamnesis/recovery-probe.test.ts
 packages/core/src/schema-migrations.test.ts
