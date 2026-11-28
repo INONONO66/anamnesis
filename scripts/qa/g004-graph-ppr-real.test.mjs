@@ -7,7 +7,7 @@ import { Engine } from '../../packages/core/src/engine.ts';
 import { exportFixedCsr, solveFixedCsr } from '../../packages/core/src/dynamics/ppr.ts';
 const uuid = () => `01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 const hash = v => createHash('sha256').update(v).digest('hex');
-const context = { principal: 'installation', commit_mode: 'receipt', client_binding: uuid() };
+const context = { principal: 'installation', client_binding: uuid() };
 const g = state => ({ id: uuid(), stream: 'extraction', incarnation: hash('g004-real'), state, covered_ingest_seq: 0, created_at: 1, updated_at: 1 });
 
 test('owned Neo4j activation admits an empty graph, rejects uncovered derived proofs, and keeps fixed CSR/PPR available', async () => {

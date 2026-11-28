@@ -7,7 +7,7 @@ import { ExtractionProviderError, type ExtractionProvider } from "../../packages
 import type { InstallationContext } from "../../packages/core/src/store.ts";
 import { Generation, extractionBodyDigest } from "../../packages/protocol/src/extraction.ts";
 
-const context: InstallationContext = { principal: "installation", commit_mode: "auto", client_binding: uuidv7() };
+const context: InstallationContext = { principal: "installation", client_binding: uuidv7() };
 const lineage = { metadata: { origin_role: "user" as const, lineage_mode: "direct" as const, parent_recall_ids: [] }, context };
 const uri = process.env["ANAMNESIS_TEST_NEO4J_URI"];
 const password = process.env["ANAMNESIS_TEST_NEO4J_PASSWORD"];

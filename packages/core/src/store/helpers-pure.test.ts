@@ -6,10 +6,8 @@ import { CANONICAL_DIGEST, StorageContractError, canonicalJson, elementDigest, l
 import { decodeHistoricalElement, nodeProps, recordsToObjects, relProps, toElement } from "./records.ts";
 import { arcIdentity, arcTuple, conductingPartition, topologyExpectations, type TopologyRow } from "./conducting.ts";
 import { type CacheEvidence, cacheExpectations, cacheMatches } from "./hit-cache.ts";
-import { CommitReceiptInput, ReceiptError, ReceiptHit, luceneQuery } from "./receipts.ts";
+import { ReceiptError, luceneQuery } from "./receipts.ts";
 import { policyBody, policySelector, requireInstallation } from "./policy.ts";
-import { ADOPTION_NUMERIC_VERSION } from "../dynamics/adoption-numeric.ts";
-import { replayDynamics } from "../dynamics/state.ts";
 
 const uuid = (n: number) => `018f5b5e-7b1e-7abc-8def-${String(n).padStart(12, "0")}`;
 const hex = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -170,80 +168,25 @@ describe("conducting", () => {
 });
 
 describe("hit-cache", () => {
-  const episode = uuid(1), namespace = uuid(2);
-  const attribution = [{ id: episode, rank: 0, sources: [uuid(3)] }];
-  const hit = (n: number, kind: "exposure" | "recall_hit" | "outcome", t: number): ReceiptHit => {
-    const base = { id: uuid(10 + n), episode_id: episode, operation_id: uuid(20 + n), namespace, idem_key: tupleHash([namespace, episode, kind]), t, attribution, config_version: "g003-dynamics-v1" as const };
-    if (kind === "recall_hit") return { ...base, kind, kappa_eff: 0.5 };
-    if (kind === "outcome") return { ...base, kind, kappa_eff: 0, reward: 0.5, weight: 0.25 };
-    return { ...base, kind, kappa_eff: 0 };
-  };
-  const stored = (h: ReceiptHit, targets = [h.episode_id]): CacheEvidence["hits"][number] => {
-    const body = canonicalJson(h);
-    return { props: { ...h, attribution: canonicalJson(h.attribution), body, body_digest: sha256(body) }, targets };
-  };
-  const evidence = (hits: CacheEvidence["hits"], caches: CacheEvidence["caches"] = []): CacheEvidence => ({ episodes: [{ id: episode, mass: 0.5, ingested_at: 1000 }], hits, caches });
-
-  test("replays valid hits through the dynamics fold, where every event counts but only a recall hit moves the last-hit time", () => {
-    const hits = [hit(1, "exposure", 1500), hit(2, "recall_hit", 2000), hit(3, "outcome", 3000)];
-    const oracle = replayDynamics({ initialMass: 0.5, ingestedAt: 1000, priorRewardSum: 0, priorWeight: 0 }, [
-      { id: uuid(11), at: 1500, kind: "exposure" }, { id: uuid(12), at: 2000, kind: "recall_hit", kappa: 0.5 }, { id: uuid(13), at: 3000, kind: "outcome", reward: 0.5, weight: 0.25 },
-    ]);
-    expect([oracle.hitCount, oracle.lastHit, oracle.weight]).toEqual([3, 2000, 0.25]);
-    const { expected, issues } = cacheExpectations(evidence(hits.map(h => stored(h))));
+  const id = uuid(1), usage = uuid(2);
+  const props = { id: uuid(3), episode_id: id, usage_id: usage, kind: "outcome", credit: -0.1, t: 2000, idem_key: tupleHash([usage, id, "outcome"]) };
+  const evidence: CacheEvidence = { episodes: [{ id, mass: 0.5, ingested_at: 1000 }], hits: [{ props, targets: [id] }], outcomes: [{ usage, t: 2000, reward: -0.5, selection: JSON.stringify([{ id, sources: [id] }]) }], caches: [] };
+  test("cache matches the full fold and exactly one Episode edge", () => {
+    const { expected, issues } = cacheExpectations(evidence);
     expect(issues).toEqual([]);
-    expect(expected).toEqual([{ episode_id: episode, s: oracle.stability, t_last_hit: oracle.lastHit, hit_count: oracle.hitCount, utility_reward_sum: 0.125, utility_weight: oracle.weight,
-      utility: oracle.utility, event_ids: [uuid(11), uuid(12), uuid(13)], config_version: "g003-dynamics-v1", numeric_version: ADOPTION_NUMERIC_VERSION }]);
     const cache = expected[0]!;
-    expect(cacheMatches({ props: cache, targets: [episode] }, cache)).toBe(true);
-    expect(cacheMatches({ props: { ...cache, hit_count: 2 }, targets: [episode] }, cache)).toBe(false);
-    const { numeric_version: _dropped, ...unversioned } = cache;
-    expect(cacheMatches({ props: unversioned, targets: [episode] }, cache)).toBe(false);
-    expect(cacheMatches({ props: cache, targets: [uuid(9)] }, cache)).toBe(false);
-    expect(cacheMatches({ props: cache, targets: [episode, episode] }, cache)).toBe(false);
+    expect(cache).toEqual({ episode_id: id, s: 1.5, t_last_hit: 2000, hit_count: 1, u_anchor: -0.1, u_at: 2000 });
+    expect(cacheMatches({ props: cache, targets: [id] }, cache)).toBe(true);
+    expect(cacheMatches({ props: { ...cache, u_anchor: 0 }, targets: [id] }, cache)).toBe(false);
+    expect(cacheMatches({ props: cache, targets: [id, id] }, cache)).toBe(false);
     expect(cacheMatches(undefined, cache)).toBe(false);
-    expect(cacheExpectations(evidence([]))).toEqual({ expected: [], issues: [] });
   });
-
-  test("an episode with a stale cache row but no hits is still expected, as the empty history", () => {
-    const stale = { episode_id: episode, s: 1, t_last_hit: 0, hit_count: 9, utility_reward_sum: 0, utility_weight: 0, utility: 0, event_ids: [], config_version: "g003-dynamics-v1" as const };
-    const { expected } = cacheExpectations(evidence([], [{ props: stale, targets: [episode] }]));
-    expect(expected).toHaveLength(1);
-    expect(expected[0]).toMatchObject({ episode_id: episode, hit_count: 0, t_last_hit: 1000, event_ids: [] });
-  });
-
-  test("every tampered hit is reported as invalid evidence and excluded from the replay", () => {
-    const good = hit(1, "exposure", 1500);
-    const row = stored(good);
-    const tampered: [string, CacheEvidence["hits"][number]][] = [
-      ["body not json", { ...row, props: { ...row.props, body: "{" } }],
-      ["body not a string", { ...row, props: { ...row.props, body: 42 } }],
-      ["body not a hit", { ...row, props: { ...row.props, body: "null" } }],
-      ["body not canonical", { ...row, props: { ...row.props, body: JSON.stringify({ ...good }) } }],
-      ["digest mismatch", { ...row, props: { ...row.props, body_digest: sha256("x") } }],
-      ["property drift", { ...row, props: { ...row.props, t: 1501 } }],
-      ["attribution drift", { ...row, props: { ...row.props, attribution: "[]" } }],
-      ["no target", { ...row, targets: [] }],
-      ["wrong target", { ...row, targets: [uuid(9)] }],
-      ["unknown episode", stored({ ...good, episode_id: uuid(9), idem_key: tupleHash([namespace, uuid(9), "exposure"]) })],
-      ["idem key drift", stored({ ...good, idem_key: "f".repeat(64) })],
-    ];
-    for (const [label, bad] of tampered) {
-      const { expected, issues } = cacheExpectations(evidence([bad]));
-      expect([label, issues]).toEqual([label, [{ code: "invalid_hit_evidence", id: String(bad.props["id"]) }]]);
-      expect([label, expected]).toEqual([label, []]);
+  test("invalid properties, targets, keys and duplicate evidence cannot rebuild a cache", () => {
+    for (const row of [{ props, targets: [] }, { props, targets: [usage] }, { props: { ...props, idem_key: "0".repeat(64) }, targets: [id] },
+      { props: { ...props, credit: 0.3 }, targets: [id] }]) {
+      expect(cacheExpectations({ ...evidence, hits: [row] })).toEqual({ expected: [], issues: [{ code: "invalid_hit_evidence", id: props.id }] });
     }
-    const duplicateId = stored(hit(1, "recall_hit", 1600));
-    const duplicateKey = stored(hit(2, "exposure", 1700));
-    const { expected, issues } = cacheExpectations(evidence([row, duplicateId, duplicateKey]));
-    expect(issues).toEqual([{ code: "invalid_hit_evidence", id: good.id }, { code: "invalid_hit_evidence", id: uuid(12) }]);
-    expect(expected[0]?.event_ids).toEqual([good.id]);
-  });
-
-  test("a non-syntax failure while decoding propagates instead of being reported as evidence", () => {
-    const row = stored(hit(1, "exposure", 1500));
-    const props = new Proxy(row.props, { get: (target, key) => { if (key === "body") throw new RangeError("boom"); return Reflect.get(target, key); } });
-    expect(() => cacheExpectations(evidence([{ ...row, props }]))).toThrow(new RangeError("boom"));
+    expect(cacheExpectations({ ...evidence, hits: [...evidence.hits, ...evidence.hits] }).issues).toHaveLength(1);
   });
 });
 
@@ -254,17 +197,8 @@ describe("receipts and policy", () => {
     expect(luceneQuery("+-")).toBe("");
   });
 
-  test("CommitReceiptInput needs adopted or reward, and distinct adopted IDs", () => {
-    const base = { operation_id: uuid(1), recall_id: uuid(2) };
-    expect(CommitReceiptInput.parse({ ...base, reward: 0.5 })).toEqual({ ...base, reward: 0.5 });
-    expect(CommitReceiptInput.parse({ ...base, adopted: [uuid(3), uuid(4)] }).adopted).toEqual([uuid(3), uuid(4)]);
-    expect(CommitReceiptInput.parse({ ...base, adopted: [] })).toEqual({ ...base, adopted: [] });
-    expect(CommitReceiptInput.safeParse(base).error?.issues.map(i => i.message)).toEqual(["adopted or reward is required"]);
-    expect(CommitReceiptInput.safeParse({ ...base, adopted: [uuid(3), uuid(3)] }).error?.issues.map(i => i.message)).toEqual(["adopted IDs must be distinct"]);
-  });
-
   test("ReceiptError carries its code in the message and defaults the detail to the code", () => {
-    expect(new ReceiptError("unknown_recall")).toMatchObject({ code: "unknown_recall", message: "unknown_recall: unknown_recall" });
+    expect(new ReceiptError("unknown_usage")).toMatchObject({ code: "unknown_usage", message: "unknown_usage: unknown_usage" });
     expect(new ReceiptError("policy_denied", "unknown_policy").message).toBe("policy_denied: unknown_policy");
   });
 
@@ -277,8 +211,8 @@ describe("receipts and policy", () => {
     expect(policyBody({ ...base, selector: { source: "chat", episode_id: undefined } })).toBe(`{"policy_id":"${uuid(1)}","scope":"content","selector":{"source":"chat"}}`);
     expect(policyBody({ ...base, selector: { source: "chat", episode_id: uuid(2) } })).toBe(`{"policy_id":"${uuid(1)}","scope":"content","selector":{"episode_id":"${uuid(2)}","source":"chat"}}`);
     expect(policyBody({ ...base, selector: { source: "chat" }, action: "deny", principal: "installation", revision: 1, created_at: 5 })).toBe(`{"action":"deny","created_at":5,"policy_id":"${uuid(1)}","principal":"installation","revision":1,"scope":"content","selector":{"source":"chat"}}`);
-    expect(requireInstallation({ principal: "installation", commit_mode: "auto" })).toBeUndefined();
-    expect(() => requireInstallation({ principal: "client" as never, commit_mode: "auto" })).toThrow(new ReceiptError("unauthenticated"));
+    expect(requireInstallation({ principal: "installation" })).toBeUndefined();
+    expect(() => requireInstallation({ principal: "client" as never })).toThrow(new ReceiptError("unauthenticated"));
     expect(() => requireInstallation(undefined as never)).toThrow(new ReceiptError("unauthenticated"));
   });
 });

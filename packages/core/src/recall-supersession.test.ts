@@ -12,7 +12,7 @@ import type { ExtractionProviderInput } from "./extraction.ts";
 
 const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
 if (!uri || !password) throw new Error("owned Neo4j runner required");
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const now = Date.UTC(2030, 0, 1), query = "quokka";
 const older = "The quokka budget is 32k.", newer = "The quokka budget is 40k.";
 const root = await mkdtemp(join(tmpdir(), "anamnesis-recall-supersession-"));
@@ -81,21 +81,21 @@ test("after the invalidation takes effect the replacing Fact carries the superse
   assert(replacing?.kind === "Fact", JSON.stringify(result.results));
   expect(replacing.provenance).toMatchObject({ supersedes: [{ id: facts.a, content: older }], supersedes_redacted: false, warnings: [] });
   expect(primaryIds(result)).not.toContain(facts.a);
-  const receipt = await engine.getReceipt(result.recall_id);
-  expect(receipt?.serving?.candidates.map(candidate => candidate.id)).not.toContain(facts.a);
+  const row = (await admin.executeQuery("MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS selection", { id: result.usage_id })).records[0]!;
+  expect((JSON.parse(row.get("selection")) as { id: string }[]).map(item => item.id)).not.toContain(facts.a);
 }, 120000);
 
-test("a receipt whose primary supersedes a Fact commits through that Fact's source Episodes, under the current policy", async () => {
+test("an outcome requires current access to credited Episodes", async () => {
   const result = await engine.recallHybrid({ query, window: 0, T: Date.parse("2026-09-03T00:00:00Z") }, context);
   const replacing = result.results.find(item => item.id === facts.b);
   assert(replacing?.kind === "Fact" && replacing.provenance.supersedes.map(prior => prior.id).join() === facts.a, JSON.stringify(result.results));
-  const commit = () => engine.commitReceipt({ operation_id: uuidv7(), recall_id: result.recall_id, adopted: [facts.b] }, context);
+  const commit = () => engine.reportOutcome({ idempotency_key: uuidv7(), usage_id: result.usage_id, reward: 1 }, context);
 
   const policy_id = uuidv7();
   await engine.setPolicy({ policy_id, selector: { episode_id: sources.a }, scope: "content" }, context);
   try { await expect(commit()).rejects.toMatchObject({ code: "policy_denied" }); }
   finally { await engine.revokePolicy({ policy_id }, context); }
-  expect(await commit()).toMatchObject({ adopted: [facts.b], applied: true });
+  expect(await commit()).toMatchObject({ reward: 1, applied: true });
 }, 120000);
 
 test("before the invalidation takes effect only the earlier Fact is served", async () => {

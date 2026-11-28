@@ -7,7 +7,7 @@ import { Generation } from "../../packages/protocol/src/extraction.ts";
 
 const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
 if (!uri || !password) throw new Error("owned runner credentials required");
-const context = { principal: "installation", commit_mode: "auto", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const lineage = { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context } as const;
 const provider: ExtractionProvider = {
   model: "contrast-fixture", modelIncarnation: "a".repeat(64),

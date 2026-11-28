@@ -13,7 +13,7 @@ import { renderContext } from "./recall.ts";
 
 const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
 if (!uri || !password) throw new Error("owned Neo4j runner required");
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const now = Date.UTC(2030, 0, 1), query = "wallaby", K = now + 10;
 const root = await mkdtemp(join(tmpdir(), "anamnesis-recall-time-"));
 const provider: EmbeddingProvider = {
@@ -85,8 +85,8 @@ test("a time window serves only items whose time_utc lies inside it", async () =
 
   for (const item of [...result.results, ...result.companions]) expect(Date.parse(item.time.value)).toBeWithin(from, to + 1);
   expect(primaryIds(result).sort()).toEqual([sources.a, sources.b, facts.b].sort());
-  const receipt = await engine.getReceipt(result.recall_id);
-  expect(receipt?.serving?.candidates.map(candidate => candidate.id).sort()).toEqual([sources.a, sources.b, facts.b].sort());
+  const row = (await admin.executeQuery("MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS selection", { id: result.usage_id })).records[0]!;
+  expect((JSON.parse(row.get("selection")) as { id: string }[]).map(item => item.id).sort()).toEqual([sources.a, sources.b, facts.b].sort());
 }, 120000);
 
 test("a window ending after T or starting after its end is rejected as invalid params", async () => {

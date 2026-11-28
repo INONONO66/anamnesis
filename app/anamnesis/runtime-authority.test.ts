@@ -117,7 +117,7 @@ const dockerOutput = async (args: string[]) => (await promisify(execFile)("docke
 const ownedUri = async () => `bolt://127.0.0.1:${(await dockerOutput(["port", OWNED.container, "7687/tcp"])).split(":").at(-1)}`;
 const restoredBinding = async (root: string) => JSON.parse(await readFile(join(root, "authority.json"), "utf8")) as { container: string; uri: string; owner: string };
 const count = async (driver: neo4j.Driver, cypher: string, params: Record<string, unknown> = {}) => (await driver.executeQuery(cypher, params)).records[0]!.get("n") as number;
-const installationContext: InstallationContext = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() };
+const installationContext: InstallationContext = { principal: "installation", client_binding: uuidv7() };
 
 ownedTest("the runtime authority fences the owned container, dumps and reloads it offline, then restarts it on its new port", async () => {
   const parent = join(homedir(), ".cache/anamnesis-qa");

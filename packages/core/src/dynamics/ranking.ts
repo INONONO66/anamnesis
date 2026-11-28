@@ -1,12 +1,10 @@
-export type Result = { id: string; rank: number; sources: string[] };
-export const attributeOutcome = (items: Result[], selected: string[]): Map<string, number> => {
-  const chosen = items.filter((x) => selected.includes(x.id));
-  const denom = chosen.reduce((sum, x) => sum + 1 / (x.rank + 1), 0);
-  const out = new Map<string, number>();
-  for (const item of chosen) for (const source of item.sources) out.set(source, (out.get(source) ?? 0) + (1 / (item.rank + 1) / denom) / item.sources.length);
-  return out;
+export const attributeOutcome = (items: readonly { sources: readonly string[] }[]): Map<string, number> => {
+  const denom = items.reduce((sum, _, j) => sum + 1 / (j + 1), 0);
+  const weights = new Map<string, number>();
+  for (const [j, item] of items.entries()) for (const source of item.sources)
+    weights.set(source, Math.min(1, (weights.get(source) ?? 0) + 1 / (j + 1) / denom / item.sources.length));
+  return weights;
 };
-export const utility = (nu: number, mu0: number, sumWr: number, sumW: number): number => (nu * mu0 + sumWr) / (nu + sumW);
 const weights: Record<string, number> = { vector: 0.25, bm25: 0.25, ppr: 0.30, session: 0.15, identity: 0.05 };
 export const normalizedRrf = (lists: Record<string, { id: string }[]>, id: string, rrfWeights = weights): number => {
   const present = Object.keys(rrfWeights).filter((name) => (lists[name]?.length ?? 0) > 0);

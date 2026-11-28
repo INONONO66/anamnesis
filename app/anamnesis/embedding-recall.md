@@ -112,15 +112,7 @@ failure omits the vector channel with an explicit reason. Graph/index failures
 reject; per-channel timeout degradation is not implemented.
 
 Current Episode/source policy, candidate reads, cached dynamics, bounded prior
-revision provenance, whole-bundle packing and receipt issuance share one Meta
-write barrier. The daemon serial owner writes the response before acknowledging
-another policy command. Receipt attribution is server-derived and includes only
-actual packed primary IDs/ranks and immutable original source IDs. Current
-policy also revalidates captured prior-revision provenance at feedback time.
-Receipts retain response/candidate/query-vector snapshots and context/result/
-selection hashes before delivery. Feedback uses the existing atomic ledger.
-A failed send is not adoption. Auto mode persists the impression but this
-increment does not add asynchronous exposure Hits.
+revision provenance, whole-bundle packing and Usage creation share one Meta write barrier. The daemon protects the response until the socket write settles. Usage stores ordered primaries and original source IDs, plus bound lineage. `report_outcome` revalidates these source Episodes before allocating credit. Socket completion has no durable side effects.
 
 Results include original Episodes from exact-ID, BM25 and session channels,
 and selected-generation Facts from BM25 and vector. Fact results list all
@@ -129,7 +121,7 @@ channels that found them, resolve `DERIVED_FROM` source Episodes, and carry
 on either side by default (maximum eight). Delivered window Episodes are
 optional companions. D44 packing drops the farthest optional companions
 first until exact budget and response-frame caps fit, rewriting the window
-IDs before rendering and receipt hashing. Mandatory contrast companions,
+IDs before rendering and Usage creation. Mandatory contrast companions,
 prior revisions and warnings remain atomic with their primary.
 
 ## Exact budgets and limits
@@ -148,7 +140,7 @@ The default output budget is 65536 UTF-8 bytes; set
 bundles must fit both that budget and the 1 MiB serialized RPC cap, including
 duplicated structured/context fields and reserved envelope space. Final wire
 encoding checks the actual cap again. Zero budget or zero limit yields an empty
-context and a durable, feedback-capable empty receipt.
+context and a durable, empty Usage selection.
 
 ### Operator-installed exact tokenizer (Node)
 
@@ -176,7 +168,7 @@ trusted deterministic operator code is allowed. Pin special-token behavior,
 normalization and all encoder options in the executable, not mutable environment
 or remote data. Empty context must count as zero. Output must be a synchronous,
 nonnegative safe integer; negative, fractional, nonfinite, unsafe, string and
-Promise counts reject without a receipt. No fallback units are allowed.
+Promise counts reject without a Usage. No fallback units are allowed.
 
 Set the server environment variable (not an RPC field):
 

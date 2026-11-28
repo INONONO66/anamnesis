@@ -10,7 +10,7 @@ import { EmbeddingProfile, type EmbeddingProvider } from "./embedding.ts";
 import type { ExtractionProviderInput } from "./extraction.ts";
 import { GenerationReadinessError } from "./store/extraction-store.ts";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const content = "Alice prefers dark mode";
 const model = "activation-coverage-fixture";
 const incarnation = extractionBodyDigest(model);

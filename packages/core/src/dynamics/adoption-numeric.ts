@@ -1,6 +1,6 @@
 /** Fixed-order binary64 contract for persisted Hit accessibility only.
  * No native exp/pow/sqrt, quantization, fuzzy equality or utility rounding.
- * Domain: stability in [1,3650], elapsed days >= 0, kappa in [0,1].
+ * Domain: stability in [1,3650], elapsed days >= 0, kappa in [-1,1].
  * Changing the operation order/iteration counts requires a new version. */
 export const ADOPTION_NUMERIC_VERSION = "binary64-adoption-v1" as const;
 
@@ -41,8 +41,8 @@ function expMinusOne(x: number): number {
 export function adoptionGain(stability: number, elapsedDays: number, kappa: number): number {
   if (!Number.isFinite(stability) || stability < 1 || stability > 3650
     || !Number.isFinite(elapsedDays) || elapsedDays < 0
-    || !Number.isFinite(kappa) || kappa < 0 || kappa > 1) throw new RangeError("invalid adoption numeric domain");
-  if (elapsedDays === 0 || kappa === 0 || stability === 3650) return 0;
+    || !Number.isFinite(kappa) || kappa < -1 || kappa > 1) throw new RangeError("invalid adoption numeric domain");
+  if (elapsedDays === 0 || kappa === 0 || (stability === 3650 && kappa > 0)) return 0;
   const r = 1 / squareRoot(1 + (19 / 81) * elapsedDays / stability);
   return stability * 5 * kappa * expMinusOne(1 - r) / tenthRoot(stability);
 }

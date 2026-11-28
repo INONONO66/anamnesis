@@ -55,7 +55,7 @@ async function fixture(run, configure = async () => ({})) {
     await assert.rejects(stat(root),{code:'ENOENT'});
   }
 }
-const hello = { token:'correct-token',client:'node-test',commit_mode:'receipt',version:1 };
+const hello = { token:'correct-token',client:'node-test',version: 2 };
 const params = { episode:{schema:'anamnesis.original-message/1',time:{value:'2026-09-09T00:00:00Z',precision:'second'},content:'durable Node request',origin:{source:'test',session:'s',actor:'a',record:'r'},mass:1,properties:{}},source_revision:'r1',expected_previous_revision_key:null };
 test('actual Node/socket reports unconfigured providers as disabled', {timeout:15000}, ()=>fixture(async ({client})=>{
   const p=client();
@@ -152,7 +152,7 @@ test('startup refuses a nonempty legacy queue without touching its contents', {t
 });
 test('actual Node/socket handles split u32-be frames and rejects oversize/invalid UTF-8 before decoding', {timeout:15000}, ()=>fixture(async ({client})=>{
   const p=client();
-  assert.equal((await p.frame(encode({jsonrpc:'2.0',id:1,method:'hello',params:hello}),true)).result.version,1);
+  assert.equal((await p.frame(encode({jsonrpc:'2.0',id:1,method:'hello',params:hello}),true)).result.version,2);
   const utf8=Buffer.from([0,0,0,1,0xff]);
   assert.equal((await p.frame(utf8)).error.data.code,'parse_error');
   const oversized=Buffer.alloc(4);oversized.writeUInt32BE(1024*1024+1);
@@ -160,8 +160,8 @@ test('actual Node/socket handles split u32-be frames and rejects oversize/invali
   assert.equal((await p.frame(oversized)).error.data.code,'invalid_request');await closed;
 }));
 test('actual Node/socket rejects version mismatch and repeated hello', {timeout:15000}, ()=>fixture(async ({client})=>{
-  const p=client();assert.equal((await p.request('hello',{...hello,version:2})).error.data.code,'unsupported_version');
-  assert.equal((await p.request('hello',hello)).result.version,1);
+  const p=client();assert.equal((await p.request('hello',{...hello,version:1})).error.data.code,'unsupported_version');
+  assert.equal((await p.request('hello',hello)).result.version,2);
   assert.equal((await p.request('hello',hello)).error.data.code,'already_authenticated');
 }));
 test('actual Node/socket enforces upload ownership, sequence, size, digest and reservations', {timeout:15000}, ()=>fixture(async ({client,root})=>{

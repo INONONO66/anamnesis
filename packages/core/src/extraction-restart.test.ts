@@ -15,7 +15,7 @@ import { ExtractionProviderError, type ExtractionProvider, type ExtractionProvid
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
 import { ExtractionJournal, type ExtractionJournalEntry } from "./store/extraction-journal.ts";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "qa-restart", incarnationA = extractionBodyDigest("qa-restart:prompt-v1"), incarnationB = extractionBodyDigest("qa-restart:prompt-v2");
 const alice = { mention: "Alice", normalized_name: "Alice", entity_kind: "person" };
 const answer = (input: ExtractionProviderInput): unknown => {

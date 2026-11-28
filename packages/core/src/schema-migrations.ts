@@ -1,7 +1,7 @@
 /** Versioned Neo4j schema. A store written before this module carries no
  * `Meta.schema_version` and is treated as version 0; every later change to
  * the retained shape appends one migration here and bumps SCHEMA_VERSION. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface SchemaMigration {
   readonly from: number;
@@ -15,7 +15,7 @@ export interface SchemaMigration {
 }
 
 /** 0 -> 1 only records the version: the DDL in SCHEMA_STATEMENTS is idempotent. */
-export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{ from: 0, to: 1, statements: [] }];
+export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{ from: 0, to: 1, statements: [] }, { from: 1, to: 2, statements: [] }];
 
 export type SchemaMigrationCode = "schema_ahead" | "migration_gap";
 export class SchemaMigrationError extends Error {

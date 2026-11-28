@@ -13,7 +13,7 @@ if (!uri || !password) throw new Error("Isolated test database credentials requi
 const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true });
 const root = await mkdtemp(join(tmpdir(), "episode-derived-"));
 const engine = new Engine({ uri, password, objectsRoot: root });
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const run = async (query: string, params: Record<string, unknown> = {}) =>
   (await driver.executeQuery(query, params)).records.map(record => record.toObject());
 const labels = async (id: string) => (await run("MATCH (e:Episode {id:$id}) RETURN e.room AS room,e.space AS space", { id }))[0];

@@ -2,12 +2,12 @@
 
 Recall is semantically read-only and LLM-free: it never creates memory or
 reinforces accessibility merely by returning context. It does persist a durable
-RecallReceipt control record before delivery (§10). Determinism is conditional
+Usage control record before delivery (§10). Determinism is conditional
 on the captured serving inputs and degradation state, not graph state alone
 (§11). The pipeline below is the normative target; the shipped subset today
 is the Episode exact-ID, BM25 and session channels, Fact BM25 and vector over
 the selected extraction generation, the T/now pin, the D43 policy barrier,
-the D44 budget, the D45 receipt and a bounded PPR solver, each marked under
+the D44 budget, the D62 Usage and a bounded PPR solver, each marked under
 its section as shipped or not shipped. The decided direction is Fact-first
 recall, where Fact vectors in `vec_fact_<profileId>` resolve source Episodes
 through `DERIVED_FROM`; Episodes stay provenance and context (docs/10 D56).
@@ -17,7 +17,7 @@ supersede the affected D40/D42 contracts.
 ```text
   recall(query, session?, T = now, limit = 10, window = 2, budget?, time?, order?, known_by?)
     │
-    ├─ ① pin         recall_id · T · now · R0 · policy_revision · config_version · active[*]
+    ├─ ① pin         usage_id · T · now · R0 · policy_revision · config_version · active[*]
     │
     ├─ ② candidates  vector(64) ── BM25(64) ── session(32) ── identity(anchors + profile 16)
     │                all with visible(T), visible_gen and current policy eligibility
@@ -33,32 +33,31 @@ supersede the affected D40/D42 contracts.
     │
     ├─ ⑧ consistency structural retry/torn (§7); policy barrier → retry/reject, never torn-policy
     │
-    └─ ⑨ response    durable receipt → results[≤ limit] · companions · context_text · diagnostics
-                     (auto mode) → asynchronous audit-only exposure Hits
+    └─ ⑨ response    durable Usage → results[≤ limit] · companions · context_text · diagnostics
 ```
 
 ## 1. Pin
 
-Status — Shipped: `recall_id` (UUIDv7), T defaulting to now, `now`,
+Status — Shipped: `usage_id` (UUIDv7), T defaulting to now, `now`,
 `policy_revision`, `limit`, validated `budget`, session, the `time` window,
 `order` and `known_by` (#269, #270), and one query embedding whose failure
 drops the vector channel. Not shipped: `R0`,
 `active[*]` stream selectors, `config_version`, and the pinned data versions
-row (prompt digest, `grouping_version`, `judge_profile_id`) on the receipt.
+row (prompt digest, `grouping_version`, `judge_profile_id`).
 
 The following are fixed within one request attempt; a consistency retry
 recaptures serving revisions/selectors but preserves the request's T and now.
 
 | Value | Meaning |
 |---|---|
-| `recall_id` | UUIDv7. Key for commit, Hits and logs |
+| `usage_id` | Server UUIDv7 for the final selection, parent lineage and optional explicit outcome |
 | `T` | Snapshot time. Defaults to now. For questions about the past ("what was I doing in 2023") the caller supplies it |
 | `now` | Server ms. Reference for forgetting (docs/04 §4) |
 | `R0` | `structure_revision` at start |
 | `active[*]` | The three stream selectors. A switch mid-request is caught by §7 |
 | `policy_revision` | Current suppression policy, regardless of historical T; checked at delivery and commit |
-| `config_version` | Ranking, prior/calibration, rendering, budget/tokenizer and receipt-retention versions |
-| pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the relation judge profile, and the `embedding_profile_id` behind the vector channel. All are recorded on the receipt (D48, D49, D51) |
+| `config_version` | Ranking, prior/calibration, rendering, budget/tokenizer versions |
+| pinned data versions | The active generation's `fact_language_policy` with its prompt digest and `extractor_profile_id`, the `grouping_version`, the relation judge profile, and the `embedding_profile_id` behind the vector channel. Available versions are returned in diagnostics |
 | request options | Session, `limit`, `window` (0..8), validated `budget`, `time` window, `order`, `known_by`, client mode and authenticated principal |
 | query embedding | One call to the embedding service, on the caller's verbatim query inside the active profile's pinned template. On failure the vector channel is absent |
 
@@ -115,7 +114,7 @@ relationship vectors, Fact session top-2, the Entity/profile identity channel,
 
 Candidate total ≤ 96 + 64 + 96 + 18 = **274**. Every later stage is bounded
 by this number plus the envelope (§6), except separately bounded assembly
-companions and provenance. Policy/control Episodes and RecallReceipt records
+companions and provenance. Policy/control Episodes and Usage records
 are never semantic candidates.
 
 - Active selectors choose generation-scoped indexes before top-k, so hidden
@@ -300,10 +299,7 @@ source Episode IDs); Entity anchors use immutable `m0`. Exact `m(now)` follows
 Episode-only accessibility intentionally refreshes sibling Facts sharing a
 source. The max selects highest retention, not necessarily the most recent
 source; there is no per-Fact selectivity or independent-source inference.
-`U_Fact` is an explicitly coupled source-mean heuristic. Only confirmed
-`recall_hit` adoption changes S and t_last_hit; outcome changes U only.
-Exposure, re_mention and promotion are audit-only for accessibility (D45,
-docs/04). At the defaults the utility multiplier is in [0.75, 1.25].
+`U_Fact` is a source-mean heuristic. Signed outcome credit updates source stability and decaying utility (D62, docs/04). The utility multiplier is in [0.75, 1.25].
 
 `m0 = confidence × prior(sub_kind) × prior(modality)` is immutable for a Fact.
 Confidence measures source/support-faithfulness, not truth. Syntheses require
@@ -388,9 +384,7 @@ source snapshot, under the time-only exception (docs/03 §3).
 The lineage fields are provenance labels only. `echo_state`, `echo_depth`,
 `corroboration_root_count` and `echo_lineage_truncated` never enter
 `relevance`, `mass`, `utility`, `score` or ordering, and a high root count
-never elects a conflict winner (D49). Client-supplied
-sources or ranks are never trusted at commit; the durable receipt is
-authority.
+never elects a conflict winner (D49). Client-supplied sources and ranks are never trusted for credit; the final Usage selection is authoritative.
 
 ### Occurrences and bounded conflict bundles (D46)
 
@@ -403,7 +397,7 @@ grouping and `occurrence_ids`, the raw-65 probe with the 64-peer inspection,
 
 Every original and each occurrence's extracted assertion/provenance is retained
 as a separate immutable Fact, even if semantically duplicate. DERIVED_FROM and
-RELATES_TO preserve those relations; re_mention is optional audit, not a truth
+RELATES_TO preserve those relations; repetition is not a truth
 or confidence boost. Assembly may group **only the bounded ranked candidate
 set**, using a versioned exact key preserving subject, predicate, effective
 time/scope and modality. Unresolved key fields disable grouping; this is not a
@@ -441,9 +435,7 @@ For each prospective primary, complete its conflict bundle **before budget**:
   **or** the raw 65th row exists; then `conflict_total=null`. Otherwise the
   raw probe exhausted all peers, and `conflict_total` is the exact eligible
   count (equal to conflict_included_count). It never counts policy-hidden
-  peers. Internal receipt diagnostics separately record `conflict_inspected`
-  (0..64) and `conflict_has_more`; these raw counts are not ordinary response
-  metadata because they could reveal hidden-peer counts.
+  peers. Raw inspection counts are not ordinary response metadata because they could reveal hidden-peer counts.
 - `conflict_redacted=true` only when a policy-hidden peer was actually
   observed among the inspected 64. Expose no hidden ID/text/count. A false
   redacted flag does not prove no hidden peers exist when truncated. Mandatory
@@ -537,7 +529,7 @@ prospective** context_text with prospective ranks, and count it exactly. Include
 only if the whole text and full serialized RPC response fit their caps; skip
 oversized bundles and consider later ones until `limit` primaries are included
 or candidates end. Never truncate claims, sources, supersedes or contradiction
-warnings to fit. Primary ranks and receipt attribution name only included
+warnings to fit. Primary ranks and Usage attribution name only included
 primaries, never pre-budget candidates. A token tokenizer may merge across
 record boundaries: count the whole prospective string, not a sum of per-item
 estimates. Deduplicated companions are separately bounded and are not additional
@@ -551,7 +543,7 @@ companions with zero relevance and score. D44 packing first tries the full
 window, then drops optional companions farthest-first (after, then before at
 each distance) until the exact byte/token budget, response-frame cap and
 256-companion cap fit. The Fact's `window.before` and `window.after` list only
-delivered IDs before context rendering and receipt hashing. Mandatory contrast
+delivered IDs before context rendering and Usage creation. Mandatory contrast
 companions and warnings are never stripped; if they cannot fit with the primary,
 the whole bundle is skipped. Episode primaries have no window.
 
@@ -560,7 +552,7 @@ UTF-8 encoded length, Unicode scalar count (not UTF-16 code units), or the
 pinned tokenizer's token count. JSON transport escaping, diagnostics and other
 transport fields are excluded from this count but included in the hard **1 MiB
 RPC response** cap. The prospective full response includes `used_budget`,
-effective budget, tokenizer/renderer metadata, recall_id, companions,
+effective budget, tokenizer/renderer metadata, usage_id, companions,
 entities and diagnostics; its UTF-8 length includes duplicated context in
 structured fields and transport escapes. Diagnostics have a hard encoded cap
 of 16 KiB; use bounded numeric counters/enums, never unbounded logs. Reject
@@ -612,7 +604,7 @@ from this enum. Callers may use it for phrasing or provenance filtering.
 ## 7. Consistency — structure_revision
 
 Status — Shipped: the D43 policy revision barrier, pinned at request start
-and rechecked before receipt persistence, with retry and `policy_changed`
+and rechecked before Usage creation, with retry and `policy_changed`
 rejection. Not shipped: the `structure_revision` R0/R1 read, the structural
 retry and `torn` diagnostics.
 
@@ -652,13 +644,10 @@ Structured-only selectors cannot guarantee suppression of unextracted original
 text; report that limitation rather than claiming erasure.
 
 Recall pins policy_revision, checks it again under the serving barrier before
-receipt persistence and response publication, and serializes that publication
+Usage creation and response publication, and serializes that publication
 against policy command acknowledgement. A changed revision retries the whole
 recall once under current policy; another change returns `policy_changed` with
-no context/feedback. Policy checks may never degrade to `torn=true`. Commit
-revalidates current policy against receipt items and sources in its write
-transaction; a changed revision during validation retries/rejects atomically,
-never writes partial feedback. A now-denied receipt cannot authorize Hits.
+no context. Policy checks may never degrade to `torn=true`. `report_outcome` revalidates every credited source in the write transaction; denial prevents both replay and new credit.
 
 Background reconciliation removes denied derived index/cache entries by
 rebuilding; originals remain intact. Revoke does not fabricate Facts suppressed
@@ -670,14 +659,14 @@ suppression; there is no `gc --erase` or GDPR erasure guarantee.
 
 Status — Shipped: vector channel absent on embedding failure or
 `profile_mismatch`, bm25 absent on an empty Lucene query, PPR absent with no
-seeds, policy and receipt failures rejecting without context. Not shipped:
+seeds, policy and Usage write failures rejecting without context. Not shipped:
 per-channel and seed-probe timeouts, envelope timeout and truncation rows,
 `torn`, `conflict_unavailable`, witness-proof rows and the Neo4j cold-start
 wait with empty success.
 
 Nothing degrades into a silent partial result. Retrieval failures drop whole
 channels; required bundle failures skip whole primary bundles; policy and
-receipt failures reject rather than expose unverified context.
+Usage write failures reject rather than expose unverified context.
 
 | Situation | Behavior | diagnostics |
 |---|---|---|
@@ -696,26 +685,13 @@ receipt failures reject rather than expose unverified context.
 | Structural revision mismatch twice | proceed with captured mixed structure | `torn: true` |
 | Policy revision changes twice / policy state unavailable | reject without context | `policy_changed` / `policy_unavailable` |
 | Required conflict completion unavailable | skip affected primary, continue packing | `conflict_unavailable` |
-| Durable receipt write fails | reject without context | `receipt_unavailable` |
-| Neo4j cold start | wait ≤ warmup_wait (20 s), then empty success | `reason: neo4j_unavailable` |
-| Neo4j down | empty success | 〃 |
+| Usage cannot be persisted / Neo4j unavailable | reject without context | `storage_unavailable` |
 
-An unavailable-store empty success has `results: []`, `companions: []`,
-`entities: []`, `context_text: ""`, `used_budget: 0`, `recall_id: null` and
-explicit diagnostics; it conveys no item evidence and cannot be committed.
-Successful available-store recalls, including budget-empty recalls, persist a
-receipt for receipt-level outcomes. Contract, authentication, policy-barrier
-and durability failures are explicit RPC errors, not silent partial success.
-Commit and policy commands return retryable `storage_unavailable` when Neo4j
-is unavailable. Distinguish `policy_unavailable` (required current-policy cache
-missing) and `receipt_unavailable` (receipt persistence failed). No memory
-content, including entities or provenance, is returned without both current
-policy authority and a durable receipt. `recall_id` is the receipt key; there
-is no separate public `receipt_id` field.
+A budget-empty recall still persists a Usage and can receive a verdict. No successful recall has a null Usage ID.
 
 ## 9. Diagnostics and budget
 
-Status — Shipped: `recall_id`, T, now, `policy_revision`, `channels_used`,
+Status — Shipped: `usage_id`, T, now, `policy_revision`, `channels_used`,
 `ppr_used` and the increment name `derived-hybrid-v1`. Not shipped:
 `structure_revision`, `config_version`, `torn`, the `embedding_coverages`
 array, `degree_probe`, `envelope` and `ppr` counters, the timing breakdown
@@ -723,7 +699,7 @@ and the latency targets as measured numbers.
 
 ```json
 {"diagnostics": {
-  "recall_id": "…", "T": 1725000000000, "now": 1725000000123,
+  "usage_id": "…", "T": 1725000000000, "now": 1725000000123,
   "structure_revision": 4021, "policy_revision": 7,
   "config_version": "recall-v1", "torn": false,
   "channels_used": ["vector", "bm25", "session", "identity", "ppr"],
@@ -746,7 +722,7 @@ and the latency targets as measured numbers.
 
 `embedding_profile_id` and `embedding_coverages` are bounded machine values,
 never source text. Whenever recall selects the vector channel, both are
-recorded in diagnostics and on the durable receipt exactly as served. The
+recorded in diagnostics as served. The
 array carries one row per applicable source partition of the active profile:
 always `(episode, 0)`, plus `(extraction, active[extraction])` when an active
 extraction generation exists, so it holds one or two rows, distinct and keyed
@@ -778,11 +754,9 @@ Every applicable row is persisted, including healthy rows and two
 simultaneously blocked rows with different cursors and omission digests; an
 anonymous scalar, or a choice between the Episode and extraction row, is
 invalid. A missing applicable coverage row prevents vector-channel selection
-instead of producing a partial array. The receipt also retains the
-`EmbeddingResolution` and `EmbeddingQualification` identities applicable to
-any source resolved as `RESOLVED_NO_VECTOR` in the delivered set.
+instead of producing a partial array. Usage contains no copy of response diagnostics.
 
-Internal receipt/bench diagnostics record ConductingArc coverage state,
+Internal benchmark diagnostics record ConductingArc coverage state,
 seed/envelope ordered probe rows/counts, stale-row exclusions,
 saturated-source counts and bounded link pool reads, plus witness-cache
 versions and unavailable state. Raw physical counts/IDs can reveal hidden
@@ -800,94 +774,27 @@ channel and seed-probe timeouts of 50 ms and an envelope timeout of 100 ms;
 candidate timeouts drop that channel, seed/envelope timeouts drop PPR.
 The bounded TypeScript PPR loop has no deadline.
 
-## 10. Durable impressions and feedback (D45)
+## 10. Usage and explicit outcomes (D62)
 
-Status — Shipped: the append-only RecallReceipt persisted before delivery,
-`receipt_ttl_ms` expiry, the served `commit {operation_id, recall_id, adopted?, reward?}` RPC with
-`invalid_params` on an empty body, `unknown_recall` and `receipt_expired`, rank-weighted source
-attribution into HitCache retention and utility. Not shipped:
-`selection_digest` with echo lineage, auto-mode `exposure` Hits and the
-EmbeddingResolution identities on the receipt.
+Each successful recall, including an empty result, creates a Usage and returns
+its server-issued usage_id. Usage stores the ordered {id,sources} selection,
+created_at, policy_revision, lineage rows and their selection_digest, and the
+connection binding. A Usage has no TTL or copy of the response or query.
 
-Before context delivery, persist a separate append-only **RecallReceipt**
-control record, keyed by recall_id and bound to the authenticated client. It is
-not a semantic Episode, candidate, embedding input or source of ordinary
-recall. Record the actual included primary IDs and 0-based ranks, companion
-IDs, immutable source snapshots, bounded derived snapshots needed after
-generation GC, selected/absent channels and reasons, candidate/ranking state,
-policy/config/generation versions, effective budget, used_budget, renderer and
-tokenizer versions, and SHA-256 result/context digests. It also stores an
-immutable
-`selection_digest = sha256(RFC-8785(ordered array of at most 64 delivered
-{element_id, root_episode_ids, echo_depth, complete} records))`. That stored
-value is what a later assistant Episode copies into its lineage properties in
-`context_digests`, so lineage never depends on recomputing a selection after
-the feedback window closes (docs/01 §3.3). Original text need not be
-duplicated: its immutable Episode IDs suffice. A write failure prevents
-delivery with a committable recall_id. A failed socket send is delivery-unknown, never adoption;
-record transport status separately and never manufacture a negative label.
-
-Receipts survive restart and remain immutable within a configured explicit
-`receipt_ttl_ms` feedback window (default 3,600,000 ms). `expires_at` is fixed
-as `created_at + receipt_ttl_ms` at creation and exposed to the client;
-`now >= expires_at` rejects commit, including retries, as `receipt_expired`. Unknown
-receipts reject as `unknown_recall`. Expiry permits retention cleanup, not
-silent acceptance. Retained Episode Hit outcome events store exact ranks and
-attribution sufficient to rebuild utility even after receipt expiry.
-
-Auto mode appends audit-only `exposure` for the top **included** three primary
-results after response delivery, through the same policy-checked commit path.
-Failures are reported operationally; they do not change the delivered response.
-Exposure does not change S or t_last_hit. Receipt mode owns the authenticated
-`commit {operation_id, recall_id, adopted?, reward?}` report (served by the
-daemon as `Runtime.commit` → `Engine.commitReceipt`); auto-mode explicit commit is rejected.
-Reward must be finite and in [-1,1], not clamped. Missing reward differs from
-zero: zero is an observed outcome and enters the utility denominator.
-
-At least one of adopted or reward must be present; the wire schema rejects
-an empty body as `invalid_params` before dispatch.
-Adoption IDs must be distinct included primary IDs, not companions or discarded
-items; duplicate IDs and malformed/null fields reject before attribution.
-Adoption is exactly once per recall/source Episode; outcome exactly once per
-recall. Identical retries are no-ops; conflicting reward or attribution on a
-repeated outcome is rejected, never partly applied. The outcome-bearing
-request's `adopted` field is authoritative: present uses that set, absent uses
-the delivered primary set, not an earlier adoption-only call's set. An
-explicitly empty adopted set stays empty. Outcome finalizes its attribution;
-later adoption cannot rewrite it. Invalid IDs, policy denial or conflicting retries reject
-the whole commit before any Hit/cache write.
-
-For selected set J, preserve **original delivered ranks**, not subset ranks:
-
-```text
-  a_j = (1 / (rank_j + 1)) / Σ_{l in J} (1 / (rank_l + 1))
-  b_je = 1 / |sources(j)|                   e in sources(j)
-  w_e = Σ_{j in J, e in sources(j)} a_j · b_je
-  Σ_e w_e = 1                              if J is nonempty
-  U_e = (4 · 0 + Σ_outcomes w_e · reward) / (4 + Σ_outcomes w_e)
-```
-
-Merge shared sources without an extra cap that loses credit. Empty J produces
-no item-attributed outcome Hits but retains the receipt-level outcome.
-For ranks 0 and 1, a = (2/3, 1/3). If their sources are {E1,E2} and {E2},
-w = {E1: 1/3, E2: 2/3}, summing to 1. Reward -1 gives U_E1=-1/13 and
-U_E2=-1/7 from the default prior. This is one whole-recall utility proxy,
-not multiple independent truth labels or causal credit assignments.
-
-Outcome-only never changes accessibility or mass. Adoption plus a negative
-outcome has the same accessibility as adoption-only, with utility determined
-by the weighted mean; compare those cases, not adoption+negative against no
-event. Non-positive reward need not lower U if U was already more negative.
-Only recall_hit uses the capped positive, dimensionless stability formula in
-docs/04, so monotonicity is weak at S_max.
+report_outcome takes {usage_id,idempotency_key,reward}. Both IDs are UUIDv7;
+clamp finite reward to [-1,1] and normalize negative zero. Authorize all source
+Episodes under current policy before accepting or replaying a verdict. Create
+one UsageOutcome and its Episode Hits atomically. Return {reward,applied}; an
+identical normalized retry returns applied:false. A reused key with different
+usage or reward raises idempotency_conflict; another key on the same usage
+raises outcome_already_reported. Missing usage, denied source and unavailable
+storage raise unknown_usage, policy_denied and storage_unavailable respectively.
+Socket completion never writes to the graph.
 
 ## 11. Determinism
 
 Status — Shipped: a deterministic PPR solver with sorted CSR adjacency and
-ID ASC ties, and receipt-level capture of delivered items, budget and policy
-revision. Not shipped: capture of ordered candidate IDs and scores, embedding
-coverage rows, degree-probe rows, envelope state and timeout decisions, so
-receipt replay reconstructs delivery but not the online pipeline.
+ID ASC ties, and durable capture of the ordered selected primaries, their source Episodes and policy revision. Usage does not retain the response or the inputs needed to rerun ranking.
 
 The same **captured serving inputs** produce the same ordered context within
 the pinned numeric/runtime contract (D47, docs/06 §7). Capture query and exact
@@ -913,9 +820,6 @@ changing structure_revision. A revision is therefore **not** a full replay token
 Ordering follows docs/06 §7, including intentional ID DESC envelope truncation
 and ID ASC result ties. PPR has a fixed iteration cap and iterate-delta stop,
 not a deadline. Exact replay injects captured now and inputs rather than
-rerunning an approximate index or timeout race. Receipt replay reconstructs
-what was delivered within bounded retained snapshots; a full online-pipeline
-reproduction additionally requires the pinned candidate/index/cache capture.
-Diagnostics distinguish these replay levels and structural torn results.
-Neither historical replay nor stored receipts permit current-policy bypass
+rerunning an approximate index or timeout race. Such reproduction requires independent candidate/index/cache capture.
+Neither historical replay nor stored Usage permit current-policy bypass
 on ordinary serving. Privileged offline audit is separately controlled.

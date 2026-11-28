@@ -24,13 +24,13 @@ after stored-version selection, without Episode/CAS/topology changes.
 ## Custody and bounds
 
 Successful hello creates a server-random connection binding, independent of the
-caller-provided client label. Receipts issued on that connection retain it and
+caller-provided client label. Usage nodes created on that connection retain it and
 an ordered selection of at most 64 server-computed lineage snapshots. New
 receipt-linked admission requires the same authenticated connection. A new
 connection, even using the same client label/token, cannot reuse a prior
-connection's receipt for a new revision. A future reconnectable capability
+connection's Usage ID for a new revision. A future reconnectable capability
 would require a separate wire contract; client labels are not credentials.
-Installation-bound receipt feedback remains compatible with its existing API.
+`report_outcome` is installation-scoped; lineage admission additionally requires the issuing connection.
 
 Direct lineage has the Episode's own ID as its only root and depth zero.
 Receipt lineage copies each parent's retained selection_digest, pairs/sorts the
@@ -42,11 +42,9 @@ occurs. Current policy checks both delivered sources and snapshot roots before
 admission; unknown/missing, foreign, denied or corrupt parents reject atomically.
 
 Parent creation must precede ingestion. A logical one-ms admission tick permits
-same-wall-clock-ms receipt/remember ordering without sleeps. Receipt TTL controls
-feedback only: a retained expired parent can establish lineage, but a deleted
-parent cannot establish new lineage. Children never depend on later retention.
+same-wall-clock-ms Usage/remember ordering without sleeps. A deleted parent cannot establish new lineage. Existing children retain their copied lineage.
 The row, v2 digest, Episode, revision CAS and session topology commit
-together under the writer fence. Lineage rows are not receipt-TTL data.
+together under the writer fence. Usage and lineage have no TTL.
 
 Both explicit lineage and metadata-free admission require the database.
 On database-outcome uncertainty, the immutable stored revision

@@ -1,11 +1,12 @@
+import { attributeOutcome } from "../dynamics/ranking.ts";
 import { replayDynamics, type DynamicsEvent } from "../dynamics/state.ts";
-import { ADOPTION_NUMERIC_VERSION } from "../dynamics/adoption-numeric.ts";
-import { sha256, canonicalJson, tupleHash } from "./digest.ts";
-import { type HitCacheIssue, type HitCache, ReceiptHit } from "./receipts.ts";
+import { canonicalJson, tupleHash } from "./digest.ts";
+import { type HitCacheIssue, type HitCache, OutcomeHit, Usage } from "./receipts.ts";
 
 export type CacheEvidence = {
   episodes: { id: string; mass: number; ingested_at: number }[];
   hits: { props: Record<string, unknown>; targets: string[] }[];
+  outcomes: { usage: string; reward: number; t: number; selection: string | null }[];
   caches: { props: HitCache; targets: string[] }[];
 };
 /** One statement observes ledger, originals and cache together. No write locks or
@@ -21,58 +22,44 @@ export const CACHE_EVIDENCE = `
     OPTIONAL MATCH (c)-[:CACHE_OF]->(target)
     WITH c, collect(coalesce(target.id, 'invalid-target')) AS targets
     RETURN collect({props:properties(c), targets:targets}) AS caches }
-  RETURN episodes, hits, caches`;
+  CALL (hits) { MATCH (o:UsageOutcome) WHERE $ids IS NULL OR o.usage_id IN [h IN hits | h.props.usage_id]
+    OPTIONAL MATCH (u:Usage {usage_id:o.usage_id})
+    RETURN collect({usage:o.usage_id,reward:o.reward,t:o.reported_at,selection:u.selection}) AS outcomes }
+  RETURN episodes, hits, caches, outcomes`;
 
-type Hit = ReturnType<typeof ReceiptHit.parse>;
-type HitRow = CacheEvidence["hits"][number];
-/** The stored hit decoded and checked against its own digest, properties, target and idem key; null when any check fails. Throws non-syntax errors. */
-function decodeHit(row: HitRow, evidence: CacheEvidence, ids: Set<string>, keys: Set<string>): Hit | null {
-  let decoded: unknown;
-  try { decoded = typeof row.props["body"] === "string" ? JSON.parse(row.props["body"]) : null; }
-  catch (error) {
-    if (!(error instanceof SyntaxError)) throw error;
-    return null;
-  }
-  const parsed = ReceiptHit.safeParse(decoded);
-  const hit = parsed.success ? parsed.data : null;
-  const body = hit ? canonicalJson(hit) : "";
-  if (!hit || row.props["body"] !== body || row.props["body_digest"] !== sha256(body)
-    || Object.entries(hit).some(([key, value]) => key !== "attribution" && row.props[key] !== value)
-    || row.props["attribution"] !== canonicalJson(hit.attribution)
-    || row.targets.length !== 1 || row.targets[0] !== hit.episode_id
-    || !evidence.episodes.some((e) => e.id === hit.episode_id)
-    || hit.idem_key !== tupleHash([hit.namespace, hit.episode_id, hit.kind])
-    || ids.has(hit.id) || keys.has(hit.idem_key)) return null;
-  return hit;
-}
-function hitEvent(hit: Hit): DynamicsEvent {
-  if (hit.kind === "recall_hit") return { id: hit.id, at: hit.t, kind: hit.kind, kappa: hit.kappa_eff };
-  if (hit.kind === "outcome") return { id: hit.id, at: hit.t, kind: hit.kind, reward: hit.reward, weight: hit.weight };
-  return { id: hit.id, at: hit.t, kind: hit.kind };
-}
 export function cacheExpectations(evidence: CacheEvidence): { expected: HitCache[]; issues: HitCacheIssue[] } {
   const issues: HitCacheIssue[] = [];
   const events = new Map<string, DynamicsEvent[]>();
   const ids = new Set<string>();
   const keys = new Set<string>();
+  const shares = new Map<string, { credit: number; t: number }>();
+  const episodes = new Set(evidence.episodes.map(e => e.id));
+  evidence.outcomes.forEach(outcome => {
+    try {
+      const selection = Usage.shape.selection.parse(JSON.parse(outcome.selection ?? "null"));
+      if (!Number.isFinite(outcome.reward) || Math.abs(outcome.reward) > 1) throw new RangeError("reward");
+      for (const [id, weight] of attributeOutcome(selection)) if (episodes.has(id))
+        shares.set(tupleHash([outcome.usage,id,"outcome"]), { credit: 0.2 * outcome.reward * weight, t: outcome.t });
+    } catch { issues.push({ code: "invalid_hit_evidence", id: outcome.usage }); }
+  });
   for (const row of evidence.hits) {
-    const hit = decodeHit(row, evidence, ids, keys);
-    if (!hit) { issues.push({ code: "invalid_hit_evidence", id: String(row.props["id"]) }); continue; }
+    const hit = OutcomeHit.safeParse(row.props).data;
+    const share = hit && shares.get(hit.idem_key);
+    if (!hit || !share || share.credit !== hit.credit || share.t !== hit.t || row.targets.length !== 1 || row.targets[0] !== hit.episode_id || !evidence.episodes.some(e => e.id === hit.episode_id)
+      || hit.idem_key !== tupleHash([hit.usage_id, hit.episode_id, hit.kind]) || ids.has(hit.id) || keys.has(hit.idem_key)) { issues.push({ code: "invalid_hit_evidence", id: String(row.props["id"]) }); continue; }
     ids.add(hit.id); keys.add(hit.idem_key);
     const bucket = events.get(hit.episode_id) ?? [];
-    bucket.push(hitEvent(hit));
+    bucket.push({ id: hit.id, at: hit.t, credit: hit.credit });
     events.set(hit.episode_id, bucket);
   }
+  if (!issues.length) shares.forEach((_, key) => { if (!keys.has(key)) issues.push({ code: "invalid_hit_evidence", id: key }); });
   const expected: HitCache[] = [];
   for (const episode of evidence.episodes) {
-    if (!events.has(episode.id) && !evidence.caches.some((row) => row.props.episode_id === episode.id)) continue;
-    const history = events.get(episode.id) ?? [];
-    const state = replayDynamics({ initialMass: episode.mass, ingestedAt: episode.ingested_at, priorRewardSum: 0, priorWeight: 0 }, history);
-    const ordered = [...history].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    const sum = ordered.reduce((total, event) => total + (event.kind === "outcome" ? event.weight * event.reward : 0), 0);
-    expected.push({ episode_id: episode.id, s: state.stability, t_last_hit: state.lastHit,
-      hit_count: state.hitCount, utility_reward_sum: sum, utility_weight: state.weight,
-      utility: state.utility, event_ids: state.eventIds, config_version: "g003-dynamics-v1", numeric_version: ADOPTION_NUMERIC_VERSION });
+    const history = events.get(episode.id);
+    if (!history) continue;
+    const state = replayDynamics({ initialMass: episode.mass, ingestedAt: episode.ingested_at }, history);
+    expected.push({ episode_id: episode.id, s: state.stability, t_last_hit: state.lastHit, hit_count: state.hitCount,
+      u_anchor: state.utility, u_at: state.at });
   }
   return { expected, issues };
 }

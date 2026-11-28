@@ -12,7 +12,7 @@ import type { ExtractionProviderInput } from "./extraction.ts";
 
 const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
 if (!uri || !password) throw new Error("owned Neo4j runner required");
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const DAY = 86400000, now = Date.UTC(2030, 0, 1);
 let clock = now;
 const root = await mkdtemp(join(tmpdir(), "anamnesis-recall-fact-score-"));
@@ -61,7 +61,7 @@ beforeAll(async () => {
   await engine.init(); await engine.claimWriterEpoch();
   await engine.store.createExtractionGeneration(generation, context);
   for (const key of ["vectorHit", "idle", "adopted", "unembedded"] as const) {
-    const episode = await engine.remember({ content: contents[key], time: { value: "2026-09-01T00:00:00Z", precision: "second" },
+    const episode = await engine.remember({ content: contents[key], time: { value: key === "adopted" ? "2026-08-31T00:00:00Z" : "2026-09-01T00:00:00Z", precision: "second" },
       origin: { source: root, session: "fact-score", actor: "user", record: key } },
     { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context });
     sources[key] = episode.id;
@@ -77,13 +77,10 @@ beforeAll(async () => {
 afterAll(async () => { await engine.close(); await admin.close(); await rm(root, { recursive: true }); });
 
 async function scored(result: RpcRecallResult, keys: Key[]) {
-  const candidates = (await engine.getReceipt(result.recall_id))?.serving?.candidates ?? [];
-  const dump = JSON.stringify(Object.fromEntries(keys.map(key => [key, candidates.find(candidate => candidate.id === facts[key]) ?? null])));
+  const dump = JSON.stringify(result.results);
   const items = keys.map(key => {
     const item = result.results.find(candidate => candidate.id === facts[key]);
     assert(item?.kind === "Fact", `${key} missing from results: ${dump}`);
-    const candidate = candidates.find(row => row.id === item.id);
-    assert.deepEqual(candidate, { id: item.id, score: item.score, relevance: item.relevance, mass: item.mass, utility: item.utility }, dump);
     return item;
   });
   return { items, dump };
@@ -102,11 +99,12 @@ test("a vector rank-1 Fact outranks an equal-confidence Fact absent from that ch
   assert.ok(result.results.indexOf(vectorHit) < result.results.indexOf(unembedded), dump);
 }, 120000);
 
-test("a Fact whose source Episode was adopted has strictly higher mass and score", async () => {
+test("a positive outcome on a source Episode increases its Fact's mass and score above its peer", async () => {
   clock = now + 365 * DAY;
-  const identity = await engine.recallHybrid({ query: sources.adopted, window: 0, limit: 64 }, context);
-  expect(identity.results.map(item => item.id)).toContain(sources.adopted);
-  const commit = await engine.commitReceipt({ operation_id: uuidv7(), recall_id: identity.recall_id, adopted: [sources.adopted] }, context);
+  const from = Date.parse("2026-08-31T00:00:00Z");
+  const selected = await engine.recallHybrid({ query: "kestrel delta", time: { from, to: from + DAY - 1 }, window: 0, limit: 1 }, context);
+  expect(selected.results.map(item => item.sources)).toEqual([[sources.adopted]]);
+  const commit = await engine.reportOutcome({ idempotency_key: uuidv7(), usage_id: selected.usage_id, reward: 1 }, context);
   expect(commit.applied).toBe(true);
   clock = now + 730 * DAY;
 

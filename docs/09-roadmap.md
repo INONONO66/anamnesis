@@ -27,7 +27,7 @@ runs:
   request session), Fact vector over `vec_fact_<profileId>` (LIMIT 64) and
   Fact BM25, both for the selected extraction generation (D56). On top of the
   candidates: the T/now pin, the policy-revision barrier (D43), the exact
-  byte budget with a durable RecallReceipt (D44, D45), hit-cache retention
+  byte budget with a durable Usage (D44, D62), hit-cache retention
   and utility in originals ranking, a real PPR solver
   (`packages/core/src/dynamics/ppr.ts`) seeded uniformly from the
   candidates over seed-adjacent ConductingArc (LIMIT 1024), the first
@@ -38,10 +38,7 @@ runs:
   `provenance.supersedes` under the invalidating Fact (#263), the Fact score
   with `A_Fact` over `sigma_fact = 30` and the source-mean `U_Fact` (#267),
   the `time` window and `order` (#269), and `known_by` with `ingested_at`
-  on INVALIDATES links (#270, D57), and the `commit` RPC served on the wire
-  for receipt-mode sessions (`RpcCommitParams` with `operation_id` →
-  `Runtime.commit` → `Engine.commitReceipt`, `hello.capabilities.commit:true`)
-  (#266).
+  on INVALIDATES links (#270, D57). D62 replaces `commit` (#266) with an installation-scoped `report_outcome` RPC.
 - The Fact embedding lane: vectors on separate `Embedding_<profileId>`
   nodes keyed by `fact_id`, one `vec_fact_<profileId>` index per profile,
   the `embedding-state.json` ledger (version 2, `facts`) and the
@@ -68,7 +65,7 @@ runs:
   with direct lineage, rooms in parallel and each room in order, resuming
   from a line cursor per room file. The earlier in-repository collectors and
   raw-source adapters are gone.
-- Policy RPCs (D43), budget (D44), the Hit ledger with receipts (D45),
+- Policy RPCs (D43), budget (D44), the outcome Hit ledger (D62),
   conflict bundles (D46), `backup` / `restore`, the authority snapshot and
   the hit cache.
 - `ops projection write`: read-only markdown per Entity of valid Facts
@@ -122,10 +119,7 @@ Episodes, Facts, Entities, links, vectors and the coverage cursors.
 
 ## v0.1 — originals, forgetting, search
 
-**Goal**: Episodes go in and come out; what a caller confirms it adopted is
-reinforced, and everything else is forgotten on its own clock. Merely being
-returned is not adoption: exposure is audit-only and moves nothing (D45). No
-derived layer, no PPR.
+**Goal**: Episodes go in and come out; their stability and utility change only on an explicit signed outcome. Forgetting is evaluated on the server clock.
 
 | Area | Contents | Docs |
 |---|---|---|
@@ -138,8 +132,8 @@ derived layer, no PPR.
 | durability | write ordering, `gc --objects` safety, `anamnesis backup` / `restore`, `verify` | 01 §9 |
 | time | Episode `time_*`, `ingested_at`, snapshot(T) filter (Episodes only) | 03 §1, §3 |
 | forgetting | m₀, hit-cache initialization, R(t,S), Hit node + HIT_OF, S update, replay, `rebuild --hit-cache` | 04 §1–5, §7 |
-| commit path | `commitHits` with producers 1 (receipt `recall_hit` + `outcome` through the served `commit` RPC, idempotent on `operation_id`) and 2 (exposure); only `recall_hit` moves `S`/`t_last_hit`, the rest audit-only; `hello.commit_mode`; idem_key | 04 §5–6, 05 §10 |
-| receipts | append-only RecallReceipt control records (delivered IDs, snapshots, versions, channels, ranking state, digests); exact-once adoption per source and outcome per recall; explicit TTL, expired commit rejected, absence never a label | 05, D45 |
+| report | `report_outcome` allocates a signed verdict by final rank and source. One Hit per credited Episode. | 04 §5–6, 05 §10 |
+| Usage | Immutable ordered primary selection, source attribution and bound lineage. One optional UsageOutcome, no TTL. | 05, D62 |
 | utility | per-Episode `U` from rank-weighted outcome attribution (`Σ w_e = 1`), rebuildable utility cache, `(1 + β·U)` in score; zero and missing distinct | 04, D45 |
 | policy | `policy.set` / `policy.revoke` RPCs, `anamnesis.memory-policy/1` Episodes, active-policy cache rebuild, policy-revision barrier, `content` scope over raw text, control Episodes excluded from search, structured-selector limit reported | 02, D43 |
 | budget | `budget {unit, limit, tokenizer_id?}`; exact byte and scalar counts; pinned tokenizer or reject; greedy whole-bundle packing over deterministic `context_text`; `used_budget`; hard response byte cap retained | 05, D44 |
@@ -149,7 +143,7 @@ derived layer, no PPR.
 | CI | forgetting fixtures, utility attribution fixtures, budget exactness fixtures, policy suppression fixtures, receipt exact-once fixtures, RRF invariance, ordering conventions, contract schema tests | 04 §10, 07 §6, 08 |
 
 **Exit criteria**: ingest one month of the author's own conversation logs →
-recall p50 < 50 ms (no PPR) → after 100 receipt adoptions, `verify` shows
+recall p50 < 50 ms (no PPR) → after 100 outcome reports, `verify` shows
 ledger ↔ cache agreement for both the hit cache and the utility cache → 50
 remembers with Neo4j killed → drain verified after recovery → `backup` then
 `restore` into an empty directory passes `verify --scope all`.
@@ -158,7 +152,7 @@ remembers with Neo4j killed → drain verified after recovery → `backup` then
 reading):
 
 - policy: after `policy.set` with `content` scope, the next ordinary recall
-  returns nothing from the matched Episode text and the receipt carries the
+  returns nothing from the matched Episode text and the Usage carries the
   new policy revision; a recall that straddles the barrier is retried or
   rejected, never served torn; `policy.revoke` restores serving without
   fabricating anything that was never extracted; `rebuild` reproduces the
@@ -166,12 +160,9 @@ reading):
 - budget: `used_budget` equals the exact byte, scalar or pinned-token count
   of the returned `context_text`; an unknown `tokenizer_id` is rejected; a
   bundle that doesn't fit is skipped and a later one may still be included;
-  `limit: 0` yields empty results; the receipt's primary IDs equal the
+  `limit: 0` yields empty results; the Usage selection IDs equal the
   included primaries.
-- receipts and utility: a second adoption of the same source under the same
-  recall is a no-op, a conflicting second outcome is rejected, an expired
-  receipt rejects commit, and `S`/`t_last_hit` are bit-identical before and
-  after an outcome-only commit.
+- outcomes: replaying the same normalized verdict is a no-op; another key or a conflicting reward is rejected. Signed credits change utility and stability within their bounds.
 - lineage: an assistant Episode declaring receipts writes a lineage row whose
   roots and depth match its parents, overflow past 16 roots or depth 8 sets
   `complete=false` and `unknown`, and an echoed claim leaves `S`, `m`, utility
@@ -196,7 +187,6 @@ retrieves along relationships.
 | derived layer | `:Fact`, `:Entity`, physical generation labels/indexes, global `ingest_seq`, BUILDING/ACTIVE/CATCHING_UP/INACTIVE/RETIRED lifecycle, strict sequencer, dual-tail Outbox, atomic cutover and caught-up rollback | 01 §1, §4–5 |
 | extraction | target sequencer: claim LLM (self-contained content, required `content_language`, modality, confidence as source-faithfulness, literal `evidence_quote` and derived span) → bounded generation-index reads → judge LLM → revalidated write with quote and UTF-8 boundary checks; explicit same-speaker/same-time/same-scope self-correction only, otherwise CONTRASTS; one immutable Fact per source occurrence, no "duplicate → no Fact"; policy applied before any derived write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5, §5.1, D46, D47, D48 |
 | grouping | bounded `speaker_key` / `subject_keys` / `predicate_text` / closed `scope` / `time_key` fields, `anamnesis.duplicate-group/1` key, irreflexive symmetric non-transitive `known_conflict`; local comparison only, never a global identity claim | 02 §5.3, 05 §6, D49 |
-| commit path | producer 3 (re_mention), audit-only for accessibility | 04 §6 |
 | maintenance | hourly job: `m_cache`; ConductingArc retained-graph rebuild/verify and complete generation publication. **Precedes PPR** — no missing-cache native fallback | 01 §5, 02 §6 |
 | time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |
 | forgetting | Fact mass `m = m₀ · max_e R(age_e, s_e · σ_fact)` over bounded sources, σ_fact a dimensionless stability multiplier; κ conservation and merging, sources resolution | 04 §3, §5 |
@@ -224,13 +214,12 @@ measured.
 | Area | Contents | Docs |
 |---|---|---|
 | dreaming | bounded ID/arc export → disposable networkless GDS Leiden → pinned community generation, exact-support synthesis, profile cache | 02 §7 |
-| commit path | producer 4 (promotion) | 04 §6 |
 | derived layer | `:Community`, cross-stream-compatible HAS_MEMBER, extraction-cutover disable/rebuild rule, majority visibility, Community mass | 01 §4, 03 §3, 04 §3 |
 | recall | identity channel, `entities` block | 05 §2 |
 | embedding | profile swap procedure (new property and indexes, backfill, current-watermark barrier, switch, gc), `EmbeddingQualification` records and the production-activation block | 01 §4, D51 |
 | qualification (trigger-gated) | production multilingual, extractor, judge and index qualification packages: each ships only when its own machine-validated manifests and predeclared thresholds exist. Until then the v0.2 defaults stay development-scoped and reversible | 07, D48, D51 |
 | GDS | envelope validation overlap@20, 100k/1M scale benches, health report | 07 §3–5 |
-| calibration | receipts and outcome events → refit DECAY, FACTOR, a, b, c, γ, β, ν, μ₀, σ_fact, modality and sub_kind priors, role weights, RRF weights; ablate each default; prior changes ship as a new derived generation with a recorded prior version; config version tags | 04 §9, D47 |
+| calibration | Usage and outcome events → refit DECAY, FACTOR, a, b, c, γ, β, σ_fact, modality and sub_kind priors, role weights, RRF weights; ablate each default; prior changes ship as a new derived generation with a recorded prior version; config version tags | 04 §9, D47 |
 
 **Exit criteria**: on a 1M synthetic graph p50 < 100 ms / p95 < 250 ms,
 envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in

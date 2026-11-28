@@ -9,7 +9,7 @@ import type { ExtractionProviderInput } from "./extraction.ts";
 import { canonicalExtractionBody, extractionBodyDigest, ExtractionModelOutput, type Generation } from "../../protocol/src/extraction.ts";
 
 const binding = uuidv7();
-const context = { principal: "installation", commit_mode: "receipt", client_binding: binding } as const;
+const context = { principal: "installation", client_binding: binding } as const;
 const sentences = ["Alice prefers dark mode", "Alice prefers compact dark mode"];
 const text = sentences.join(". ") + ".";
 const spans = sentences.map(sentence => { const start = Buffer.byteLength(text.slice(0, text.indexOf(sentence))); return { start, end: start + Buffer.byteLength(sentence) }; });

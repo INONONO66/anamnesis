@@ -12,7 +12,7 @@ import { validateSemanticClaim } from '../../packages/protocol/src/semantic-clai
 import { NON_IDENTITY_GRAPH_EDGES_QUERY, NON_IDENTITY_GRAPH_NODES_QUERY } from './graph-snapshot.ts';
 const uuid = () => `01900000-0000-7000-8000-${randomBytes(6).toString('hex')}`;
 const hash = text => createHash('sha256').update(text).digest('hex');
-const context = { principal: 'installation', commit_mode: 'receipt' };
+const context = { principal: 'installation' };
 const options = { uri: process.env.ANAMNESIS_TEST_NEO4J_URI, password: process.env.ANAMNESIS_TEST_NEO4J_PASSWORD };
 const ok = reply => { assert.ok(reply.result, JSON.stringify(reply)); return reply.result; };
 function peer(path) {
@@ -71,7 +71,7 @@ async function daemon(root, fixedNow) {
     await ready; p = peer(root + '/anamnesis.sock');
     const unauthenticated = await p.request('status');
     assert.equal(unauthenticated.error.data.code, 'unauthenticated');
-    const hello = ok(await p.request('hello', { version: 1, client: 'lineage-qa', token: 'lineage-owned-token', commit_mode: 'receipt' }));
+    const hello = ok(await p.request('hello', { version: 2, client: 'lineage-qa', token: 'lineage-owned-token' }));
     assert.equal(hello.capabilities.extraction, false);
     console.log(JSON.stringify({ checkpoint: 'authenticated-node-uds', pid: child.pid, hello }));
     return { ...p, close };
@@ -99,9 +99,7 @@ test('bounded lineage contract boundary, independent identities and unchanged le
       time: legacyParams.episode.time, payload_hash: null, previous_revision_key: null };
     // Explicit reconstructed insertion-ordered storage fixture, not a migration.
     await query('MATCH (e:Episode {id:$id}) SET e.digest=$digest REMOVE e.digest_format', { id: legacy.id, digest: hash(JSON.stringify(legacyBody)) });
-    const receipt = await engine.issueReceipt({ recall_id: uuid(), primary_ids: [legacy.id], receipt_ttl_ms: 1 }, context);
-    now = receipt.expires_at;
-    await assert.rejects(engine.commitReceipt({ operation_id: uuid(), recall_id: receipt.recall_id, adopted: [legacy.id] }, context), /receipt_expired/);
+    const receipt = await engine.recallHybrid({ query: legacy.id, limit: 1 }, context);
     const beforeLegacyRetry = await snapshot();
     assert.deepEqual(await engine.remember(coreInput(legacyParams)), { id: legacy.id, created: false });
     assert.deepEqual(await snapshot(), beforeLegacyRetry);
@@ -118,7 +116,7 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     const recall = ok(await runtime.request('recall', { query: '', session: { source: root, session: root }, limit: 64 }));
     ok(await runtime.request('status')); // Serial barrier includes the publication audit.
     assert.ok(recall.results.some(row => row.id === canonical.id));
-    const retainedReceipt = (await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: recall.recall_id }))[0];
+    const retainedReceipt = (await query('MATCH (r:Usage {usage_id:$id}) RETURN r.lineage_selection AS body', { id: recall.usage_id }))[0];
     console.log(JSON.stringify({ checkpoint: 'baseline-independent-query', historical: legacy, historical_digest: hash(JSON.stringify(legacyBody)), expired_parent: receipt,
       canonical, canonical_row: canonicalRow, recall, retained_receipt: JSON.parse(retainedReceipt.body), topology: await query('MATCH (a:Episode)-[:NEXT_EPISODE]->(b:Episode) RETURN a.id AS from,b.id AS to ORDER BY from,to') }));
     await runtime.close(); runtime = await daemon(root);
@@ -129,12 +127,12 @@ test('bounded lineage contract boundary, independent identities and unchanged le
 
     await t.test('RED: old insertion-ordered retry ignores newly supplied expired-parent lineage', async () => {
       const before = await snapshot();
-      const reply = await runtime.request('remember', { ...legacyParams, origin_role: 'assistant', lineage_mode: 'receipts', parent_recall_ids: [receipt.recall_id] });
+      const reply = await runtime.request('remember', { ...legacyParams, origin_role: 'assistant', lineage_mode: 'receipts', parent_recall_ids: [receipt.usage_id] });
       console.log(JSON.stringify({ checkpoint: 'legacy-expired-parent-retry', reply, graph_unchanged: JSON.stringify(before) === JSON.stringify(await snapshot()) }));
       assert.equal(ok(reply).id, legacy.id);
     });
     await t.test('RED: canonical-current retry ignores newly supplied lineage before delivery binding', async () => {
-      const reply = await runtime.request('remember', { ...canonicalParams, origin_role: 'assistant', lineage_mode: 'receipts', parent_recall_ids: [receipt.recall_id] });
+      const reply = await runtime.request('remember', { ...canonicalParams, origin_role: 'assistant', lineage_mode: 'receipts', parent_recall_ids: [receipt.usage_id] });
       console.log(JSON.stringify({ checkpoint: 'canonical-retry-lineage', reply }));
       assert.equal(ok(reply).id, canonical.id);
     });
@@ -156,13 +154,15 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     const row = async id => (await query('MATCH (e:Episode {id:$id}) RETURN properties(e) AS e', { id }))[0];
     const lineageBody = e => ({ episode_id: e.id, lineage_mode: e.lineage_mode, parent_recall_ids: e.parent_recall_ids,
       context_digests: e.context_digests, root_episode_ids: e.root_episode_ids, echo_depth: e.echo_depth, complete: e.lineage_complete });
-    const receiptRow = async id => JSON.parse((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id }))[0].body);
+    const receiptRow = async id => {
+      const { digest, body } = (await query('MATCH (u:Usage {usage_id:$id}) RETURN u.lineage_selection AS body,u.selection_digest AS digest', { id }))[0];
+      return { lineage_selection: JSON.parse(body), selection_digest: digest };
+    };
     const remember = async p => ok(await runtime.request('remember', p));
     const recallOne = async id => {
       const result = ok(await runtime.request('recall', { query: id, limit: 1 }));
       assert.deepEqual(result.results.map(item => item.id), [id]);
-      ok(await runtime.request('status'));
-      assert.equal((await query('MATCH (r:RecallTransport {recall_id:$id}) RETURN r.state AS state', { id: result.recall_id }))[0].state, 'local_complete');
+      assert.deepEqual((await receiptRow(result.usage_id)).lineage_selection.map(row => row.element_id), [id]);
       return result;
     };
     const reject = async (p, code, client = runtime) => {
@@ -174,10 +174,10 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     await reject({ ...params('missing-lineage-schema'), origin_role: 'assistant' }, 'invalid_params');
     const badWire = await runtime.request('remember', { ...direct('bad-wire'), episode_digest_version: 2 });
     assert.equal(typeof badWire.id, 'number'); assert.equal(badWire.error.data.code, 'invalid_params');
-    await reject(linked('unknown-parent', [uuid()]), 'unknown_recall');
+    await reject(linked('unknown-parent', [uuid()]), 'unknown_usage');
     await reject(linked('parent-cap-overflow', Array.from({ length: 5 }, uuid)), 'invalid_params');
-    await reject(linked('duplicate-parent', [receipt.recall_id, receipt.recall_id]), 'invalid_params');
-    await reject(linked('unbound-legacy-parent', [receipt.recall_id]), 'lineage_binding_mismatch');
+    await reject(linked('duplicate-parent', [receipt.usage_id, receipt.usage_id]), 'invalid_params');
+    await reject(linked('unbound-legacy-parent', [receipt.usage_id]), 'lineage_binding_mismatch');
     for (const old of [legacyParams, canonicalParams]) {
       const before = await snapshot();
       assert.equal((await remember({ ...old, origin_role: null, lineage_mode: 'nonsense', parent_recall_ids: 17 })).created, false);
@@ -198,36 +198,36 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     assert.equal(sourceRow.e.digest, hash(canonicalExtractionBody({ episode_digest_version: 2,
       schema: sourceParams.episode.schema, content: sourceParams.episode.content, properties: sourceParams.episode.properties,
       time: sourceParams.episode.time, payload_hash: null, previous_revision_key: null, origin_role: 'user', lineage_digest: sourceRow.e.lineage_digest })));
-    const parent = await recallOne(source.id), parentBody = await receiptRow(parent.recall_id);
+    const parent = await recallOne(source.id), parentBody = await receiptRow(parent.usage_id);
     assert.equal(parentBody.selection_digest, hash(canonicalExtractionBody(parentBody.lineage_selection)));
     assert.deepEqual(parentBody.lineage_selection, [{ element_id: source.id, root_episode_ids: [source.id], echo_depth: 0, complete: true }]);
-    const childParams = linked('child', [parent.recall_id]), child = await remember(childParams), childRow = await row(child.id);
+    const childParams = linked('child', [parent.usage_id]), child = await remember(childParams), childRow = await row(child.id);
     assert.deepEqual(ok(await runtime.request('remember', childParams)), { ...child, created: false });
-    assert.deepEqual(lineageBody(childRow.e), { episode_id: child.id, lineage_mode: 'receipts', parent_recall_ids: [parent.recall_id],
+    assert.deepEqual(lineageBody(childRow.e), { episode_id: child.id, lineage_mode: 'receipts', parent_recall_ids: [parent.usage_id],
       context_digests: [parentBody.selection_digest], root_episode_ids: [source.id], echo_depth: 1, complete: true });
     const foreign = peer(root + '/anamnesis.sock');
     try {
-      ok(await foreign.request('hello', { version: 1, client: 'lineage-qa', token: 'lineage-owned-token', commit_mode: 'receipt' }));
-      await reject(linked('foreign', [parent.recall_id]), 'lineage_binding_mismatch', foreign);
+      ok(await foreign.request('hello', { version: 2, client: 'lineage-qa', token: 'lineage-owned-token' }));
+      await reject(linked('foreign', [parent.usage_id]), 'lineage_binding_mismatch', foreign);
     } finally { foreign.socket.destroy(); }
     await reject({ ...childParams, origin_role: 'user' }, 'revision_conflict');
     await reject({ ...childParams, parent_recall_ids: [uuid()] }, 'revision_conflict');
     await reject({ ...childParams, episode: { ...childParams.episode, content: 'changed' } }, 'revision_conflict');
     // Legacy originals remain readable but their receipt snapshots cannot invent independence.
     const legacyRecall = await recallOne(legacy.id);
-    const unknown = await remember(linked('unknown-ancestry', [legacyRecall.recall_id]));
+    const unknown = await remember(linked('unknown-ancestry', [legacyRecall.usage_id]));
     assert.deepEqual((await row(unknown.id)).e.root_episode_ids, []);
     assert.equal((await row(unknown.id)).e.lineage_complete, false);
     const policy = uuid(); ok(await runtime.request('policy.set', { policy_id: policy, selector: { episode_id: source.id }, scope: 'content' }));
-    await reject(linked('denied-parent', [parent.recall_id]), 'policy_denied');
+    await reject(linked('denied-parent', [parent.usage_id]), 'policy_denied');
     // A retained child source is allowed, but its separately materialized root is denied.
     const childRecall = await recallOne(child.id);
-    await reject(linked('denied-root', [childRecall.recall_id]), 'policy_denied');
+    await reject(linked('denied-root', [childRecall.usage_id]), 'policy_denied');
     ok(await runtime.request('policy.revoke', { policy_id: policy }));
     // Four receipts and their digests are sorted as pairs, roots are a distinct union.
     const moreParents = [parent];
     for (let i = 0; i < 3; i++) moreParents.push(await recallOne((await remember(direct('union-' + i))).id));
-    const reverse = moreParents.map(p => p.recall_id).sort().reverse();
+    const reverse = moreParents.map(p => p.usage_id).sort().reverse();
     const unionParams = linked('union4', reverse), union = await remember(unionParams), unionRow = await row(union.id);
     const sortedParents = [...reverse].sort();
     assert.deepEqual(unionRow.e.parent_recall_ids, sortedParents);
@@ -243,12 +243,12 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     const capParent = ok(await runtime.request('recall', { query: '', session: { source: root, session: capSession }, limit: 64 }));
     ok(await runtime.request('status'));
     assert.equal(capParent.results.length, 17);
-    const cap = await remember(linked('roots-overflow', [capParent.recall_id])), capRow = await row(cap.id);
+    const cap = await remember(linked('roots-overflow', [capParent.usage_id])), capRow = await row(cap.id);
     assert.deepEqual(capRow.e.root_episode_ids, capRoots.sort().slice(0, 16)); assert.equal(capRow.e.lineage_complete, false);
     let depthSource = source;
     for (let depth = 1; depth <= 9; depth++) {
       const parent = await recallOne(depthSource.id);
-      depthSource = await remember(linked('depth-' + depth, [parent.recall_id]));
+      depthSource = await remember(linked('depth-' + depth, [parent.usage_id]));
       const retained = await row(depthSource.id);
       assert.equal(retained.e.echo_depth, Math.min(depth, 8));
       assert.equal(retained.e.lineage_complete, depth <= 8);
@@ -260,18 +260,17 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     const revised = await remember(revisedParams);
     const expiredNow = Date.now() + 7200000;
     await runtime.close(); runtime = await daemon(root, expiredNow);
-    assert.ok(parent.expires_at <= expiredNow, 'parent receipt must be expired under the restarted daemon clock');
     const beforeExpiredWireRetry = await snapshot();
     assert.equal((await remember(childParams)).id, child.id);
     assert.equal((await remember(revisedParams)).id, revised.id);
     assert.deepEqual(await snapshot(), beforeExpiredWireRetry);
-    console.log(JSON.stringify({ checkpoint: 'node-uds-expired-parent-exact-current-and-historical-retries', parent_expires_at: parent.expires_at, daemon_now: expiredNow }));
-    await query('MATCH (r:RecallReceipt {recall_id:$id}) DETACH DELETE r', { id: parent.recall_id });
+    console.log(JSON.stringify({ checkpoint: 'node-uds-expired-parent-exact-current-and-historical-retries', parent_usage: parent.usage_id, daemon_now: expiredNow }));
+    await query('MATCH (r:Usage {usage_id:$id}) DETACH DELETE r', { id: parent.usage_id });
     const beforeRetry = await snapshot();
     assert.equal((await remember(childParams)).id, child.id);
     assert.equal((await remember(revisedParams)).id, revised.id);
     assert.deepEqual(await snapshot(), beforeRetry);
-    await reject(linked('deleted-parent', [parent.recall_id]), 'unknown_recall');
+    await reject(linked('deleted-parent', [parent.usage_id]), 'unknown_usage');
     await runtime.close(); runtime = await daemon(root);
     const afterRestart = await snapshot();
     assert.equal((await remember(childParams)).created, false); assert.equal((await remember(revisedParams)).created, false);
@@ -290,16 +289,15 @@ test('bounded lineage contract boundary, independent identities and unchanged le
     await runtime.close(); runtime = undefined;
     now = Date.now();
     const custody = { ...context, client_binding: randomUUID() };
-    const ttlParent = await engine.issueReceipt({ recall_id: uuid(), primary_ids: [source.id], receipt_ttl_ms: 1 }, custody);
-    now = ttlParent.expires_at;
-    await assert.rejects(engine.commitReceipt({ operation_id: uuid(), recall_id: ttlParent.recall_id, adopted: [source.id] }, custody), { code: 'receipt_expired' });
-    const expiredInput = params('retained-expired'), admission = { metadata: { origin_role: 'assistant', lineage_mode: 'receipts', parent_recall_ids: [ttlParent.recall_id] }, context: custody };
+    const ttlParent = await engine.recallHybrid({ query: source.id, limit: 1 }, custody);
+    now += 86400000;
+    const expiredInput = params('retained-expired'), admission = { metadata: { origin_role: 'assistant', lineage_mode: 'receipts', parent_recall_ids: [ttlParent.usage_id] }, context: custody };
     const expiredChild = await engine.remember(coreInput(expiredInput), admission);
     assert.equal((await row(expiredChild.id)).e.lineage_complete, true);
     const priorExpiryRetry = await snapshot();
     assert.equal((await engine.remember(coreInput(expiredInput), admission)).created, false);
     assert.deepEqual(await snapshot(), priorExpiryRetry);
-    await query('MATCH (r:RecallReceipt {recall_id:$id}) DETACH DELETE r', { id: ttlParent.recall_id });
+    await query('MATCH (r:Usage {usage_id:$id}) DETACH DELETE r', { id: ttlParent.usage_id });
     const beforeMissingRetry = await snapshot();
     assert.equal((await engine.remember(coreInput(expiredInput), admission)).created, false);
     assert.deepEqual(await snapshot(), beforeMissingRetry);

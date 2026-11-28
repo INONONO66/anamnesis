@@ -45,13 +45,13 @@ export class RpcClient {
     socket.on("error", error => this.fail(error));
     socket.on("close", () => this.fail(new Error("RPC connection closed")));
   }
-  static async connect(target: string | RpcTcpTarget, token: string, mode: "auto" | "receipt" = "receipt", timing?: TimingSink): Promise<RpcClient> {
+  static async connect(target: string | RpcTcpTarget, token: string, timing?: TimingSink): Promise<RpcClient> {
     const socket = typeof target === "string" ? connect(target) : connect({ host: target.host, port: target.port });
     const client = new RpcClient(socket, timing);
     try {
       await once(socket, "connect", { signal: AbortSignal.timeout(5000) });
       if (typeof target !== "string") { socket.setNoDelay(true); socket.write(frame({ auth: { bearer: target.token } })); }
-      await client.request("hello", { token, client: "node-client", commit_mode: mode, version: 1 });
+      await client.request("hello", { token, client: "node-client", version: 2 });
       return client;
     } catch (error) { socket.destroy(); throw error; }
   }

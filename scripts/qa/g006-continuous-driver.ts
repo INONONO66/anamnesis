@@ -80,7 +80,7 @@ export function createContinuousDriver(start: typeof startProcess, evidence: str
     },
     async subscribe() {
       if (!root || !token) throw new Error("continuous driver daemon is not launched");
-      client = await observed("hello", () => RpcClient.connect(socketPath(root!), token!, "receipt", timing));
+      client = await observed("hello", () => RpcClient.connect(socketPath(root!), token!, timing));
       const value = await status();
       const owner = JSON.parse(await readFile(join(root, "owner/owner.json"), "utf8"));
       if (owner.pid !== daemon?.pid || owner.nonce !== value.fs_epoch) throw new Error("continuous daemon owner mismatch");

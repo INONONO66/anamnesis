@@ -30,9 +30,9 @@ async function query(text: string, params: Record<string, string | number> = {})
   return (await admin.executeQuery(text, params)).records.map(record => record.toObject());
 }
 
-const receiptContext: InstallationContext = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() };
-const autoContext: InstallationContext = { principal: "installation", commit_mode: "auto", client_binding: uuidv7() };
-const unbound: InstallationContext = { principal: "installation", commit_mode: "receipt" };
+const receiptContext: InstallationContext = { principal: "installation", client_binding: uuidv7() };
+const autoContext: InstallationContext = { principal: "installation", client_binding: uuidv7() };
+const unbound: InstallationContext = { principal: "installation" };
 
 interface Delivery { record: string; revision?: string; predecessor?: string | null; content?: string }
 function delivery({ record, revision = "v1", predecessor = null, content }: Delivery): RpcRememberParams {
@@ -138,9 +138,9 @@ dbTest("a live boot reports ready, commits deliveries once, and answers re-deliv
   const installation = installationAt(await freshRoot());
   const { runtime, lanes } = await boot(installation);
   expect(lanes).toEqual(["identity"]);
-  expect(runtime.capabilities).toMatchObject({ recall: true, commit: true, policy: true, extraction: false, embeddings: false });
+  expect(runtime.capabilities).toMatchObject({ recall: true, policy: true, extraction: false, embeddings: false });
   const ready = await runtime.status(0, false);
-  expect(ready).toMatchObject({ version: 1, state: "ready", storage: "available", data_incarnation: installation.incarnation, fs_epoch: installation.epoch,
+  expect(ready).toMatchObject({ version: 2, state: "ready", storage: "available", data_incarnation: installation.incarnation, fs_epoch: installation.epoch,
     outbox_pending: 0, workers: { extraction: { state: "unconfigured" }, embedding: { pending: 0, drained_total: 0, quarantined_total: 0, last_error: null } } });
   expect((await runtime.status(3, true))).toMatchObject({ state: "stopping", queue: { pending: 3 } });
 
@@ -344,9 +344,7 @@ dbTest("storage-backed RPCs pass through to the engine under the caller's custod
   const recall = await runtime.recall({ query: "quick brown fox", limit: 5 }, autoContext);
   expect(recall.results.map(item => item.id)).toEqual([committed.id]);
   expect(recall).toMatchObject({ renderer: "canonical-jsonl-v1", diagnostics: { pipeline: "derived-hybrid-v1", vector_reason: "not_configured", channels_used: ["bm25"] } });
-  expect(await runtime.recordRecallTransport({ recall_id: recall.recall_id, state: "local_complete" }, autoContext))
-    .toMatchObject({ recall_id: recall.recall_id, state: "local_complete", principal: "installation", commit_mode: "auto", boundary: "node-write-callback-v1" });
-  expect(await runtime.exposeRecall(recall.recall_id, autoContext)).toEqual({ applied: 1 });
+  expect(await runtime.reportOutcome({ usage_id: recall.usage_id, idempotency_key: uuidv7(), reward: -1 }, autoContext)).toEqual({ reward: -1, applied: true });
   await expect(runtime.graphEnvelope({ seed_ids: [committed.id] }, receiptContext)).rejects.toMatchObject({ code: "degree_probe_unavailable" });
   await expect(runtime.graphEnvelope({ seed_ids: [committed.id], T: 1_757_376_000_000 }, receiptContext)).rejects.toMatchObject({ code: "degree_probe_unavailable" });
   const policyId = uuidv7();

@@ -8,7 +8,7 @@ import { Engine } from "./engine.ts";
 import type { ExtractionProviderInput } from "./extraction.ts";
 import { extractionBodyDigest } from "../../protocol/src/extraction.ts";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const text = "Alice prefers dark mode. Alice prefers compact dark mode.";
 const evidence = { start: 0, end: Buffer.byteLength(text), text };
 const model = "qa-fidelity-judge";

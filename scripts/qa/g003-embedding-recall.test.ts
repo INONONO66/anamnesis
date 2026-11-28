@@ -3,31 +3,18 @@ import { startProcess } from "./runtime-scenarios.ts";
 import { Engine } from "../../packages/core/src/engine.ts";
 import { EmbeddingError, EmbeddingProfile, embeddingProfileId, type EmbeddingProvider } from "../../packages/core/src/embedding.ts";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
-import { pathToFileURL } from "node:url";
 import neo4j from "neo4j-driver";
 import { extractionBodyDigest, type Generation } from "../../packages/protocol/src/index.ts";
 import type { ExtractionProviderInput } from "../../packages/core/src/extraction.ts";
 
 test("configured provider, recovery, hybrid recall and exact budgets on real Node/UDS/Neo4j", async () => {
-  const root = await mkdtemp("/tmp/g003-receipt-contract-");
-  try {
-    const bundle = `${root}/receipt-digest.mjs`;
-    const build = await startProcess(process.execPath, ["build", "packages/core/src/receipt-digest.ts", "--target=node", "--outfile", bundle], { deadlineMs: 30000 }).done;
-    expect(build.timedOut).toBe(false); expect(build.code).toBe(0);
-    const hash = async () => createHash("sha256").update(await readFile(bundle)).digest("hex");
-    const before = await hash();
-    const child = startProcess("node", ["app/anamnesis/embedding-recall.surface.mjs"], {
-      deadlineMs: 120000, onOutput: text => process.stdout.write(text),
-      env: { ...process.env, RECEIPT_DIGEST_BUNDLE: pathToFileURL(bundle).href },
-    });
-    const result = await child.done;
-    expect(await hash()).toBe(before);
-    expect(result.timedOut).toBe(false); expect(result.code).toBe(0);
-  } finally { await rm(root, { recursive: true }); }
+  const result = await startProcess("node", ["app/anamnesis/embedding-recall.surface.mjs"], {
+    deadlineMs: 120000, onOutput: text => process.stdout.write(text),
+  }).done;
+  expect(result.timedOut).toBe(false); expect(result.code).toBe(0);
 }, 130000);
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: Bun.randomUUIDv7() } as const;
+const context = { principal: "installation", client_binding: Bun.randomUUIDv7() } as const;
 const extractionProvider = {
   model: "g003-fact-fixture", modelIncarnation: extractionBodyDigest("g003-fact-fixture"),
   async extract(input: ExtractionProviderInput) {
@@ -112,21 +99,21 @@ test("model-scoped vectors and an event-gated policy race preserve server-derive
     release!();
     const result = await recalling;
     expect(result.results).toEqual([]);
-    expect((await first.getReceipt(result.recall_id))!.primaries).toEqual([]);
+    expect((await driver.executeQuery("MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS s", {id:result.usage_id})).records[0]!.get("s")).toBe("[]");
     await first.revokePolicy({ policy_id: policy.policy_id }, context);
     const allowed = await first.recallHybrid({ query: "", limit: 1 }, context);
     expect(allowed.results[0]!.sources).toEqual([sourceId]);
     // In-process receipt feedback on a real Fact-primary hybrid-recall receipt.
     const replayed = await first.recallHybrid({ query: "", limit: 1 }, context);
     expect(replayed.results.map(item => item.id)).toEqual([id]);
-    const adoption = { operation_id: Bun.randomUUIDv7(), recall_id: replayed.recall_id, adopted: [id], reward: 0 };
-    expect((await first.commitReceipt(adoption, context)).applied).toBe(true);
-    expect((await first.commitReceipt(adoption, context)).applied).toBe(false);
-    expect((await driver.executeQuery("MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n", { id: replayed.recall_id })).records[0]!.get("n")).toBe(2);
+    const adoption = { idempotency_key: Bun.randomUUIDv7(), usage_id: replayed.usage_id, reward: 0 };
+    expect((await first.reportOutcome(adoption, context)).applied).toBe(true);
+    expect((await first.reportOutcome(adoption, context)).applied).toBe(false);
+    expect((await driver.executeQuery("MATCH (h:Hit {usage_id:$id}) RETURN count(h) AS n", { id: replayed.usage_id })).records[0]!.get("n")).toBe(1);
     await first.setPolicy({ ...policy, policy_id: Bun.randomUUIDv7() }, context);
-    const feedback = { operation_id: Bun.randomUUIDv7(), recall_id: allowed.recall_id, adopted: [id], reward: 1 };
-    await expect(first.commitReceipt(feedback, context)).rejects.toThrow("policy_denied");
-    const hits = await driver.executeQuery("MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n", { id: allowed.recall_id });
+    const feedback = { idempotency_key: Bun.randomUUIDv7(), usage_id: allowed.usage_id, reward: 1 };
+    await expect(first.reportOutcome(feedback, context)).rejects.toThrow("policy_denied");
+    const hits = await driver.executeQuery("MATCH (h:Hit {usage_id:$id}) RETURN count(h) AS n", { id: allowed.usage_id });
     expect(hits.records[0]!.get("n")).toBe(0);
   } finally { release?.(); await first.close(); await second.close(); await driver.close(); await rm(root, { recursive: true }); }
 }, 60000);

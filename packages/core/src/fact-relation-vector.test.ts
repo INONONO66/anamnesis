@@ -9,7 +9,7 @@ import { Engine } from "./engine.ts";
 import { EmbeddingError, EmbeddingProfile, embeddingProfileId, type EmbeddingProvider } from "./embedding.ts";
 import { ExtractionProviderError, type ExtractionProviderInput } from "./extraction.ts";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "qa-relation-vector", incarnation = extractionBodyDigest(model);
 const lo = { mention: "LO", normalized_name: "LO", entity_kind: "person" };
 const profile = EmbeddingProfile.parse({ model: "relation-vector-fixture", model_incarnation: "c".repeat(64), dimensions: 2,

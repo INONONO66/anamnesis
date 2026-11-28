@@ -54,7 +54,7 @@ Entity, Community and Link it is **derived**.
 
 These are temporal/generation predicates only. Ordinary serving additionally
 requires `allowed_now(x)` under the current pinned `policy_revision` (D43).
-Policy/control Episodes and RecallReceipt records are never memory candidates
+Policy/control Episodes and Usage records are never memory candidates
 or conductors. `T` cannot restore a currently denied original or derived item;
 confidence and low mass cannot substitute for policy/validity checks.
 
@@ -99,7 +99,7 @@ separate witness row. Request-time Entity queries run against the activated
 generation and compare only `visible_from_utc <= T`; they do not re-read the
 marker, because activation already proved it for every mentioned Entity.
 Echo lineage adds nothing to this axis:
-`echo_depth`, roots and receipt times are operational provenance and never
+`echo_depth`, roots and Usage timestamps are operational provenance and never
 supply or shift a Fact's event time or its visibility at `T` (D49). There is no cache keyed by an arbitrary
 request `T`; the request supplies `T` and compares `visible_from_utc`
 (docs/01 §3.2, §7).
@@ -287,7 +287,7 @@ engine actually asks is "what was the world like then"; "what did the system
 know then" is a debugging question.
 
 Debugging uses `Episode.ingested_at`, generation integers, Hit server time and
-durable RecallReceipt impressions (D45, D47). Serving reads
+durable Usage records (D62). Serving reads
 `ingested_at` in two places. The recall `known_by` parameter
 ([05-recall](05-recall.md) §1) is a single `ingested_at <= known_by`
 predicate over Episodes, Facts and INVALIDATES links, no interval axis and no
@@ -297,11 +297,7 @@ Fact accessibility A_Fact over its source Episodes).
 D57 records it as a narrow exception to D4, not a reversal. A structural
 revision log alone cannot reconstruct a result: policy/config versions, selected channels,
 candidate/index/cache state, degradation decisions, mass/utility reads, `now`
-and exact output budgeting also matter. Receipts capture bounded source/result
-snapshots and ranking evidence, not a complete historical database. Their
-explicit retention window bounds feedback acceptance, not semantic validity;
-missing or expired feedback is never a negative utility label. Current policy
-still governs ordinary historical recall and feedback after a restart.
+and exact output budgeting also matter. Usage captures the final ordered source attribution. An unreported Usage is missing data. Current policy still governs historical recall and outcome acceptance after restart.
 
 ## 7. Cypher sketch
 

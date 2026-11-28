@@ -23,10 +23,9 @@ export { ExtractionJournal, type ExtractionJournalEntry } from "./store/extracti
 export { replayDynamics } from "./dynamics/state.ts";
 export { solvePpr, exportFixedCsr, solveFixedCsr } from "./dynamics/ppr.ts";
 export type { FixedCsr } from "./dynamics/ppr.ts";
-export type { DynamicsEvent, DynamicsInput, DynamicsState } from "./dynamics/state.ts";
+export type { DynamicsEvent } from "./dynamics/state.ts";
 export type { ReplayOptions } from "./journal.ts";
 export { type InstallationContext } from "./store/policy.ts";
-export { RecallTransportInput, CommitReceiptInput } from "./store/receipts.ts";
 export { ObjectStore } from "./objects.ts";
 export { RecallError, type Tokenizers } from "./recall.ts";
 export { ExtractionScheduler, type ExtractionScope, type ExtractionTurn } from "./extraction-scheduler.ts";

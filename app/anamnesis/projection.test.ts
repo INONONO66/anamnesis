@@ -31,7 +31,7 @@ test("the projection method answers over the daemon socket and ops projection wr
   let client: { request(method: string, params: unknown): Promise<any>; close(): Promise<void> } | undefined;
   try {
     await listening;
-    client = await RpcClient.connect(`${root}/anamnesis.sock`, token, "receipt");
+    client = await RpcClient.connect(`${root}/anamnesis.sock`, token);
     expect((await client!.request("status", {})).capabilities.projection).toBe(true);
     const snapshot = await client!.request("projection", { T: "2029-01-01T00:00:00Z" });
     expect(snapshot).toMatchObject({ T: "2029-01-01T00:00:00.000Z", entities: [] });

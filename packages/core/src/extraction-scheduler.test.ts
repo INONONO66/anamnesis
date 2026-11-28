@@ -13,7 +13,7 @@ import type { ExtractionJournalEntry } from "./store/extraction-journal.ts";
 import type { MaterializationStateEntry } from "./store/materialization-state.ts";
 import type { ModelTask } from "@anamnesis/protocol";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "qa-scheduler", incarnation = extractionBodyDigest(model);
 
 const alice = { mention: "Alice", normalized_name: "Alice", entity_kind: "person" };

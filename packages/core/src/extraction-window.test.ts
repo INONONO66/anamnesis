@@ -10,7 +10,7 @@ import { ExtractionScheduler, type ExtractionSchedulerOptions } from "./extracti
 import { ExtractionProviderError, type ExtractionProviderInput } from "./extraction.ts";
 import type { ExtractionJournalEntry } from "./store/extraction-journal.ts";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "qa-window", incarnation = extractionBodyDigest(model);
 const clock = () => 1800000000000;
 const claims = (text: string) => [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text },

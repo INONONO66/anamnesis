@@ -14,11 +14,7 @@ assert.ok(uri && password, 'isolated graph credentials required');
 const root = await mkdtemp('/tmp/g003-hybrid-'), token = randomUUID();
 const uuid = () => { const hex = randomUUID().replaceAll('-', ''), time = Date.now().toString(16).padStart(12, '0'); return `${time.slice(0,8)}-${time.slice(8)}-7${hex.slice(13,16)}-8${hex.slice(17,20)}-${hex.slice(20)}`; };
 const sha256 = text => createHash('sha256').update(text).digest('hex');
-// The release surface consumes the same generated projection and canonical
-// serializer as the producer; no second receipt contract is maintained here.
-const digestContract = process.env.RECEIPT_DIGEST_BUNDLE ? await import(process.env.RECEIPT_DIGEST_BUNDLE) : null;
-assert.ok(digestContract, 'authoritative receipt digest contract required');
-const { receiptBodyDigestInput, canonicalReceiptJson: canonical } = digestContract;
+
 const profile = { model: 'deterministic-wiring-fixture-v1', model_incarnation: 'a'.repeat(64), dimensions: 3,
   document_prefix: 'document: ', query_prefix: 'query: ', max_input_bytes: 65536, norm: 'unit_l2', norm_tolerance: 0.001 };
 const extraction = { model: 'surface-extraction-fixture', model_incarnation: 'b'.repeat(64) };
@@ -200,24 +196,11 @@ try {
   assert.deepEqual(contextRecords(hybrid).map(item => item.id).sort(),
     [...hybrid.results, ...hybrid.companions].map(item => item.id).sort());
   assert.equal(hybrid.used_budget, Buffer.byteLength(hybrid.context_text));
-  const storedReceipt = (await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: hybrid.recall_id }))[0];
-  assert.ok(storedReceipt, 'durable receipt exists before response consumption');
-  const receipt = JSON.parse(storedReceipt.body);
-  assert.deepEqual(receipt.primary_ids, hybrid.results.map(item => item.id)); assert.deepEqual(receipt.serving.response, hybrid);
-  assert.deepEqual(receipt.primaries.find(item => item.id === aFact)?.sources, [a.id]);
-  assert.equal(receipt.serving.response.diagnostics.embedding_profile_id, recovered.profile_id);
-  assert.equal(receipt.serving.context_digest, sha256(hybrid.context_text));
-  assert.equal(receipt.serving.result_digest, sha256(canonical({ results: hybrid.results, companions: hybrid.companions })));
-  const persistedSelection = receipt.lineage_selection ?? receipt.primaries.map(item => ({ element_id: item.id, root_episode_ids: item.sources, echo_depth: 0, complete: true }));
-  const selectionBytes = canonical(persistedSelection);
-  assert.equal(receipt.selection_digest, sha256(selectionBytes));
-  const bodyBytes = canonical(receiptBodyDigestInput(receipt));
-  assert.equal(receipt.body_digest, sha256(bodyBytes));
-  assert.equal(canonical(JSON.parse(JSON.stringify(receipt))), canonical(receipt));
-  assert.equal(canonical(receiptBodyDigestInput(JSON.parse(JSON.stringify(receipt)))), bodyBytes);
-  log('receipt-canonical-bytes', { selection_bytes: selectionBytes, body_bytes: bodyBytes, selection_hex: Buffer.from(selectionBytes).toString('hex'), body_hex: Buffer.from(bodyBytes).toString('hex') });
-  log('receipt-hashes', { body_digest: receipt.body_digest, selection_digest: receipt.selection_digest,
-    context_digest: receipt.serving.context_digest, result_digest: receipt.serving.result_digest, input_digest: recovered.input_digest });
+  const usageRow = async () => (await query('MATCH (u:Usage {usage_id:$id}) RETURN properties(u) AS p', { id: hybrid.usage_id }))[0].p;
+  const usage = await usageRow();
+  assert.deepEqual(Object.keys(usage).sort(), ['usage_id','created_at','policy_revision','selection','selection_digest','client_binding','lineage_selection'].sort());
+  assert.deepEqual(JSON.parse(usage.selection), hybrid.results.map(({id,sources}) => ({id,sources})));
+  assert.equal(usage.selection_digest, sha256(usage.lineage_selection));
   for (const unit of ['utf8_bytes', 'unicode_scalars']) {
     const limit = unit === 'utf8_bytes' ? Buffer.byteLength(hybrid.context_text) : [...hybrid.context_text].length;
     const exact = await client.request('recall', { ...request, budget: { unit, limit } });
@@ -228,7 +211,7 @@ try {
     const zeroCalls = calls;
     const zero = await client.request('recall', { ...request, budget: { unit, limit: 0 } });
     assert.deepEqual([zero.results,zero.companions,zero.context_text,zero.used_budget], [[],[],'',0]); assert.equal(calls, zeroCalls);
-    assert.ok((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r', { id: zero.recall_id }))[0]);
+    assert.ok((await query('MATCH (r:Usage {usage_id:$id}) RETURN r', { id: zero.usage_id }))[0]);
   }
   await assert.rejects(client.request('recall', { ...request, budget: { unit: 'tokens', limit: 10, tokenizer_id: 'unknown-v1@sha256:'+'f'.repeat(64) } }), { code: 'invalid_budget' });
   const identity = await client.request('recall', { query: b.id, limit: 10 });
@@ -237,8 +220,8 @@ try {
   assert.equal(degraded.diagnostics.vector_reason, 'provider_rejected'); assert.ok(!degraded.diagnostics.channels_used.includes('vector'));
   assert.ok(degraded.results.some(item => item.id === a.id || item.id === aFact));
   mode = 'ok';
-  // Receipt mode appends no exposure Hits, and the wire `commit` report is deferred.
-  assert.equal((await query('MATCH (h:Hit {namespace:$id}) RETURN count(h) AS n', { id: hybrid.recall_id }))[0].n, 0);
+  // Publication itself carries no credit.
+  assert.equal((await query('MATCH (h:Hit {usage_id:$id}) RETURN count(h) AS n', { id: hybrid.usage_id }))[0].n, 0);
   const policy = { policy_id: uuid(), selector: { episode_id: a.id }, scope: 'content' };
   await client.request('policy.set', policy);
   const denied = await client.request('recall', request); assert.ok(!denied.results.some(item => item.id === a.id || item.id === aFact));
@@ -294,7 +277,7 @@ try {
   // a's first failure was dropped from the ledger by its later success; no attempt row survives in the graph.
   assert.ok(!(await ledgerAttempts()).some(item => item.operation_id === failedRequest.operation_id));
   assert.deepEqual(await client.request('embedding.status', { operation_id: failedRequest.operation_id }), { state: 'unknown', operation_id: failedRequest.operation_id });
-  assert.deepEqual(JSON.parse((await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: hybrid.recall_id }))[0].body), receipt);
+  assert.deepEqual(await usageRow(), usage);
   assert.deepEqual((await client.request('hit-cache.verify', {})).issues, []);
   // embedding.requeue drops a quarantined ledger entry so the missing-vector scan finds the Fact again; the call
   // itself wakes the lane.
@@ -327,7 +310,7 @@ try {
   log('verified', { configured_provider: config.profile, recovery: ['quarantine','retry-idempotence','pending-restart','requeue'],
     hybrid_ids: hybrid.results.map(item => item.id), byte_budget: hybrid.used_budget, scalar_budget: [...hybrid.context_text].length,
     oversized_included: oversized.results.length, oversized_skipped: oversized.diagnostics.skipped_bundles,
-    receipt_persisted: true, feedback_duplicate_noop: true, semantic_quality_claimed: false });
+    usage_persisted: true, semantic_quality_claimed: false });
   await client.request('shutdown', {}); assert.equal((await daemon.done)[0], 0);
 } finally {
   await stop(); for (const socket of providerSockets) socket.destroy();

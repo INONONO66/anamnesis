@@ -87,19 +87,16 @@ async function rawRecall(params) {
     frame.writeUInt32BE(json.length); json.copy(frame, 4); socket.write(frame);
   });
   try {
-    const hello = await exchange({ jsonrpc: '2.0', id: 1, method: 'hello', params: { token, client: 'tokenizer-raw', version: 1, commit_mode: 'receipt' } });
+    const hello = await exchange({ jsonrpc: '2.0', id: 1, method: 'hello', params: { token, client: 'tokenizer-raw', version: 2 } });
     assert.ok(hello.response.result);
     return await exchange({ jsonrpc: '2.0', id: 2, method: 'recall', params });
   } finally { socket.destroy(); }
 }
-async function receipt(result) {
-  const row = (await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: result.recall_id }))[0];
-  assert.ok(row); const stored = JSON.parse(row.body);
-  assert.deepEqual(stored.serving.response, result);
-  assert.deepEqual(stored.primary_ids, result.results.map(item => item.id));
-  assert.equal(stored.serving.context_digest, sha(result.context_text));
-  assert.equal(stored.serving.response.used_budget, encode(result.context_text));
-  return { recall_id: result.recall_id, budget: stored.serving.response.budget, used_budget: result.used_budget, context_digest: stored.serving.context_digest };
+async function usage(result) {
+  const row = (await query('MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS selection', { id: result.usage_id }))[0];
+  assert.deepEqual(JSON.parse(row.selection), result.results.map(({ id, sources }) => ({ id, sources })));
+  assert.equal(result.used_budget, encode(result.context_text));
+  return { usage_id: result.usage_id, budget: result.budget, used_budget: result.used_budget, context_digest: sha(result.context_text) };
 }
 try {
   await start();
@@ -125,8 +122,8 @@ try {
     const zero = await client.request('recall', { ...request, budget: budget(0) });
     const limitZero = await client.request('recall', { ...request, limit: 0, budget: budget(100000) });
     for (const result of [zero, limitZero]) assert.deepEqual([result.results, result.companions, result.context_text, result.used_budget], [[], [], '', 0]);
-    log('whole-context-exact-fit-one-below-zero', { sum_per_record: sum, exact: await receipt(exact), below: await receipt(below), zero: await receipt(zero), limit_zero: await receipt(limitZero) });
-    await writeFile(evidence + '/green-receipt.json', JSON.stringify({ response: exact, stored: (await query('MATCH (r:RecallReceipt {recall_id:$id}) RETURN r.body AS body', { id: exact.recall_id }))[0] }, null, 2));
+    log('whole-context-exact-fit-one-below-zero', { sum_per_record: sum, exact: await usage(exact), below: await usage(below), zero: await usage(zero), limit_zero: await usage(limitZero) });
+    await writeFile(evidence + '/green-usage.json', JSON.stringify({ response: exact, stored: (await query('MATCH (r:Usage {usage_id:$id}) RETURN r.selection AS selection', { id: exact.usage_id }))[0] }, null, 2));
     for (const unit of ['utf8_bytes', 'unicode_scalars']) {
       const n = unit === 'utf8_bytes' ? Buffer.byteLength(all.context_text) : [...all.context_text].length;
       const result = await client.request('recall', { ...request, budget: { unit, limit: n } });
@@ -145,10 +142,10 @@ try {
     assert.ok(bounded.results.length > 0 && bounded.results.length < 18); assert.ok(bounded.diagnostics.skipped_bundles > 0);
     assert.ok(Buffer.byteLength(JSON.stringify(bounded)) < 1048576); assert.equal(bounded.used_budget, encode(bounded.context_text));
     assert.ok(bounded.results.every(item => item.content.length === 63000));
-    log('1MiB-response-bound', { results: bounded.results.length, skipped: bounded.diagnostics.skipped_bundles, context_bytes: Buffer.byteLength(bounded.context_text), response_bytes: Buffer.byteLength(JSON.stringify(bounded)), actual_wire_frame_bytes: boundedWire.bytes, receipt: await receipt(bounded) });
+    log('1MiB-response-bound', { results: bounded.results.length, skipped: bounded.diagnostics.skipped_bundles, context_bytes: Buffer.byteLength(bounded.context_text), response_bytes: Buffer.byteLength(JSON.stringify(bounded)), actual_wire_frame_bytes: boundedWire.bytes, receipt: await usage(bounded) });
     await stop(); await start();
-    assert.deepEqual((await receipt(exact)).budget, budget(all.used_budget));
-    log('receipt-survives-restart', await receipt(exact)); await stop();
+    assert.deepEqual((await usage(exact)).budget, budget(all.used_budget));
+    log('usage-survives-restart', await usage(exact)); await stop();
     await start(null);
     await assert.rejects(client.request('recall', { ...request, budget: budget(1) }), { code: 'invalid_budget' }); await stop();
     for (const value of ['{', '{}', JSON.stringify({ ...config, id: 'unpinned' }), JSON.stringify({ ...config, extra: true }),
@@ -161,9 +158,9 @@ try {
     for (const output of ['-1', '0.5', 'NaN', 'Infinity', 'Number.MAX_SAFE_INTEGER + 1']) {
       const invalid = await install(root, Buffer.from(`module.exports.createEncoder = () => text => text === '' ? 0 : ${output};`));
       await start(JSON.stringify(invalid));
-      const before = (await query('MATCH (r:RecallReceipt) RETURN count(r) AS n'))[0].n;
+      const before = (await query('MATCH (r:Usage) RETURN count(r) AS n'))[0].n;
       await assert.rejects(client.request('recall', { ...request, budget: { ...budget(100000), tokenizer_id: invalid.id } }), { code: 'invalid_budget' });
-      assert.equal((await query('MATCH (r:RecallReceipt) RETURN count(r) AS n'))[0].n, before); await stop();
+      assert.equal((await query('MATCH (r:Usage) RETURN count(r) AS n'))[0].n, before); await stop();
       log('invalid-count-rejected-without-receipt', { output });
     }
     log('GREEN-real-daemon', { collisions, tokenizer_id: config.id, code_sha256: sha(installedCode),

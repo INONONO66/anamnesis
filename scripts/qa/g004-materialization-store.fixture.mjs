@@ -17,7 +17,7 @@ import { extractionBodyDigest } from '../../packages/protocol/src/extraction.ts'
 
 const uuid = () => '01900000-0000-7000-8000-' + randomBytes(6).toString('hex');
 const hash = text => createHash('sha256').update(text).digest('hex');
-const context = { principal: 'installation', commit_mode: 'receipt', client_binding: uuid() };
+const context = { principal: 'installation', client_binding: uuid() };
 const incarnation = hash('g004-materialization');
 const text = 'Alice lives here';
 const timeValue = '2026-09-01T00:00:00Z';
@@ -148,12 +148,11 @@ test('production extraction writes Facts that remain servable on the Node daemon
   // Any hit under a selected generation seeds the in-process PPR solve, so derived recall reports it.
   assert.equal(serving.diagnostics.ppr_used, true);
   assert.equal(serving.diagnostics.identity_mode, 'exact_episode_id');
-  const servingReceipt = await engine.store.getReceipt(serving.recall_id);
-  assert.ok(servingReceipt?.serving);
-  assert.equal(servingReceipt.serving.response.results.some(item => item.id === first.fact_id), true);
-  assert.equal(servingReceipt.lineage_selection[0].element_id, first.fact_id);
+  const usage = (await query('MATCH (u:Usage {usage_id:$id}) RETURN u.selection AS selection,u.lineage_selection AS lineage', { id: serving.usage_id }))[0];
+  assert.deepEqual(JSON.parse(usage.selection), serving.results.map(({id,sources}) => ({id,sources})));
+  assert.equal(JSON.parse(usage.lineage)[0].element_id, first.fact_id);
   console.log(JSON.stringify({ checkpoint: 'generation-activation-derived-recall', generation: generation.id, fact_id: first.fact_id,
-    selector: await engine.readExtractionSelection(context), serving_receipt: servingReceipt.recall_id,
+    selector: await engine.readExtractionSelection(context), usage_id: serving.usage_id,
     budget: serving.budget, derived: derived[0] }));
 
   const otherGeneration = { ...generation, id: uuid(), incarnation: hash('other-generation') };
@@ -198,7 +197,7 @@ test('production extraction writes Facts that remain servable on the Node daemon
     lines.on('line', line => { try { if (JSON.parse(line).event === 'listening') { clearTimeout(timer); resolve(); } } catch {} });
     daemon.once('error', error => { clearTimeout(timer); reject(error); }); daemon.once('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`daemon exit ${code ?? 'null'} signal=${signal ?? 'none'}`)); }); });
   await ready;
-  client = await RpcClient.connect(runtimeRoot + '/anamnesis.sock', 'g004-serving-token', 'receipt');
+  client = await RpcClient.connect(runtimeRoot + '/anamnesis.sock', 'g004-serving-token');
   const udsRecall = await client.request('recall', { query: text, limit: 64, budget: { unit: 'utf8_bytes', limit: 4096 } });
   assert.ok(udsRecall.results.some(item => item.kind === 'Fact' && item.id === first.fact_id));
   assert.equal(udsRecall.diagnostics.pipeline, 'derived-hybrid-v1');

@@ -543,7 +543,7 @@ policy versions, m_cache/profile and utility snapshots, selected channels
 and degradation reasons, policy/config/generation versions, and actual CSR
 in addition to structure_revision (docs/05 §11).
 Policy changes force retry/rejection, not a determinism exception. Numeric
-replay and delivered-receipt reconstruction are distinct from full retrieval
+replay and reconstruction of Usage attribution are distinct from full retrieval
 reproduction (D47).
 
 A property test creates mixed maintained/unmaintained nodes and asserts that

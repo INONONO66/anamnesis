@@ -10,7 +10,7 @@ import { Engine } from "./engine.ts";
 import { canonicalJson } from "./store/digest.ts";
 import { ExtractionProviderError, type ExtractionProviderInput } from "./extraction.ts";
 
-const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
+const context = { principal: "installation", client_binding: uuidv7() } as const;
 const model = "qa-relation-judge", incarnation = extractionBodyDigest(model);
 const alice = { mention: "Alice", normalized_name: "Alice", entity_kind: "person" };
 const digest = (items: Parameters<typeof canonicalJson>[0][]) => ({

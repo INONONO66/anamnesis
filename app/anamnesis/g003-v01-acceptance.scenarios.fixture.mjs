@@ -6,7 +6,7 @@ export default function scenario(name, { timeout }, run) {
   scenarios.push({ name, timeout, run });
 }
 export async function runScenarios() {
-  assert.equal(scenarios.length, 8, 'all publication scenarios must be registered');
+  assert.equal(scenarios.length, 4, 'all publication scenarios must be registered');
   for (const { name, timeout, run } of scenarios) {
     let timer;
     try {

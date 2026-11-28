@@ -1549,3 +1549,41 @@ directories. Refuse startup if the legacy spool is nonempty, with an error
 naming the directory. Preserve it for reconciliation rather than silently
 dropping acknowledged writes. Leftover delivery files are only pre-commit
 reservations and may be removed at startup with a log event.
+
+## D62 — Record recall selection and one explicit outcome (2026-11-28/29)
+
+Every successful recall creates one `Usage` in the selection transaction,
+including an empty selection. Its server UUIDv7 `usage_id` replaces `recall_id`
+and `expires_at` in the result. Keep `created_at`, `policy_revision`, canonical
+ordered `{id,sources}` rows, and the lineage rows, selection digest and connection
+binding used by D49. Selection is sufficient to attribute credit; the database
+does not retain a second copy of the response, query, vectors or budget. A
+socket completion has no durable effect. D43's protected-write barrier and D44's
+packing rules still apply.
+
+`report_outcome {usage_id,idempotency_key,reward}` takes a UUIDv7 key and finite
+reward. Authorize all credited Episodes under current policy. Atomically create
+one `UsageOutcome` with unique usage and key, clamped reward and `reported_at`.
+Return `{reward,applied}`. An identical normalized replay returns false; reusing
+a key with another usage or reward raises `idempotency_conflict`; a second key
+on a reported usage raises `outcome_already_reported`. An absent usage raises
+`unknown_usage`. Denial or unavailable storage never partially applies credit.
+
+Normalize reciprocal rank over selected primaries, split each share equally
+among its source Episodes and sum shared sources. For each Episode append one
+outcome `Hit` with credit `0.2 * clamp(reward,-1,1) * share`, canonicalizing
+negative zero. Empty usages produce no Hits. Fold by `(t,id)`: decay utility
+with `2 ** (-elapsed / 30 days)` before each addition, clamp after each event,
+and decay the cached anchor again at read. The same signed reward times share
+updates stability with the existing testing-effect arithmetic and stability
+bounds. Mass remains a read-time calculation; ranking retains `1 + 0.25 U`.
+
+This supersedes the receipt and adoption contracts of D44/D45 and D49's parent
+storage contract. `lineage_mode: "receipts"` and `parent_recall_ids` retain
+their spelling and digest bytes. Resolve parent IDs against Usage, preserving
+binding, time order, digest, authorized roots and bounded union. Remove commit
+mode negotiation, expiry, transport, feedback and automatic exposure. A store
+recorded before schema 2 refuses readiness on legacy receipt-family nodes or
+old-format Hits (the production census found none); the check runs once, and a
+store recorded at schema 2 starts without rescanning. Keep the existing archive
+format.
