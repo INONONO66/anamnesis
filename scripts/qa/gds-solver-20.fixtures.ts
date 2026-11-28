@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import type { Arc, FixedCsr } from "../../packages/core/src/dynamics/ppr.ts";
-import { ROLE_WEIGHTS } from "./g004-ppr-oracle.ts";
+import { ROLE_WEIGHTS } from "./gds-ppr-oracle.ts";
 
 export const GENERATOR = "gds-solver-20-xorshift32-v1";
 export const PINS = { policy_revision: 7, extraction_generation: 3, community_generation: 2, T: 1788220800000 };

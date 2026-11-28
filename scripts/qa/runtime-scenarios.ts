@@ -6,8 +6,8 @@ import { createInterface } from "node:readline";
 import { relative, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import neo4j from "neo4j-driver";
-import { executeG006, ScenarioIncompleteError } from "./g006-runtime-scenarios.ts";
-import { createContinuousDriver } from "./g006-continuous-driver.ts";
+import { executeG006, ScenarioIncompleteError } from "./runtime-scenario-dispatch.ts";
+import { createContinuousDriver } from "./runtime-soak-driver.ts";
 import { timingHash, timingLog } from "../../app/anamnesis/timing.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -34,42 +34,42 @@ const CASE_TEST_PATHS = new Map<string, string[]>([
     "packages/core/src/storage-contract.test.ts",
   ]],
   ["fact-embedding-recovery", [
-    "scripts/qa/g003-embedding-recall.test.ts",
+    "scripts/qa/embedding-recall-runtime.test.ts",
     "packages/core/src/embedding-recall.test.ts",
   ]],
   ["exact-budget", [
-    "scripts/qa/g003-tokenizer-runtime.test.ts",
+    "scripts/qa/recall-tokenizer-runtime.test.ts",
     "packages/core/src/embedding-recall.test.ts",
   ]],
   ["receipt-policy-transaction", [
     "packages/core/src/receipts.test.ts",
-    "scripts/qa/g003-policy-authority.test.ts",
-    "scripts/qa/g003-publication.test.ts",
+    "scripts/qa/policy-authority.test.ts",
+    "scripts/qa/recall-publication.test.ts",
   ]],
   ["publication-backpressure", [
-    "scripts/qa/g003-publication.test.ts",
-    "scripts/qa/g003-byte-budget.test.ts",
+    "scripts/qa/recall-publication.test.ts",
+    "scripts/qa/recall-byte-budget.test.ts",
   ]],
-  ["derived", ["scripts/qa/g2-derived-e2e.test.ts", "scripts/qa/g4-recall-companions.test.ts"]],
-  ["dynamics-replay", ["scripts/qa/g003-policy-authority.test.ts"]],
+  ["derived", ["scripts/qa/extraction-derived-e2e.test.ts", "scripts/qa/recall-companions.test.ts"]],
+  ["dynamics-replay", ["scripts/qa/policy-authority.test.ts"]],
   // Audit subset only: this selector does not certify semantic dispositions.
-  ["extraction-dispositions", ["scripts/qa/g004-derived-pipeline.test.ts"]],
-  ["generation-model-cutover", ["scripts/qa/g004-extraction-lifecycle.test.ts"]],
-  ["coverage-reader-aba", ["scripts/qa/g004-extraction-lifecycle.test.ts"]],
-  ["envelope-access-plan", ["scripts/qa/g004-envelope-access.test.mjs"]],
-  ["gds-solver-20", ["scripts/qa/g004-gds-solver-20.test.ts"]],
-  ["derived-recall", ["scripts/qa/g004-graph-ppr-real.test.mjs"]],
+  ["extraction-dispositions", ["scripts/qa/extraction-audit.test.ts"]],
+  ["generation-model-cutover", ["scripts/qa/extraction-generation-lifecycle.test.ts"]],
+  ["coverage-reader-aba", ["scripts/qa/extraction-generation-lifecycle.test.ts"]],
+  ["envelope-access-plan", ["scripts/qa/graph-envelope-access.test.mjs"]],
+  ["gds-solver-20", ["scripts/qa/gds-solver-20.test.ts"]],
+  ["derived-recall", ["scripts/qa/graph-ppr-real.test.mjs"]],
   ["archive-authority", ["app/anamnesis/archive-manifest.test.mjs"]],
   ["restore-activation", ["app/anamnesis/restore-authority.test.mjs"]],
   ["restore-source-rebind", ["app/anamnesis/backup-operation.test.mjs"]],
   ["upgrade-compatibility", ["app/anamnesis/archive-manifest.test.mjs"]],
-  ["calibration-and-scale", ["scripts/qa/g005-calibration-retention.test.ts"]],
-  ["retention-aged", ["scripts/qa/g005-calibration-retention.test.ts"]],
+  ["calibration-and-scale", ["scripts/qa/recall-calibration-retention.test.ts"]],
+  ["retention-aged", ["scripts/qa/recall-calibration-retention.test.ts"]],
   ["g004-envelope-access", [
-    "scripts/qa/g004-envelope-access.test.mjs",
+    "scripts/qa/graph-envelope-access.test.mjs",
   ]],
   ["v01-acceptance", [
-    "scripts/qa/g003-v01-acceptance.test.ts",
+    "scripts/qa/runtime-release-acceptance.test.ts",
   ]],
 ]);
 export const STARTED_LINE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}(?:[+-]\d{4})?\s+INFO\s+Started\.$/;

@@ -9,7 +9,7 @@ test("G004 lifecycle runs current-built real Node, UDS and owned Neo4j", async (
   const parent = resolve(process.env["G004_EVIDENCE"] ?? ".omo/evidence/g004-extraction-lifecycle");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "node-"));
-  for (const [source, name] of [["app/anamnesis/main.ts", "daemon.mjs"], ["scripts/qa/g004-extraction-lifecycle.fixture.mjs", "fixture.mjs"]]) {
+  for (const [source, name] of [["app/anamnesis/main.ts", "daemon.mjs"], ["scripts/qa/extraction-generation-lifecycle.fixture.mjs", "fixture.mjs"]]) {
     const result = await startProcess(process.execPath, ["build", source!, "--target=node", "--outfile", join(root, name!)], { deadlineMs: 120000 }).done;
     await writeFile(join(root, `${name}.build.json`), JSON.stringify(result, null, 2));
     expect(result.code).toBe(0);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createManifest, verifyResult, executeExperiment, type ExperimentSpec } from "./g005-experiment-boundary.ts";
+import { createManifest, verifyResult, executeExperiment, type ExperimentSpec } from "./experiment-boundary.ts";
 
 const spec: ExperimentSpec = {
   name: "fixture-check",

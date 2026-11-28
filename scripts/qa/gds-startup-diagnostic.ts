@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BINARY_PINS, CONFIG, EVIDENCE, ROOT, cleanupGdsContainer, admitArtifact } from "./g004-gds-solver-20.runner.ts";
+import { BINARY_PINS, CONFIG, EVIDENCE, ROOT, cleanupGdsContainer, admitArtifact } from "./gds-solver-20.runner.ts";
 
 const owner = `diagnostic-${randomUUID()}`;
 const name = `anamnesis-gds-${owner}`;

@@ -6,7 +6,7 @@ import { RpcClient } from "../../app/anamnesis/client.ts";
 import { socketPath } from "../../app/anamnesis/config.ts";
 import { timingHash, timingLog } from "../../app/anamnesis/timing.ts";
 import type { RpcMethod, RpcRememberParams, RpcCommittedResult, RpcStatusResult } from "../../packages/protocol/src/rpc.ts";
-import type { ContinuousSoakDriver } from "./g006-runtime-scenarios.ts";
+import type { ContinuousSoakDriver } from "./runtime-scenario-dispatch.ts";
 import type { ProcessResult, startProcess } from "./runtime-scenarios.ts";
 
 export interface OwnedEndpoint { uri: string; user: string; password: string }

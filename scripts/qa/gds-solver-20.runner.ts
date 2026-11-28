@@ -5,8 +5,8 @@ import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, st
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exportFixedCsr, solveFixedCsr } from "../../packages/core/src/dynamics/ppr.ts";
-import { compareScores, exactReference } from "./g004-ppr-oracle.ts";
-import { analyticValues, augmentedEdges, checkProjection, generateFixtures, LIMITS, residual, sha256, validateInput, type Fixture } from "./g004-gds-solver-20.fixtures.ts";
+import { compareScores, exactReference } from "./gds-ppr-oracle.ts";
+import { analyticValues, augmentedEdges, checkProjection, generateFixtures, LIMITS, residual, sha256, validateInput, type Fixture } from "./gds-solver-20.fixtures.ts";
 
 export const ROOT = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "");
 export const EVIDENCE = join(ROOT, ".omo/evidence/g004-gds-solver-20");
@@ -204,7 +204,7 @@ class Recorder {
   }
 }
 
-const sourceFiles = ["scripts/qa/g004-gds-solver-20.fixtures.ts", "scripts/qa/g004-gds-solver-20.runner.ts", "scripts/qa/g004-gds-solver-20.test.ts", "scripts/qa/g004-ppr-oracle.ts", "packages/core/src/dynamics/ppr.ts", "docs/07-gds-validation.md", ".omo/evidence/g004-gds-preflight/README.md"];
+const sourceFiles = ["scripts/qa/gds-solver-20.fixtures.ts", "scripts/qa/gds-solver-20.runner.ts", "scripts/qa/gds-solver-20.test.ts", "scripts/qa/gds-ppr-oracle.ts", "packages/core/src/dynamics/ppr.ts", "docs/07-gds-validation.md", ".omo/evidence/g004-gds-preflight/README.md"];
 async function sourcePins() { return Object.fromEntries(await Promise.all(sourceFiles.map(async path => [path, sha256(await readFile(join(ROOT, path)))]))); }
 const literal = (value: unknown): string => {
   if (typeof value === "number") { assert.ok(Number.isFinite(value)); return String(value); }

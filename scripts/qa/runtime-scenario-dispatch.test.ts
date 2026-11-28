@@ -3,9 +3,9 @@ import { parseOptions } from "./runtime-scenarios.ts";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeG006, ScenarioIncompleteError, runBoundedScenarios, runContinuousSoak, type ContinuousSoakDriver } from "./g006-runtime-scenarios.ts";
+import { executeG006, ScenarioIncompleteError, runBoundedScenarios, runContinuousSoak, type ContinuousSoakDriver } from "./runtime-scenario-dispatch.ts";
 import type { startProcess } from "./runtime-scenarios.ts";
-import { createContinuousDriver } from "./g006-continuous-driver.ts";
+import { createContinuousDriver } from "./runtime-soak-driver.ts";
 
 // Build plumbing is isolated, but executeG006 and the continuous state machine
 // both run. Interruption follows an exact traffic event, never elapsed test time.

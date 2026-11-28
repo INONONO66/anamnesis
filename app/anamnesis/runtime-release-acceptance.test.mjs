@@ -10,7 +10,7 @@ assert.ok(evidence, 'current-built acceptance workspace required');
 const env = { ...process.env, G003_PUBLICATION_BUNDLE: join(evidence, 'fixture.mjs'),
   TOKENIZER_EVIDENCE: evidence, TOKENIZER_PHASE: 'green', TOKENIZER_COLLISIONS: '0' };
 const surfaces = [
-  ['app/anamnesis/g003-publication.surface.mjs'],
+  ['app/anamnesis/recall-publication.surface.mjs'],
   ['app/anamnesis/embedding-recall.surface.mjs'],
   ['app/anamnesis/tokenizer.surface.mjs'],
 ];

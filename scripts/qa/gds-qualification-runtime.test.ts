@@ -9,7 +9,7 @@ test("G004 independent oracle on real Node, owned Neo4j and UDS", async () => {
   const parent = resolve(".omo/evidence/g004-gds-qualification");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "node-"));
-  for (const [source, name] of [["app/anamnesis/main.ts", "daemon.mjs"], ["scripts/qa/g004-gds-qualification.fixture.mjs", "fixture.mjs"]]) {
+  for (const [source, name] of [["app/anamnesis/main.ts", "daemon.mjs"], ["scripts/qa/gds-qualification-runtime.fixture.mjs", "fixture.mjs"]]) {
     const result = await startProcess(process.execPath, ["build", source!, "--target=node", "--outfile", join(root, name!)], { deadlineMs: 120000 }).done;
     await writeFile(join(root, `${name}.build.json`), JSON.stringify(result, null, 2));
     expect(result.code).toBe(0);

@@ -74,9 +74,9 @@ construction is unavailable, linearity gives `p(s)=Σ_i s_i·p(e_i)`; at most
 128 normalized, residual-checked singleton runs can replace it, recorded as a
 different baseline path rather than a silent fallback.
 
-The runner is `scripts/qa/g004-gds-solver-20.runner.ts` over the twenty
-fixtures in `g004-gds-solver-20.fixtures.ts`; the independent oracle is
-`scripts/qa/g004-ppr-oracle.ts`, which shares no numeric code with the
+The runner is `scripts/qa/gds-solver-20.runner.ts` over the twenty
+fixtures in `gds-solver-20.fixtures.ts`; the independent oracle is
+`scripts/qa/gds-ppr-oracle.ts`, which shares no numeric code with the
 production solver. Both export the graph through the same fixed CSR as
 docs/06 §5.
 
@@ -128,7 +128,7 @@ Not built. No scale number in this set is a measurement
 ## 5. Other GDS uses (offline)
 
 None ship. Community detection for dreaming is a
-[09-roadmap](09-roadmap.md) target. `scripts/qa/g004-gds-startup-diagnostic.ts`
+[09-roadmap](09-roadmap.md) target. `scripts/qa/gds-startup-diagnostic.ts`
 checks that a GDS container starts and admits a projection; it isn't a solver
 test.
 
@@ -237,5 +237,5 @@ compare physical links and endpoint rows in the same committed transaction.
 Stale rows (deleted link, wrong peer, wrong role, mismatched generation) are
 excluded without refill and still occupy their probe slots. Fixtures subscribe
 to the publication event before triggering a write and await it with a bounded
-timeout. They live in `scripts/qa/g004-conducting-maintenance.*`,
-`g004-ordered-probe.*` and `g004-envelope-access.test.mjs`.
+timeout. They live in `scripts/qa/graph-conducting-maintenance.*`,
+`graph-ordered-probe.*` and `graph-envelope-access.test.mjs`.

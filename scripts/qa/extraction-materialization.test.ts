@@ -15,7 +15,7 @@ test('extraction materializes Facts served through real Node and owned Neo4j', a
   await writeFile(join(root, 'daemon-build.json'), JSON.stringify(daemonBuild, null, 2));
   expect(daemonBuild.code).toBe(0);
   process.env.G004_DAEMON = daemon;
-  const build = await startProcess(process.execPath, ['build', 'scripts/qa/g004-materialization-store.fixture.mjs', '--target=node', '--outfile', bundle], { deadlineMs: 120000 }).done;
+  const build = await startProcess(process.execPath, ['build', 'scripts/qa/extraction-materialization.fixture.mjs', '--target=node', '--outfile', bundle], { deadlineMs: 120000 }).done;
   await writeFile(join(root, 'build.json'), JSON.stringify(build, null, 2));
   expect(build.code).toBe(0);
   const result = await startProcess('node', ['--test', bundle], { deadlineMs: 240000, env: { ...process.env, G004_DAEMON: daemon }, onOutput: text => process.stdout.write(text) }).done;

@@ -9,7 +9,7 @@ test("prospective Episode lineage contract on owned Node/UDS/Neo4j", async () =>
   const parent = resolve(process.env["G004_LINEAGE_EVIDENCE"] ?? ".omo/evidence/g004-episode-lineage-recovery/node");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "node-"));
-  for (const [source, name] of [["app/anamnesis/main.ts", "daemon.mjs"], ["scripts/qa/g004-episode-lineage.fixture.mjs", "fixture.mjs"]] as const) {
+  for (const [source, name] of [["app/anamnesis/main.ts", "daemon.mjs"], ["scripts/qa/ingest-episode-lineage.fixture.mjs", "fixture.mjs"]] as const) {
     const build = await startProcess(process.execPath, ["build", source, "--target=node", "--outfile", join(root, name)], { deadlineMs: 120000 }).done;
     await writeFile(join(root, name + ".build.json"), JSON.stringify(build, null, 2));
     expect(build.code).toBe(0);
