@@ -93,7 +93,7 @@ async function shutdown(runtime: Runtime): Promise<void> {
 }
 const bumpWriterEpoch = () => query("MATCH (m:Meta {key:'meta'}) SET m.writer_epoch = m.writer_epoch + 1000");
 
-/** Materialize a retained Fact through the audited extraction and semantic review contract. */
+/** Materialize a retained Fact through the extraction pipeline. */
 async function seedFact(root: string): Promise<string> {
   const content = "runtime Fact embedding fixture";
   const incarnation = extractionBodyDigest("runtime-extraction");
@@ -101,14 +101,11 @@ async function seedFact(root: string): Promise<string> {
     materializationStatePath: join(root, "materialization-state.json"),
     extractionProvider: { model: "runtime-extraction", modelIncarnation: incarnation, async extract(input) {
       if (input.task === "claim") return { task: "claim" as const, language: "en", modality: "text" as const,
-        claims: [{ text: content, evidence: { start: 0, end: Buffer.byteLength(content), text: content } }] };
+        claims: [{ text: content, confidence: 0.7, evidence: { start: 0, end: Buffer.byteLength(content), text: content } }] };
       if (input.task !== "judge_claims" || !input.claim_context) throw new Error(`unexpected ${input.task}`);
       return { task: "judge_claims" as const, language: "en", modality: "text" as const, claim_body_digest: input.claim_context.body_digest,
         decisions: input.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain" as const, evidence: claim.evidence })) };
-    } },
-    semanticReviewProvider: { profileId: extractionBodyDigest("runtime-review"),
-      async resolve() { return { entity_resolutions: [], attribution_speakers: [], allow_no_single_locus: false, content_language: "en" }; },
-      async review(input) { return { disposition: "retain", semantic_claim: input.premises.request.semantic_claim, reason: "fixture" }; } } });
+    } } });
   try {
     await engine.init();
     await engine.claimWriterEpoch();
@@ -120,19 +117,11 @@ async function seedFact(root: string): Promise<string> {
     { metadata: { origin_role: "user", lineage_mode: "direct", parent_recall_ids: [] }, context: receiptContext });
     const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation, source_id: source.id }, receiptContext);
     const audit = await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "runtime", lease_ms: 30000 }, receiptContext);
-    if (audit.state !== "known" || audit.judge_attempt?.state !== "succeeded") throw new Error("Fact audit failed");
-    const episode = await engine.store.semanticEpisode(source.id, receiptContext);
-    const semantic_claim = { content, content_language: "en", sub_kind: "fact" as const, modality: "asserted" as const, confidence: 0.7,
-      time: { time_value: episode.time.time_value, time_utc: episode.time.time_utc, time_precision: "inherited" as const,
-        resolution: "inherited" as const, anchor_time_utc: episode.time.time_utc },
-      entities: [], subject_keys: null, predicate_text: content, scope_complete: false,
-      scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] },
-      evidence: { kind: "source_locus" as const, span: { start: 0, end: Buffer.byteLength(content) } } };
-    const proposal = { proposal_id: uuidv7(), generation_id: generation, source_episode_id: source.id,
-      judge_attempt_id: audit.judge_attempt.id, claim_index: 0, semantic_claim };
-    await engine.proposeRetainedClaim(proposal, receiptContext);
-    await engine.reviewRetainedClaim({ review_id: uuidv7(), proposal_id: proposal.proposal_id, action: "accept", reason: "fixture" }, receiptContext);
-    return (await engine.materializeRetainedClaim({ ...proposal, operation_id: uuidv7() }, receiptContext)).fact_id;
+    if (audit.state !== "known" || !audit.semantic_writes) throw new Error("Fact extraction failed");
+    const custody = await engine.store.materializationState.byOccurrence(extractionBodyDigest([generation, source.id]));
+    const id = custody?.fact_ids[0];
+    if (!id || custody?.fact_ids.length !== 1) throw new Error("expected one extracted Fact");
+    return id;
   } finally { await engine.close(); }
 }
 

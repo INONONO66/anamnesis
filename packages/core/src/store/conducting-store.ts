@@ -100,12 +100,11 @@ export class ConductingStore {
       WITH count(a) AS arcs MATCH (m:Meta {key:'meta'}) SET m.conducting_arc_revision=coalesce(m.conducting_arc_revision,0)+1`, { rows });
   }
   /** The only supported physical deletion today is topology replacement.
-   * Future generation deletion/GC must use the same endpoint + HubArc removal
+   * Future generation deletion/GC must use the same endpoint removal
    * transaction and retire coverage only after its last physical/cache row. */
   async deleteTopologyLinksTx(tx: ManagedTransaction, ids: string[]): Promise<void> {
     if (!ids.length) return;
     await tx.run(`UNWIND $ids AS id MATCH (a:ConductingArc {link_id:id}) DELETE a`, { ids });
-    await tx.run(`UNWIND $ids AS id MATCH (a:HubArc {link_id:id}) DELETE a`, { ids });
     await tx.run(`UNWIND $ids AS id MATCH ()-[l:NEXT_EPISODE]->() WHERE l.id=id DELETE l`, { ids });
     await this.conductingRevisionTx(tx);
   }

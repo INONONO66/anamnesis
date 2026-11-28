@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
 import { MemoryElement, type Origin, type TimePoint } from "@anamnesis/protocol";
 import { EchoLineage, EpisodeLineageError, parseEpisodeLineage } from "@anamnesis/protocol";
-import { type ValidatedSemanticClaim } from "@anamnesis/protocol";
+import { type SemanticSourceContext, type ValidatedSemanticClaim } from "@anamnesis/protocol";
 import { canonicalExtractionBody } from "@anamnesis/protocol";
-import { SemanticReviewPremises } from "@anamnesis/protocol";
 import { carriesTime } from "./schema.ts";
 
 export function semanticClaimTime(time: { value: string; precision: "second" | "minute" | "day" | "month" | "year" }) {
@@ -19,7 +18,7 @@ export function semanticClaimTime(time: { value: string; precision: "second" | "
 
 /** The TimePoint a validated claim is stored under; an inherited time keeps the
  * Episode's precision. The relation judge sees exactly this time. */
-export function validatedFactTime(validated: ValidatedSemanticClaim, source: SemanticReviewPremises["source"]): TimePoint {
+export function validatedFactTime(validated: ValidatedSemanticClaim, source: Pick<SemanticSourceContext["episode"], "time">): TimePoint {
   const claim = validated.claim;
   const precision = claim.time.resolution === "inherited" ? source.time.time_precision : claim.time.time_precision;
   return { value: new Date(claim.time.time_utc).toISOString(), precision: precision === "instant" || precision === "inherited" ? "second" : precision };

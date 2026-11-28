@@ -42,11 +42,6 @@ for independent validation.
 
 ## Decision relevance
 
-The [adjudication screen](adjudication-conformance.md) favored Opus on core
-relation decisions, while this probe exposes a recurring Opus extraction
-fidelity failure. Select and evaluate extraction and adjudication separately.
-Neither model is approved as an unattended writer by these probes.
-
 English projections remain optional, versioned retrieval aids. Original
 claims, identifiers and evidence must remain recoverable, and a projection
 must not acquire source authority or become an identity-normalization rule.
@@ -77,12 +72,8 @@ covered exact quote substrings and confidence range; observations above
 add manual semantic review. JSON/schema success alone was not counted as
 source-faithfulness.
 
-## Finalization disposition (D48, D50)
+## Finalization disposition (D48)
 
 [D48](../10-decision-log.md) uses this probe only to require source-exact
 canonical claims, identifiers, names, and evidence while keeping English
 output optional and generation-scoped.
-[D50](../10-decision-log.md) keeps extraction and adjudication as separate
-model roles; this probe neither selects an extractor nor expands the
-shadow/manual adjudication admission boundary
-([02-daemon-and-pipelines §5.2](../02-daemon-and-pipelines.md)).

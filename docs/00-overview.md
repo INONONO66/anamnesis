@@ -9,8 +9,7 @@
 > **Target, not runtime status.** Everything here describes the design the
 > code must reach. What actually runs today is the short list in
 > [09-roadmap](09-roadmap.md) ("Where the code is today"); no number in this
-> set is a production measurement, and the two frozen development screens
-> behind the D48 and D50 defaults are reported with their limits in
+> set is a production measurement, and the frozen D48 development screen is reported with its limits in
 > [07-gds-validation](07-gds-validation.md) §7.
 
 ## One line
@@ -199,5 +198,4 @@ exists yet, and the gates that will produce one are in
 | now | Server clock. The reference for forgetting |
 | `fact_language_policy` | Extraction-generation configuration, `source` or `en`. Chooses the language of Fact content for that whole generation; never an in-place rewrite of an existing Fact, and never applied to quotes, spans, names or identifiers (D48) |
 | corroboration root | An original Episode ID in a Fact's bounded `corroboration_root_episode_ids` (at most 16). Provenance accounting only: roots gate policy checks and never add candidates, Hits, mass or score terms (D49) |
-| adjudication proposal | An immutable proposed verdict from the shadow-mode adjudicator, with its own attempt row and candidate digest. Creates no Fact or edge until an authenticated review accepts it and its named generation consumes it once (D50) |
 | embedding profile | `sha256` over one exact `(embedding_model_id, vector_index_id)` pair; the value of `active[embedding]`. ONLINE indexes are not an approved profile: activation needs a recorded `EmbeddingQualification` (D51) |

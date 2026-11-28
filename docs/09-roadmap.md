@@ -196,12 +196,11 @@ retrieves along relationships.
 | derived layer | `:Fact`, `:Entity`, physical generation labels/indexes, global `ingest_seq`, BUILDING/ACTIVE/CATCHING_UP/INACTIVE/RETIRED lifecycle, strict sequencer, dual-tail Outbox, atomic cutover and caught-up rollback | 01 §1, §4–5 |
 | extraction | target sequencer: claim LLM (self-contained content, required `content_language`, modality, confidence as source-faithfulness, literal `evidence_quote` and derived span) → bounded generation-index reads → judge LLM → revalidated write with quote and UTF-8 boundary checks; explicit same-speaker/same-time/same-scope self-correction only, otherwise CONTRASTS; one immutable Fact per source occurrence, no "duplicate → no Fact"; policy applied before any derived write; blocked-head retry, entity/fact identity, correction context, embed stage | 02 §5, §5.1, D46, D47, D48 |
 | grouping | bounded `speaker_key` / `subject_keys` / `predicate_text` / closed `scope` / `time_key` fields, `anamnesis.duplicate-group/1` key, irreflexive symmetric non-transitive `known_conflict`; local comparison only, never a global identity claim | 02 §5.3, 05 §6, D49 |
-| adjudication | shadow-mode proposals with immutable attempt/proposal/review/consumption records, single-use acceptance revalidated at W1, authenticated `adjudication.correct` with a CREATE-only operator Episode and append-only replacement under the docs/03 §5 protocol, `operator_corrected` provenance | 02 §5.2, 03 §5, D50 |
 | commit path | producer 3 (re_mention), audit-only for accessibility | 04 §6 |
-| maintenance | hourly job: `m_cache`, hub shortlist; ConductingArc retained-graph rebuild/verify and complete generation publication. **Precedes PPR** — no missing-cache native fallback | 01 §5, 02 §6 |
+| maintenance | hourly job: `m_cache`; ConductingArc retained-graph rebuild/verify and complete generation publication. **Precedes PPR** — no missing-cache native fallback | 01 §5, 02 §6 |
 | time | Fact time, derived visibility for Entity and Link, non-recursive valid(T), replacement protocol, provenance exception | 03 §3–5 |
 | forgetting | Fact mass `m = m₀ · max_e R(age_e, s_e · σ_fact)` over bounded sources, σ_fact a dimensionless stability multiplier; κ conservation and merging, sources resolution | 04 §3, §5 |
-| envelope | budgets, fanout, ConductingArc unique/RANGE (source_id, link_id) first-256 ordered probe before filters; atomic endpoint-row maintenance on physical create/delete/rewire/GC; complete coverage or PPR absent; non-hubs resolve captured rows via per-role link-ID indexes, never re-expand adjacency; indexed HubArc shortlist, stale-link verification, per-row arc cap, row-total initialization, 3-query tx, deadline, retained-row normalization | 01 §5, 06 §1–4 |
+| envelope | budgets, fanout, ConductingArc unique/RANGE (source_id, link_id) first-256 ordered probe before filters; atomic endpoint-row maintenance on physical create/delete/rewire/GC; complete coverage or PPR absent; non-hubs resolve captured rows via per-role link-ID indexes, never re-expand adjacency; saturated sources have no outgoing traversal, stale-link verification, per-row arc cap, row-total initialization, 3-query tx, deadline, retained-row normalization | 01 §5, 06 §1–4 |
 | PPR | CSR, iteration, convergence cap, determinism conventions | 06 §5–7 |
 | recall | relationship vector channel (`queryRelationships`), seeds (hub damping on the capped probe degree), PPR list in fusion, valid filter, provenance/supersedes, bounded conflict bundles (raw CONTRASTS scan ≤ 64 rows + sentinel, per-row policy/validity checks, first 4 eligible as companions; `conflict_total` exact only when the scan exhausted and count ≤ 4, else `null`; `conflict_truncated` when eligible > 4 or raw rows remain; mandatory incomplete and redacted warnings; no automatic winner), occurrence grouping at assembly with explicit occurrence IDs, budget counts companion text, torn retry | 05 §2–7, D46 |
 | policy | derived-scope suppression through conduction and provenance text; background reconciliation rebuilds indexes and caches without touching originals | 02, 05, D43 |
@@ -211,7 +210,7 @@ retrieves along relationships.
 **Exit criteria**: extraction runs on v0.1 data with no downtime → 20 solver
 validations pass → correction scenario fixtures (change / correction /
 replacement) pass snapshot queries → a hub Entity with degree > 256 is
-expanded through its shortlist in a recall → recall p50 < 100 ms.
+classified by its capped probe in a recall → recall p50 < 100 ms.
 ConductingArc fixtures must prove ordered index LIMIT before filtering,
 both-endpoint/parallel/five-role coverage, atomic rebuild/rewire/GC, stale-row
 exclusion and whole-PPR degradation on missing/incomplete cache or indexes;
@@ -229,7 +228,7 @@ measured.
 | derived layer | `:Community`, cross-stream-compatible HAS_MEMBER, extraction-cutover disable/rebuild rule, majority visibility, Community mass | 01 §4, 03 §3, 04 §3 |
 | recall | identity channel, `entities` block | 05 §2 |
 | embedding | profile swap procedure (new property and indexes, backfill, current-watermark barrier, switch, gc), `EmbeddingQualification` records and the production-activation block | 01 §4, D51 |
-| qualification (trigger-gated) | production multilingual, extractor, judge and index qualification packages: each ships only when its own machine-validated manifests and predeclared thresholds exist. Until then the v0.2 defaults stay development-scoped and reversible | 07, D48, D50, D51 |
+| qualification (trigger-gated) | production multilingual, extractor, judge and index qualification packages: each ships only when its own machine-validated manifests and predeclared thresholds exist. Until then the v0.2 defaults stay development-scoped and reversible | 07, D48, D51 |
 | GDS | envelope validation overlap@20, 100k/1M scale benches, health report | 07 §3–5 |
 | calibration | receipts and outcome events → refit DECAY, FACTOR, a, b, c, γ, β, ν, μ₀, σ_fact, modality and sub_kind priors, role weights, RRF weights; ablate each default; prior changes ship as a new derived generation with a recorded prior version; config version tags | 04 §9, D47 |
 
@@ -271,8 +270,6 @@ envelope deadline exceeded < 1 %, overlap@20 ≥ 0.8, dreaming on 1M in
   thing, a file view of the graph that the daemon never reads back.
 - Corroboration by repetition. Occurrence count, root count and echo depth
   never move confidence, mass, utility, ranking or a conflict winner (D49).
-- Unattended automatic invalidation. Adjudication ships in shadow mode, and
-  acceptance is an operator decision, not human gold (D50).
 - Production embedding activation on ONLINE status or operator attestation
   alone. It stays disabled until a qualification carries machine-validated
   manifests and predeclared thresholds (D51).

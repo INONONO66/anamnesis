@@ -7,7 +7,7 @@ import { v7 as uuidv7 } from "uuid";
 import { Engine } from "./engine.ts";
 import { EmbeddingError, EmbeddingProfile, type EmbeddingProvider, embeddingProfileId } from "./embedding.ts";
 import type { ExtractionProviderInput } from "./extraction.ts";
-import { extractionBodyDigest, type Generation, type SemanticClaim, type SemanticReviewProvider } from "@anamnesis/protocol";
+import { extractionBodyDigest, type Generation } from "@anamnesis/protocol";
 import { EmbeddingLedger } from "./store/embedding-ledger.ts";
 import { tupleHash } from "./store/digest.ts";
 
@@ -27,6 +27,9 @@ const state = { now: Date.UTC(2030, 0, 1), mode: "ok" as "ok" | "down" | "reject
 const provider: EmbeddingProvider = {
   profile,
   async embed(text, purpose) {
+    // Extraction can look for relation candidates. This fixture only serves
+    // document embeddings; the production relation judge can use entities alone.
+    if (purpose === "query") throw new EmbeddingError("provider_unavailable", "fixture has no query lane");
     expect(purpose).toBe("document");
     state.calls++;
     state.inputs.push(text);
@@ -41,24 +44,20 @@ const extractionProvider = {
     if (input.task === "claim") {
       const text = input.text.split("\n")[0]!;
       return { task: "claim", language: "en", modality: "text",
-        claims: [{ text, evidence: { start: 0, end: Buffer.byteLength(text), text } }] };
+        claims: [{ text, confidence: 0.7, evidence: { start: 0, end: Buffer.byteLength(text), text } }] };
     }
     if (input.task !== "judge_claims" || !input.claim_context) throw new Error(`unexpected task ${input.task}`);
     return { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context.body_digest,
       decisions: input.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence })) };
   },
 };
-const semanticReviewProvider: SemanticReviewProvider = {
-  profileId: extractionBodyDigest("embedding-review-fixture"),
-  async resolve() { return { entity_resolutions: [], attribution_speakers: [], allow_no_single_locus: false, content_language: "en" }; },
-  async review(input) { return { disposition: "retain", semantic_claim: input.premises.request.semantic_claim, reason: "fixture retained" }; },
-};
+
 const generation: Generation = { id: uuidv7(), stream: "extraction", incarnation: extractionProvider.modelIncarnation,
   state: "catching_up", covered_ingest_seq: 0, created_at: state.now, updated_at: state.now };
 const root = await mkdtemp(join(tmpdir(), "anamnesis-embedding-lane-"));
 const ledgerPath = join(root, "embedding-state.json");
 const engine = new Engine({ uri, user, password, objectsRoot: root, embeddingLedgerPath: ledgerPath,
-  embeddingProvider: provider, extractionProvider, semanticReviewProvider, clock: () => state.now });
+  embeddingProvider: provider, extractionProvider, clock: () => state.now });
 const admin = neo4j.driver(uri, neo4j.auth.basic(user, password), { disableLosslessIntegers: true });
 
 async function query<Row extends RecordShape>(cypher: string, params: Record<string, string> = {}): Promise<Row[]> {
@@ -84,22 +83,11 @@ async function fact(content: string, generationId = generation.id): Promise<stri
   const sourceId = await episode(`${content}\nRaw context stays in the Episode.`);
   const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generationId, source_id: sourceId }, context);
   const audit = await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "qa", lease_ms: 30000 }, context);
-  if (audit.state !== "known" || audit.judge_attempt?.state !== "succeeded" || audit.semantic_writes)
-    throw new Error("audit fixture must retain the claim without writing a Fact");
-  const source = await engine.store.semanticEpisode(sourceId, context);
-  const semantic: SemanticClaim = {
-    content, content_language: "en", sub_kind: "fact", modality: "asserted", confidence: 0.7,
-    time: { time_value: source.time.time_value, time_utc: source.time.time_utc, time_precision: "inherited",
-      resolution: "inherited", anchor_time_utc: source.time.time_utc },
-    entities: [], subject_keys: null, predicate_text: content, scope_complete: false,
-    scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] },
-    evidence: { kind: "source_locus", span: { start: 0, end: Buffer.byteLength(content) } },
-  };
-  const request = { proposal_id: uuidv7(), generation_id: generationId, source_episode_id: sourceId,
-    judge_attempt_id: audit.judge_attempt.id, claim_index: 0, semantic_claim: semantic };
-  await engine.proposeRetainedClaim(request, context);
-  await engine.reviewRetainedClaim({ review_id: uuidv7(), proposal_id: request.proposal_id, action: "accept", reason: "fixture accepted" }, context);
-  return (await engine.materializeRetainedClaim({ ...request, operation_id: uuidv7() }, context)).fact_id;
+  if (audit.state !== "known" || !audit.semantic_writes) throw new Error("Fact extraction failed");
+  const custody = await engine.store.materializationState.byOccurrence(extractionBodyDigest([generationId, sourceId]));
+  const id = custody?.fact_ids[0];
+  if (!id || custody?.fact_ids.length !== 1) throw new Error("expected one extracted Fact");
+  return id;
 }
 
 beforeAll(async () => {

@@ -8,7 +8,6 @@ import { extractionBodyDigest, type SemanticClaim } from "@anamnesis/protocol";
 import { Engine } from "./engine.ts";
 import { EmbeddingProfile, type EmbeddingProvider } from "./embedding.ts";
 import type { ExtractionProviderInput } from "./extraction.ts";
-import type { SemanticReviewProvider } from "../../protocol/src/materialization.ts";
 import { GenerationReadinessError } from "./store/extraction-store.ts";
 
 const context = { principal: "installation", commit_mode: "receipt", client_binding: uuidv7() } as const;
@@ -27,22 +26,21 @@ const extractionProvider = { model, modelIncarnation: incarnation, async extract
   return { task: "judge_claims", language: "en", modality: "text", claim_body_digest: input.claim_context.body_digest,
     decisions: input.claim_context.claims.map((claim, claim_index) => ({ claim_index, disposition: "retain", evidence: claim.evidence })) };
 } };
-const semanticReviewProvider: SemanticReviewProvider = {
-  profileId: extractionBodyDigest("activation-review-fixture"),
-  async resolve() { return { entity_resolutions: [], attribution_speakers: [], allow_no_single_locus: false, content_language: "en" }; },
-  async review(input) {
-    return { disposition: "retain", semantic_claim: input.premises.request.semantic_claim, reason: "fixture retained" };
-  },
-};
+
 
 async function setup(withLineage: boolean) {
+  const provider = { ...extractionProvider, async extract(input: ExtractionProviderInput) {
+    if (withLineage && input.task === "claim") return { task: "claim", language: "en", modality: "text",
+      claims: [{ text: content, confidence: 0.7, evidence: { start: 0, end: Buffer.byteLength(content), text: content } }] };
+    return extractionProvider.extract(input);
+  } };
   const parent = join(homedir(), ".cache/anamnesis-qa");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "activation-coverage-"));
   const uri = process.env.ANAMNESIS_TEST_NEO4J_URI, password = process.env.ANAMNESIS_TEST_NEO4J_PASSWORD;
   if (!uri || !password) throw new Error("owned runner required");
   const driver = neo4j.driver(uri, neo4j.auth.basic("neo4j", password), { disableLosslessIntegers: true });
-  const engine = new Engine({ uri, password, objectsRoot: root, embeddingProvider, extractionProvider, semanticReviewProvider,
+  const engine = new Engine({ uri, password, objectsRoot: root, embeddingProvider, extractionProvider: provider,
     extractionJournalPath: join(root, "extraction-state.json"), materializationStatePath: join(root, "materialization-state.json"),
     embeddingLedgerPath: join(root, "embedding-state.json") });
   await driver.executeQuery("MATCH (n) DETACH DELETE n");
@@ -59,23 +57,6 @@ async function setup(withLineage: boolean) {
   const task = await engine.createExtractionPipeline({ id: uuidv7(), generation_id: generation.id, source_id: source.id }, context);
   const result = await engine.runExtractionPipeline({ task_id: task.id, expected_version: task.version, worker_id: "qa", lease_ms: 30000 }, context);
   if (result.state !== "known" || result.judge_attempt?.state !== "succeeded") throw new Error("completed fixture pipeline required");
-  if (withLineage) {
-    const episode = await engine.store.semanticEpisode(source.id, context);
-    const semantic: SemanticClaim = {
-      content, content_language: "en", sub_kind: "fact", modality: "asserted", confidence: 0.7,
-      time: { time_value: episode.time.time_value, time_utc: episode.time.time_utc, time_precision: "inherited",
-        resolution: "inherited", anchor_time_utc: episode.time.time_utc },
-      entities: [], subject_keys: null, predicate_text: content, scope_complete: false,
-      scope: { object_keys: [], location_keys: [], quantities: [], condition: null, attribution_speaker_keys: [] },
-      evidence: { kind: "source_locus", span: { start: 0, end: Buffer.byteLength(content) } },
-    };
-    const request = { proposal_id: uuidv7(), generation_id: generation.id, source_episode_id: source.id,
-      judge_attempt_id: result.judge_attempt.id, claim_index: 0, semantic_claim: semantic };
-    await engine.proposeRetainedClaim(request, context);
-    await engine.reviewRetainedClaim({ review_id: uuidv7(), proposal_id: request.proposal_id,
-      action: "accept", reason: "fixture accepted" }, context);
-    await engine.materializeRetainedClaim({ ...request, operation_id: uuidv7() }, context);
-  }
   for (const partition of ["episodes", "active_extraction"] as const)
     await engine.store.recordExtractionCoverage({ generation_id: generation.id, partition,
       expected_covered_ingest_seq: 0, covered_ingest_seq: 1 }, context);

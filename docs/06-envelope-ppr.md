@@ -23,9 +23,8 @@ define current-policy eligibility and conditional replay.
 | fanout₁ | `clamp(⌊640 / \|S\|⌋, 4, 32)` | inversely proportional to seed count |
 | fanout₂ | `clamp(⌊1232 / \|H₁\|⌋, 2, 16)` | inversely proportional to hop-1 count |
 | hub threshold | DegreeProbe(n) = 256 | saturated physical conducting-arc probe |
-| hub shortlist | ≤ 32 | produced by maintenance (docs/02 §6) |
 | probe inspections | (128 + 640 + 2,000) × 256 = 708,608 | classification before each expansion/arc row |
-| structural input budget | (128 + 640 + 2,000) × 512 = 1,417,216 | conservative: probe ≤ 256 plus non-hub link-ID reads < 256, or hub tuples ≤ 32 + physical-link checks ≤ 32 per row; authority lookups separately bounded |
+| structural input budget | (128 + 640 + 2,000) × 512 = 1,417,216 | conservative: probe ≤ 256 plus non-hub link-ID reads < 256 per row; authority lookups separately bounded |
 | envelope tx deadline | 100 ms (config) | exceeded → whole PPR channel dropped |
 
 Budgets are hard limits. Fanout is derived from them: with 3 seeds and with
@@ -92,9 +91,7 @@ Non-hubs resolve only captured probe rows by the appropriate per-role unique
 link-ID index, checking physical endpoints, role and generation metadata.
 Stale rows still occupy raw probe slots but cannot conduct; discard them with
 no refill, capture the mismatch and invalidate coverage for repair. No second
-adjacency expansion can race new relationships into the bounded pool. Hubs
-ignore probe rows for traversal and read only HubArc ranks 0..31, with the same
-bounded physical-link verification before use. Unknown cache availability
+adjacency expansion can race new relationships into the bounded pool. Saturated sources contribute no outgoing rows. Unknown cache availability
 aborts PPR; a verified stale-row exclusion never authorizes a native scan.
 
 ### expand(v, f)
@@ -102,8 +99,7 @@ aborts PPR; a verified stale-row exclusion never authorizes a native scan.
 ```text
   probe = first 256 ConductingArc rows for source_id=v.id by link_id ASC
   if size(probe) == 256:                       # saturated hub probe
-      pool = first f structurally visible neighbors from HubArc rank 0..31
-                                                 # no shortlist → ∅ — not expanded
+      pool = []
   else:
       pool = neighbors m from the <256 captured probe arcs, visible(m, T) ∧ visible_gen(m) ∧ visible_gen(link)
              ORDER BY w_role(link) DESC, coalesce(m.m_cache,m.m0) DESC, m.id DESC, link.id ASC
@@ -160,18 +156,12 @@ yields [] and count 0. Carry the captured row fields, not just IDs.
 Each non-hub resolution subquery uses a static role branch and its unique
 relationship id RANGE index. The directed relationship-index seek returns
 both physical endpoints once; only then verify their IDs against source_id
-and peer_id. No endpoint-bound Expand is permitted. The same five branches
-resolve HubArc tuples (map hub_id to source_id and neighbor_id to peer_id)
-in the daemon's bounded link-validation batch, retaining the tuple's role
-and endpoint/generation fields in the query output. Reuse already resolved
+and peer_id. No endpoint-bound Expand is permitted. Reuse already resolved
 non-hub physical links for policy checks; do not issue a second link read.
 Verify role, endpoints and
 copied generation fields, including HAS_MEMBER's source extraction generation,
 before accepting a cached link. Missing/mismatched links are discarded without
 refill and captured as stale; no cache row itself becomes a CSR arc.
-HubArc(hub_id,rank) bounds raw cache reads to 32 before filters, with at most
-32 additional per-role indexed physical-link checks. All this work stays
-inside the transaction and conservative structural budget.
 Entity witness thresholds are validated in the daemon-side policy stage below;
 the structural Entity predicates alone are not permission to serve.
 
@@ -254,32 +244,6 @@ CALL (v, probe_rows, degree_probe) {
       .generation, .source_extraction_generation, physical_link: l } AS selected_arc
   ORDER BY $w[type(l)] DESC, coalesce(m.m_cache,m.m0) DESC, m.id DESC, l.id ASC
   LIMIT $f
-  UNION
-  WITH v, degree_probe
-  WHERE degree_probe = 256
-  MATCH (arc:HubArc {hub_id: v.id})
-  WHERE arc.rank >= 0 AND arc.rank < 32
-  MATCH (m:Element {id: arc.neighbor_id})
-  WHERE (
-      (m:Episode AND m.time_utc <= $T)
-   OR (m:Fact AND m.generation = $g_e AND m.time_utc <= $T)
-   OR (m:Entity AND m.generation = $g_e AND m.visible_from_utc <= $T)
-   OR (m:Community AND m.generation = $g_c
-       AND m.source_extraction_generation = $g_e
-       AND m.visible_from_utc <= $T)
-  )
-  AND (
-       arc.stream = 'cache'
-    OR (arc.stream = 'extraction' AND arc.generation = $g_e)
-    OR (arc.stream = 'community' AND arc.generation = $g_c
-        AND arc.source_extraction_generation = $g_e)
-  )
-  AND NOT m.id IN $exclude
-  RETURN m AS candidate, arc { source_id: v.id, .link_id,
-      peer_id: arc.neighbor_id, .role, .generation,
-      .source_extraction_generation, physical_link: null } AS selected_arc
-  ORDER BY arc.rank ASC
-  LIMIT $f
 }
 WITH candidate, collect(DISTINCT selected_arc) AS selected_arcs
 RETURN candidate.id AS mid, coalesce(candidate.m_cache, candidate.m0) AS ordering_mass,
@@ -291,8 +255,7 @@ LIMIT $hop_budget
 Call with `$hop_budget=640` for hop 1 and `1232` for hop 2; this is the
 normative structural union truncation. hop-2 otherwise has the same shape.
 Policy-filter the result before it becomes H₁/H₂; sort selected_arcs by
-source_id/link_id before validation. Resolve only selected hub tuples by their
-recorded role's unique ID index, and reuse returned non-hub physical_link
+source_id/link_id before validation. Reuse returned physical_link
 records. Require at least one of those links
 from the eligible frontier to be current-policy eligible; otherwise discard
 the neighbor. Do not let a denied source/link enter the next frontier. Before
@@ -379,33 +342,6 @@ CALL (a, probe_rows, degree_probe) {
       row AS cached_row, l AS physical_link
   ORDER BY $w[type(l)] DESC, coalesce(b.m_cache,b.m0) DESC, b.id DESC, l.id ASC
   LIMIT $L
-  UNION
-  WITH a, degree_probe
-  WHERE degree_probe = 256
-  MATCH (arc:HubArc {hub_id: a.id})
-  WHERE arc.rank >= 0 AND arc.rank < 32
-  MATCH (b:Element {id: arc.neighbor_id})
-  WHERE b.id IN $ids
-  AND (
-      (b:Episode AND b.time_utc <= $T)
-   OR (b:Fact AND b.generation = $g_e AND b.time_utc <= $T)
-   OR (b:Entity AND b.generation = $g_e AND b.visible_from_utc <= $T)
-   OR (b:Community AND b.generation = $g_c
-       AND b.source_extraction_generation = $g_e
-       AND b.visible_from_utc <= $T)
-  )
-  AND (
-       arc.stream = 'cache'
-    OR (arc.stream = 'extraction' AND arc.generation = $g_e)
-    OR (arc.stream = 'community' AND arc.generation = $g_c
-        AND arc.source_extraction_generation = $g_e)
-  )
-  RETURN b.id AS bid, arc.role AS role, arc.link_id AS lid,
-      arc { source_id: a.id, .link_id, peer_id: arc.neighbor_id,
-            .role, .generation, .source_extraction_generation } AS cached_row,
-      null AS physical_link
-  ORDER BY arc.rank ASC
-  LIMIT $L
 }
 RETURN a.id, bid, role, lid, cached_row, physical_link
 ```
@@ -413,9 +349,7 @@ RETURN a.id, bid, role, lid, cached_row, physical_link
 After at most 256 ConductingArc inspections, the non-hub branch resolves
 fewer than 256 captured rows by per-role relationship-ID seeks, so its
 eligibility sort is bounded. Never re-expand the source's native adjacency.
-The hub branch reads
-at most 32 cached tuples, filters eligibility, returns at most `L`, and
-performs indexed Element lookups; it never scans native hub adjacency.
+A saturated source contributes no outgoing row.
 Each returned
 eligible row is one directed retained arc `a→b`. A
 physical conducting relationship is eligible from both endpoints, but each
@@ -427,9 +361,7 @@ most `|V|·L = 20,000`.
 The three structural queries and bounded policy/source batch reads form one
 read transaction. If it exceeds 100 ms, abandon the entire envelope and
 proceed with `ppr_used = false`; never solve a timeout-partial graph. The
-1,417,216 bound counts probe inspections plus bounded link/HubArc pool reads
-and hub physical-link verification (256 + 32 + 32 <= 512 for hubs;
-non-hubs at most 255 + 255 <= 512), not additional bounded policy/source
+1,417,216 bound counts probe inspections plus bounded link-ID reads (non-hubs at most 255 + 255 <= 512), not additional bounded policy/source
 lookups. Per checked Fact, at most 16 direct source Episodes plus 16
 non-synthesis support Facts and their at most 16 source Episodes each means
 at most 272 Episode ID lookups and 16 support Fact ID lookups before dedup.
@@ -453,7 +385,7 @@ not a cache per arbitrary T or a recall-time witness scan. Capture the exact
 threshold/version used for replay. Community summaries likewise require their
 policy-eligible rebuilt state. Content on a retained relationship is checked
 too, not just its endpoints. Indexed link-ID
-lookups verify cached ConductingArc/HubArc tuples still reference live links
+lookups verify cached ConductingArc tuples still reference live links
 with the recorded endpoints, role and generation before eligibility checks.
 
 Current policy applies even at historical T and to snapshot-exempt provenance.
@@ -463,14 +395,9 @@ result. Policy command text is not ingested instruction execution.
 
 ## 3. Hubs
 
-Nodes with DegreeProbe(n) = 256 use only ConductingArc for classification,
-never native adjacency. The shortlist built by the maintenance job for
-**every Element** with saturated physical conducting-arc degree consists
-of at most 32 indexed `HubArc` cache nodes. Their rank order is the same order
-used by expansion and final arc selection. If there is no shortlist (a hub
-formed since the last maintenance run), the hub selects no outgoing arc and
-its row follows the uniform dangling policy. Other rows may still select arcs
-into that hub; incoming arcs do not change its dangling outgoing row.
+A saturated probe never authorizes traversal over sampled rows or native
+adjacency. With no qualified shortlist, its outgoing row is dangling; other
+rows may still select incoming arcs. A bounded shortlist is deferred (D60).
 
 ## 4. Retained-row normalization
 
@@ -612,7 +539,7 @@ RRF itself is rank-based addition/division, not an exp/pow formula.
 Capture the candidate/index/coverage state, ConductingArc completeness and
 stage/source ordered probe rows/counts, stale-row exclusions and saturation
 decisions, earliest_allowed_from thresholds and their generation/
-policy versions, m_cache/HubArc/profile and utility snapshots, selected channels
+policy versions, m_cache/profile and utility snapshots, selected channels
 and degradation reasons, policy/config/generation versions, and actual CSR
 in addition to structure_revision (docs/05 §11).
 Policy changes force retry/rejection, not a determinism exception. Numeric
